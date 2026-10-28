@@ -1,0 +1,17 @@
+# Keep line endings stable across platforms.
+#
+# The repository is written with LF endings. Without this, Git's `core.autocrlf`
+# setting on Windows silently rewrites every text file to CRLF on checkout, which
+# produces noisy diffs and breaks the byte-for-byte reproducibility checks that the
+# artefact hashes depend on.
+* text=auto eol=lf
+
+# Binary files that must never be touched.
+*.wav binary
+*.m4a binary
+*.mp3 binary
+*.mp4 binary
+*.png binary
+*.pdf binary
+*.exe binary
+*.dll binary

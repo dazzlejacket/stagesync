@@ -1,0 +1,502 @@
+//! Background jobs: probing, analysis, export and hold-out verification.
+//!
+//! Every long operation runs on its own thread and reports back over a channel, so the
+//! window never blocks.
+//!
+//! The core pipeline has no cancellation channel: [`stagesync_core::pipeline::analyze`]
+//! only reports progress. The progress callback is therefore the one point at which a
+//! cancellation can be observed, and it is called at every stage boundary. The worker
+//! unwinds out of the call when the user cancels, so the work really does stop between
+//! stages instead of running to completion in the background.
+
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
+use std::thread;
+
+use stagesync_core::audio::{AudioDecoder, SourceMeta};
+use stagesync_core::export::{self, Artifact};
+use stagesync_core::matching::{AlignmentReport, LinearModel};
+use stagesync_core::pipeline::{analyze, AnalysisConfig, CancelToken, Progress, CANCELLED};
+use stagesync_core::render::{self, Layout, RenderOptions, RenderResult};
+use stagesync_core::verify::{verify_corrected, HoldoutResult, VerifyConfig};
+
+use crate::state::{stem, ExportSettings, TaskProgress};
+
+/// Payload used to unwind out of a core call when the user cancels.
+#[derive(Debug)]
+pub struct Cancelled;
+
+/// Why a background job stopped without producing a result.
+pub enum JobFailure {
+    /// The user cancelled the job.
+    Cancelled,
+    /// The job failed with this message.
+    Failed(String),
+}
+
+/// What an export produced.
+#[derive(Debug)]
+pub struct ExportOutcome {
+    /// Absolute path of every file that was written.
+    pub files: Vec<PathBuf>,
+    /// The source-aligned render of each source, by source index.
+    pub corrected: Vec<(usize, PathBuf)>,
+}
+
+/// A message from a background worker.
+pub enum JobEvent {
+    /// Progress of the running job.
+    Progress(TaskProgress),
+    /// A file finished being probed.
+    Probed {
+        /// The file that was probed.
+        path: PathBuf,
+        /// Its metadata, when it could be read.
+        meta: Option<SourceMeta>,
+        /// Why it could not be read, when it could not.
+        error: Option<String>,
+    },
+    /// The analysis finished successfully.
+    AnalysisFinished(Box<AlignmentReport>),
+    /// The analysis failed with this message.
+    AnalysisFailed(String),
+    /// The analysis was cancelled by the user.
+    AnalysisCancelled,
+    /// The export finished successfully.
+    ExportFinished(Box<ExportOutcome>),
+    /// The export failed with this message.
+    ExportFailed(String),
+    /// The export was cancelled by the user.
+    ExportCancelled,
+    /// A hold-out verification finished.
+    VerificationFinished {
+        /// The source it belongs to.
+        source_index: usize,
+        /// The measurement.
+        result: Box<HoldoutResult>,
+    },
+    /// A hold-out verification failed.
+    VerificationFailed {
+        /// The source it belongs to.
+        source_index: usize,
+        /// Why it failed.
+        message: String,
+    },
+}
+
+/// Install a panic hook that keeps the deliberate cancellation unwinds silent.
+///
+/// Without this, every cancelled run would print a panic message even though nothing
+/// went wrong.
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if info.payload().downcast_ref::<Cancelled>().is_some() {
+            return;
+        }
+        previous(info);
+    }));
+}
+
+/// Probe a file in the background so the file list can show its format.
+///
+/// Probing hashes the whole file, which is far too slow to do on the UI thread for a
+/// multi-hour recording.
+pub fn spawn_probe(tx: Sender<JobEvent>, path: PathBuf) {
+    thread::spawn(move || {
+        let event = match AudioDecoder::open(&path) {
+            Ok(decoder) => JobEvent::Probed {
+                path,
+                meta: Some(decoder.meta().clone()),
+                error: None,
+            },
+            Err(error) => JobEvent::Probed {
+                path,
+                meta: None,
+                error: Some(format!("{error:#}")),
+            },
+        };
+        let _ = tx.send(event);
+    });
+}
+
+/// Start the analysis of a reference against a list of sources.
+///
+/// Cancellation is cooperative and handled *inside* the core: the token is checked at
+/// every stage boundary and inside the decoding loop, so a cancel takes effect within
+/// about a second rather than at the end of a multi-hour file.
+pub fn spawn_analysis(
+    tx: Sender<JobEvent>,
+    reference: PathBuf,
+    sources: Vec<PathBuf>,
+    mut config: AnalysisConfig,
+    cancel: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        config.cancel = Some(CancelToken::from_flag(cancel.clone()));
+        let sender = tx.clone();
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(move || {
+            let mut progress = |p: Progress| {
+                let _ = sender.send(JobEvent::Progress(TaskProgress {
+                    label: p.stage.label().to_string(),
+                    message: p.message,
+                    fraction: p.fraction,
+                }));
+            };
+            analyze(&reference, &sources, &config, &mut progress)
+        }));
+
+        let event = match outcome {
+            Ok(Ok(report)) => {
+                log::info!("analysis finished");
+                JobEvent::AnalysisFinished(Box::new(report))
+            }
+            Ok(Err(error)) => {
+                let text = format!("{error:#}");
+                if text.contains(CANCELLED) {
+                    log::info!("analysis cancelled");
+                    JobEvent::AnalysisCancelled
+                } else {
+                    log::warn!("analysis failed: {text}");
+                    JobEvent::AnalysisFailed(text)
+                }
+            }
+            Err(payload) => {
+                if payload.downcast_ref::<Cancelled>().is_some() {
+                    log::info!("analysis cancelled");
+                    JobEvent::AnalysisCancelled
+                } else {
+                    log::error!("the analysis thread panicked");
+                    JobEvent::AnalysisFailed(format!(
+                        "the analysis thread panicked: {}",
+                        panic_text(&payload)
+                    ))
+                }
+            }
+        };
+        let _ = tx.send(event);
+    });
+}
+
+/// Start the export of the corrected audio and the machine-readable artefacts.
+pub fn spawn_export(
+    tx: Sender<JobEvent>,
+    report: AlignmentReport,
+    settings: ExportSettings,
+    cancel: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let event = {
+            let mut progress = |update: TaskProgress| {
+                let _ = tx.send(JobEvent::Progress(update));
+            };
+            match export_report(&report, &settings, &cancel, &mut progress) {
+                Ok(outcome) => {
+                    log::info!("export finished");
+                    JobEvent::ExportFinished(Box::new(outcome))
+                }
+                Err(JobFailure::Cancelled) => {
+                    log::info!("export cancelled");
+                    JobEvent::ExportCancelled
+                }
+                Err(JobFailure::Failed(message)) => {
+                    log::warn!("export failed: {message}");
+                    JobEvent::ExportFailed(message)
+                }
+            }
+        };
+        let _ = tx.send(event);
+    });
+}
+
+/// Verify a rendered correction against the reference with the hold-out method.
+///
+/// This uses a different estimator (GCC-PHAT on the raw waveform) from the one that
+/// fitted the model, so it is an independent check rather than a restatement.
+pub fn spawn_verification(
+    tx: Sender<JobEvent>,
+    source_index: usize,
+    corrected: PathBuf,
+    reference: PathBuf,
+    model: LinearModel,
+    source_duration: f64,
+) {
+    thread::spawn(move || {
+        let event = match verify_corrected(
+            &corrected,
+            &reference,
+            &model,
+            source_duration,
+            &VerifyConfig::default(),
+        ) {
+            Ok(result) => JobEvent::VerificationFinished {
+                source_index,
+                result: Box::new(result),
+            },
+            Err(error) => JobEvent::VerificationFailed {
+                source_index,
+                message: format!("{error:#}"),
+            },
+        };
+        let _ = tx.send(event);
+    });
+}
+
+/// Render the corrected audio and write every machine-readable artefact.
+///
+/// This is the whole export step. The window drives it on a background thread and the
+/// integration tests drive it directly.
+///
+/// `cancel` is checked between output files: a render that has already started is
+/// allowed to finish, because stopping it half way would leave a truncated WAV behind.
+pub fn export_report(
+    report: &AlignmentReport,
+    settings: &ExportSettings,
+    cancel: &AtomicBool,
+    on_progress: &mut dyn FnMut(TaskProgress),
+) -> Result<ExportOutcome, JobFailure> {
+    let out = PathBuf::from(settings.dir.trim());
+    std::fs::create_dir_all(&out).map_err(|error| {
+        JobFailure::Failed(format!(
+            "failed to create the output directory {}: {error}",
+            out.display()
+        ))
+    })?;
+
+    let mut options = RenderOptions {
+        layout: settings.layout,
+        sample_rate: settings.sample_rate,
+        format: settings.format,
+        ..RenderOptions::default()
+    };
+    if options.layout != Layout::SourceAligned && options.sample_rate.is_none() {
+        options.sample_rate = Some(report.reference.sample_rate);
+    }
+
+    let mut renders: Vec<RenderResult> = Vec::new();
+    let mut corrected: Vec<(usize, PathBuf)> = Vec::new();
+    let mut step = 0usize;
+
+    // The number of files the chosen layout will produce, so the progress bar is honest.
+    let expected = match options.layout {
+        Layout::SourceAligned | Layout::ReferenceTimelinePerSource => report.sources.len(),
+        Layout::ReferenceTimelineMerged => 1,
+    };
+
+    match options.layout {
+        Layout::SourceAligned => {
+            for (index, alignment) in report.sources.iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(JobFailure::Cancelled);
+                }
+                let Some(model) = alignment.calibrated_model.or(alignment.direct_model) else {
+                    continue;
+                };
+                step += 1;
+                report_progress(
+                    &mut *on_progress,
+                    step,
+                    expected,
+                    format!("rendering {}", alignment.source.file_name),
+                );
+                let path = out.join(format!(
+                    "{}_corrected.wav",
+                    stem(&alignment.source.file_name)
+                ));
+                render::prepare_output(&path)
+                    .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+                let result =
+                    render::render_source_aligned(&alignment.source.path, &model, &path, &options)
+                        .map_err(|error| {
+                            JobFailure::Failed(format!(
+                                "failed to render {}: {error:#}",
+                                path.display()
+                            ))
+                        })?;
+                corrected.push((index, absolute(&result.path)));
+                renders.push(result);
+            }
+        }
+        Layout::ReferenceTimelinePerSource => {
+            for alignment in report.sources.iter() {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(JobFailure::Cancelled);
+                }
+                let Some(model) = alignment.calibrated_model.or(alignment.direct_model) else {
+                    continue;
+                };
+                step += 1;
+                report_progress(
+                    &mut *on_progress,
+                    step,
+                    expected,
+                    format!("placing {}", alignment.source.file_name),
+                );
+                let path = out.join(format!(
+                    "{}_timeline.wav",
+                    stem(&alignment.source.file_name)
+                ));
+                render::prepare_output(&path)
+                    .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+                let result = render::render_reference_timeline(
+                    &alignment.source.path,
+                    &model,
+                    report.timeline_duration,
+                    &path,
+                    &options,
+                )
+                .map_err(|error| {
+                    JobFailure::Failed(format!("failed to render {}: {error:#}", path.display()))
+                })?;
+                renders.push(result);
+            }
+        }
+        Layout::ReferenceTimelineMerged => {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(JobFailure::Cancelled);
+            }
+            let sources: Vec<(PathBuf, LinearModel)> = report
+                .sources
+                .iter()
+                .filter_map(|alignment| {
+                    alignment
+                        .calibrated_model
+                        .or(alignment.direct_model)
+                        .map(|model| (alignment.source.path.clone(), model))
+                })
+                .collect();
+            if sources.is_empty() {
+                return Err(JobFailure::Failed(
+                    "no source could be aligned, so no timeline was rendered".to_string(),
+                ));
+            }
+            step += 1;
+            report_progress(
+                &mut *on_progress,
+                step,
+                expected,
+                "merging the timeline".to_string(),
+            );
+            let path = out.join("timeline_merged.wav");
+            render::prepare_output(&path)
+                .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+            let result =
+                render::render_merged_timeline(&sources, report.timeline_duration, &path, &options)
+                    .map_err(|error| {
+                        JobFailure::Failed(format!(
+                            "failed to render {}: {error:#}",
+                            path.display()
+                        ))
+                    })?;
+            renders.push(result);
+        }
+    }
+
+    let mut artefacts: Vec<Artifact> = Vec::new();
+
+    let syncmap = out.join("syncmap.csv");
+    export::write_syncmap_csv(&syncmap, report)
+        .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+    artefacts.push(artifact("syncmap", &syncmap));
+
+    let segments = out.join("segments.csv");
+    export::write_segments_csv(&segments, report)
+        .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+    artefacts.push(artifact("segments", &segments));
+
+    let graph = out.join("drift_graph.svg");
+    export::write_drift_graph(&graph, report)
+        .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+    artefacts.push(artifact("drift_graph", &graph));
+
+    let summary = out.join("timeline.txt");
+    export::write_timeline_summary(&summary, report)
+        .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+    artefacts.push(artifact("timeline_summary", &summary));
+
+    let plan = out.join("plan.json");
+    let plan_json = serde_json::to_string_pretty(report).map_err(|error| {
+        JobFailure::Failed(format!("failed to serialise the analysis: {error}"))
+    })?;
+    std::fs::write(&plan, plan_json).map_err(|error| {
+        JobFailure::Failed(format!("failed to write {}: {error}", plan.display()))
+    })?;
+    artefacts.push(artifact("plan", &plan));
+
+    for result in &renders {
+        artefacts.push(artifact("corrected_audio", &result.path));
+    }
+
+    let report_path = out.join("report.json");
+    export::write_report_json(&report_path, report, artefacts.clone())
+        .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+    artefacts.push(artifact("report", &report_path));
+
+    let files = artefacts.iter().map(|a| absolute(&a.path)).collect();
+
+    on_progress(TaskProgress {
+        label: "Exporting".to_string(),
+        message: "all artefacts written".to_string(),
+        fraction: 1.0,
+    });
+
+    Ok(ExportOutcome { files, corrected })
+}
+
+/// Send one progress notification for the export.
+fn report_progress(
+    on_progress: &mut dyn FnMut(TaskProgress),
+    step: usize,
+    expected: usize,
+    message: String,
+) {
+    let fraction = if expected == 0 {
+        1.0
+    } else {
+        (step as f64 / expected as f64).min(1.0)
+    };
+    on_progress(TaskProgress {
+        label: "Exporting".to_string(),
+        message,
+        fraction,
+    });
+}
+
+/// Describe a written file.
+fn artifact(kind: &str, path: &Path) -> Artifact {
+    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    Artifact {
+        kind: kind.to_string(),
+        path: path.to_path_buf(),
+        bytes,
+    }
+}
+
+/// The absolute path of a file, resolved against the file system when possible.
+///
+/// Windows' `canonicalize` answers with a verbatim path (`\\?\C:\...`). The prefix is
+/// removed, because the paths are shown to the user and pasted into other tools.
+fn absolute(path: &Path) -> PathBuf {
+    let resolved = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+    let text = resolved.to_string_lossy();
+    match text.strip_prefix("\\\\?\\") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => resolved,
+    }
+}
+
+/// The message carried by a panic payload.
+fn panic_text(payload: &(dyn Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "unknown cause".to_string()
+    }
+}
