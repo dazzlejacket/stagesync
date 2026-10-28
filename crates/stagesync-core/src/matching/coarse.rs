@@ -8,9 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::dsp::{find_peaks, ncc_correlate};
+use super::dsp::{find_peaks, ncc_correlate, ncc_correlate_masked};
 use super::model::LinearModel;
-use super::regression::robust_fit;
 use crate::features::Envelope;
 
 /// Tunables for the coarse lock.
@@ -194,7 +193,11 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
 
     for (window_index, &pos) in positions.iter().enumerate() {
         let query = &src_dec[pos..pos + window_len];
-        let corr = ncc_correlate(query, &ref_dec);
+        // The silent part of a window carries no information; excluding it from both
+        // sides of the comparison keeps a recorder gap from dragging the correlation
+        // peak away from the true position.
+        let mask = &src_quiet_dec[pos..pos + window_len];
+        let corr = ncc_correlate_masked(query, &ref_dec, Some(mask));
         let peaks = find_peaks(&corr, config.max_candidates, min_sep_samples.max(1));
         let centre = (pos as f64 + window_len as f64 / 2.0) / rate;
 
@@ -209,7 +212,13 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
             continue;
         }
         for (rank, p) in peaks.iter().enumerate() {
-            let lag_s = p.lag as f64 / rate;
+            // The correlation is between the window and the whole reference, so the
+            // peak's lag is measured from the **start of the window**, not from the
+            // start of the recording. The offset of the source within the reference is
+            // the lag minus the window's own source position; without this correction
+            // every window reports its position back as part of the offset, and no two
+            // windows ever agree.
+            let lag_s = (p.lag as f64 - pos as f64) / rate;
             raw.push((lag_s, p.value, p.zscore, window_index));
             if rank == 0 {
                 window_details.push(CoarseWindow {
@@ -238,7 +247,9 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
     let mut candidates: Vec<CoarseCandidate> = clusters
         .into_iter()
         .map(|cluster| {
-            let lag_secs = cluster.iter().map(|c| c.0).sum::<f64>() / cluster.len() as f64;
+            // The median, not the mean: one window that latched onto the wrong place
+            // would otherwise drag the whole cluster's offset with it.
+            let lag_secs = median(cluster.iter().map(|c| c.0).collect());
             let mean_score = cluster.iter().map(|c| c.1).sum::<f32>() / cluster.len() as f32;
 
             // One vote per distinct window, using that window's candidate nearest the
@@ -319,21 +330,22 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
     match &chosen {
         Some(c) if whole_file_anchored || c.votes >= 2 => {
             locked = true;
-            // Fit a model: source time of each window centre -> reference time.
-            let points: Vec<(f64, f64)> = c
-                .windows
-                .iter()
-                .filter(|w| w.source_time > 0.0)
-                .map(|w| (w.source_time, w.source_time + w.lag_secs))
-                .collect();
-            if points.len() >= 2 {
-                model = robust_fit(&points, 3.0, 5).map(|f| f.model());
-            }
-            if model.is_none() {
-                // A single agreeing window still fixes the offset; the rate is then
-                // measured by the fine stage.
-                model = Some(LinearModel::new(1.0, c.lag_secs));
-            }
+            // The coarse stage answers **where** this recording lives, not **how fast its
+            // clock ran**. Its measurements are the lags of a handful of 60 s windows read
+            // off a 20 Hz decimated envelope, so they are quantised at 50 ms. Fitting a
+            // *rate* to them turns a single 1 s lag error into a 4 % rate error — which
+            // then displaces every fine probe and makes the whole alignment fail. The
+            // ppm-level drift is measured by the fine stage instead, where hundreds of
+            // probes are available.
+            //
+            // The offset comes from the most reliable measurement there is: the
+            // whole-file correlation, which uses every sample of both recordings at once.
+            // When that did not anchor the lock, the cluster's own consensus is used.
+            let offset = match full_lag {
+                Some(lag) if whole_file_anchored => lag,
+                _ => c.lag_secs,
+            };
+            model = Some(LinearModel::new(1.0, offset));
         }
         Some(c) => {
             reason = Some(format!(
@@ -374,4 +386,17 @@ fn decimate<T: Copy>(values: &[T], n: usize) -> Vec<T> {
         return values.to_vec();
     }
     values.iter().step_by(n).copied().collect()
+}
+
+/// The median of a set of values.
+///
+/// Used instead of the mean wherever a single wrong measurement would otherwise drag
+/// the result: a mean of lags lets one window that latched onto the wrong place move
+/// the consensus.
+fn median(mut values: Vec<f64>) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    values[values.len() / 2]
 }

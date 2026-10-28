@@ -112,12 +112,14 @@ pub fn analyse_source(
     let first = trusted[0];
     let last = trusted[trusted.len() - 1];
 
-    // A span between two trusted probes is only a *gap* when it is much longer than the
-    // probe spacing itself. A fixed threshold is wrong: with a 15 s probe hop every
-    // inter-probe span would look like a gap, and the timeline would be reported as a
-    // string of holes instead of continuous coverage. The threshold therefore follows
-    // the spacing the matcher actually achieved.
-    let spacing = median_probe_spacing(&trusted, options.expected_probe_spacing_secs);
+    // A span between two trusted probes is only a *gap* when the recorder produced
+    // nothing there, or when it is much longer than the probe spacing itself.
+    //
+    // The spacing threshold follows the spacing the matcher actually achieved, but it
+    // is estimated from a low percentile of the observed spacings: a genuine hole in
+    // the recording makes one spacing very large, and a median that followed it would
+    // raise the threshold above the hole and hide it.
+    let spacing = typical_probe_spacing(&sorted, options.expected_probe_spacing_secs);
     let gap_threshold = options.gap_threshold_secs.max(2.5 * spacing);
 
     // Leading region: source material before the first confident probe.
@@ -170,47 +172,90 @@ pub fn analyse_source(
         let ref_start = a.reference_time;
         let ref_end = b.reference_time;
 
-        if src_gap > gap_threshold {
-            let silent = source_silent_between(source_env, a.source_time, b.source_time);
-            let kind = if options.gap_requires_silence && silent {
-                SegmentKind::RecorderGap
-            } else {
-                SegmentKind::LowConfidence
-            };
-            let note = match kind {
-                SegmentKind::RecorderGap => format!(
-                    "recorder produced no usable signal for {:.1} s here",
-                    src_gap
-                ),
-                _ => format!(
-                    "no confident match for {:.1} s of this span; the model is extrapolated",
-                    src_gap
-                ),
-            };
-            segments.push(Segment {
-                kind,
-                source_index: Some(source_index),
-                source_start: Some(a.source_time),
-                source_end: Some(b.source_time),
-                reference_start: ref_start,
-                reference_end: ref_end,
-                confidence: Confidence::new(0.25, UncertaintyReason::LowPeakSeparation),
-                note,
-            });
+        // Where did the recorder produce no usable signal? This is direct evidence of a
+        // hole, unlike the spacing of the probes, which only says that nothing was
+        // measured there.
+        let holes: Vec<(f64, f64)> = if options.gap_requires_silence {
+            silent_intervals(source_env, a.source_time, b.source_time)
+                .into_iter()
+                .filter(|(s, e)| e - s >= options.gap_threshold_secs)
+                .collect()
         } else {
-            segments.push(Segment {
-                kind: SegmentKind::Matched,
-                source_index: Some(source_index),
-                source_start: Some(a.source_time),
-                source_end: Some(b.source_time),
-                reference_start: ref_start,
-                reference_end: ref_end,
-                confidence: Confidence::new(
+            Vec::new()
+        };
+
+        if holes.is_empty() {
+            if src_gap > gap_threshold {
+                // Nothing was measured here and the recorder was not silent: the model
+                // is extrapolating across material it has never seen.
+                segments.push(Segment {
+                    kind: SegmentKind::LowConfidence,
+                    source_index: Some(source_index),
+                    source_start: Some(a.source_time),
+                    source_end: Some(b.source_time),
+                    reference_start: ref_start,
+                    reference_end: ref_end,
+                    confidence: Confidence::new(0.25, UncertaintyReason::LowPeakSeparation),
+                    note: format!(
+                        "no confident match for {:.1} s of this span; the model is extrapolated",
+                        src_gap
+                    ),
+                });
+            } else {
+                segments.push(Segment {
+                    kind: SegmentKind::Matched,
+                    source_index: Some(source_index),
+                    source_start: Some(a.source_time),
+                    source_end: Some(b.source_time),
+                    reference_start: ref_start,
+                    reference_end: ref_end,
+                    confidence: Confidence::new(
+                        (a.confidence.score + b.confidence.score) / 2.0,
+                        UncertaintyReason::None,
+                    ),
+                    note: String::new(),
+                });
+            }
+            continue;
+        }
+
+        // The span contains holes. The material between them was matched, so it is
+        // reported as matched; the holes themselves are reported as what they are.
+        // The hole is never stretched to cover the good material around it.
+        let mut cursor = a.source_time;
+        for (hole_start, hole_end) in holes {
+            if hole_start > cursor + SEGMENT_EPSILON {
+                segments.push(matched_segment(
+                    source_index,
+                    cursor,
+                    hole_start,
+                    map,
                     (a.confidence.score + b.confidence.score) / 2.0,
-                    UncertaintyReason::None,
+                ));
+            }
+            segments.push(Segment {
+                kind: SegmentKind::RecorderGap,
+                source_index: Some(source_index),
+                source_start: Some(hole_start),
+                source_end: Some(hole_end),
+                reference_start: map.reference_time(hole_start),
+                reference_end: map.reference_time(hole_end),
+                confidence: Confidence::new(0.0, UncertaintyReason::LowEnergy),
+                note: format!(
+                    "the recorder produced no usable signal for {:.1} s here",
+                    hole_end - hole_start
                 ),
-                note: String::new(),
             });
+            cursor = hole_end;
+        }
+        if b.source_time > cursor + SEGMENT_EPSILON {
+            segments.push(matched_segment(
+                source_index,
+                cursor,
+                b.source_time,
+                map,
+                (a.confidence.score + b.confidence.score) / 2.0,
+            ));
         }
     }
 
@@ -285,25 +330,75 @@ pub fn analyse_source(
     (segments, coverage)
 }
 
-/// `true` when the source envelope is quiet throughout the interval.
-fn source_silent_between(env: &Envelope, t0: f64, t1: f64) -> bool {
+/// The smallest difference between two segment boundaries that is still meaningful.
+///
+/// Adjacent boundaries are computed from slightly different source positions, so their
+/// reference times differ by a few microseconds. Without a tolerance those rounding
+/// differences would produce slivers of a segment.
+const SEGMENT_EPSILON: f64 = 0.001;
+
+/// Build a matched segment between two source times.
+fn matched_segment(
+    source_index: usize,
+    source_start: f64,
+    source_end: f64,
+    map: &TimeMap,
+    confidence: f32,
+) -> Segment {
+    Segment {
+        kind: SegmentKind::Matched,
+        source_index: Some(source_index),
+        source_start: Some(source_start),
+        source_end: Some(source_end),
+        reference_start: map.reference_time(source_start),
+        reference_end: map.reference_time(source_end),
+        confidence: Confidence::new(confidence, UncertaintyReason::None),
+        note: String::new(),
+    }
+}
+
+/// The stretches between two times in which the source produced no usable signal.
+///
+/// These are the holes in the recording: the recorder was running, but nothing came out
+/// of it. They are found from the envelope's quiet flags, which is direct evidence, and
+/// not from the spacing of the probes, which only says that nothing was measured there.
+fn silent_intervals(env: &Envelope, t0: f64, t1: f64) -> Vec<(f64, f64)> {
     let lo = env.index_at(t0);
     let hi = env.index_at(t1).min(env.len().saturating_sub(1));
     if hi <= lo {
-        return false;
+        return Vec::new();
     }
-    env.quiet[lo..=hi].iter().all(|q| *q)
+
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    let mut start: Option<usize> = None;
+    for i in lo..=hi {
+        let quiet = env.quiet.get(i).copied().unwrap_or(false);
+        match (quiet, start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                out.push((s as f64 / env.rate_hz, i as f64 / env.rate_hz));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        out.push((s as f64 / env.rate_hz, (hi + 1) as f64 / env.rate_hz));
+    }
+    out
 }
 
-/// The median spacing between consecutive trusted probes, in seconds.
+/// The typical spacing between consecutive measured points, in seconds.
 ///
-/// This is the scale at which the matcher was actually working, so it is the right
-/// reference for deciding whether a span between two probes is a genuine break.
-fn median_probe_spacing(trusted: &[&MatchPoint], fallback: f64) -> f64 {
-    if trusted.len() < 2 {
+/// A low percentile of the observed spacings is used rather than the median. The probe
+/// grid is uniform, so most spacings equal the hop; a genuine hole in the recording
+/// makes one spacing much larger, and a median that followed it would push the gap
+/// threshold above the hole and hide it.
+fn typical_probe_spacing(points: &[&MatchPoint], fallback: f64) -> f64 {
+    if points.len() < 2 {
         return fallback.max(0.0);
     }
-    let mut gaps: Vec<f64> = trusted
+    let mut gaps: Vec<f64> = points
         .windows(2)
         .map(|w| (w[1].source_time - w[0].source_time).abs())
         .filter(|g| *g > 0.0)
@@ -312,7 +407,8 @@ fn median_probe_spacing(trusted: &[&MatchPoint], fallback: f64) -> f64 {
         return fallback.max(0.0);
     }
     gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    gaps[gaps.len() / 2]
+    let index = ((gaps.len() as f64 * 0.25).round() as usize).min(gaps.len() - 1);
+    gaps[index]
 }
 
 /// The smallest gap that is treated as a genuine hole in the merged timeline.

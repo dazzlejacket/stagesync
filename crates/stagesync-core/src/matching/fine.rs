@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::dsp::{find_peaks, ncc_correlate, parabolic_offset};
+use super::dsp::{find_peaks, ncc_correlate, ncc_correlate_masked, parabolic_offset};
 use super::model::{LinearModel, TimeMap};
 use super::regression::robust_fit;
 use super::{Confidence, MatchMethod, MatchPoint, UncertaintyReason};
@@ -121,7 +121,6 @@ pub fn fine_match(
             probe += options.hop_secs * rate;
             continue;
         }
-
         // Reference region around the model prediction.
         let predicted = model.reference_time(probe / rate);
         let region_start = predicted - (half as f64 / rate) - options.search_secs;
@@ -139,7 +138,13 @@ pub fn fine_match(
         let region = &reference.norm[i0..=i1];
         let region_start_time = i0 as f64 / rate;
 
-        let corr = ncc_correlate(window, region);
+        // The silent part of the probe window carries no information, and comparing it
+        // against the reference's music would both weaken the correlation and drag the
+        // peak away from the true correspondence. The same frames are excluded from the
+        // reference's side of the comparison, so the two are always compared over the
+        // same material.
+        let mask = &source.quiet[p - half..p + half];
+        let corr = ncc_correlate_masked(window, region, Some(mask));
         let min_sep = ((options.search_secs * rate * 0.5) as i64).max(1);
         let peaks = find_peaks(&corr, 1, min_sep);
         let Some(peak) = peaks.first() else {
@@ -202,33 +207,43 @@ fn score_point(
 fn finish(points: Vec<MatchPoint>, skipped: usize, skip_reasons: SkipReasons) -> FineResult {
     let measured = points.len();
 
-    // Fit using the confident points; fall back to all points if too few are confident.
-    let confident: Vec<(f64, f64)> = points
+    // Fit using the confident points only. Falling back to *all* the points when there
+    // are few confident ones would put the very measurements that were rejected as
+    // unreliable into the model, and a fit built on those is worse than no fit at all:
+    // it looks like a measurement, it is not.
+    let confident_indices: Vec<usize> = points
         .iter()
-        .filter(|p| p.confidence.is_trustworthy())
-        .map(|p| (p.source_time, p.reference_time))
+        .enumerate()
+        .filter(|(_, p)| p.confidence.is_trustworthy())
+        .map(|(i, _)| i)
         .collect();
-    let fit_points: Vec<(f64, f64)> = if confident.len() >= 5 {
-        confident
-    } else {
-        points
-            .iter()
-            .map(|p| (p.source_time, p.reference_time))
-            .collect()
-    };
+    let confident: Vec<(f64, f64)> = confident_indices
+        .iter()
+        .map(|&i| (points[i].source_time, points[i].reference_time))
+        .collect();
 
-    let fit = robust_fit(&fit_points, 3.0, 6);
+    // Three points is the minimum for a line to mean anything: two would fix the slope
+    // exactly and could not survive a single wrong measurement.
+    let fit = if confident.len() >= 3 {
+        robust_fit(&confident, 3.0, 6)
+    } else {
+        None
+    };
     let model = fit.as_ref().map(|f| f.model());
 
     let mut out = points;
     if let Some(f) = &fit {
-        let inliers = f.inliers.clone();
-        for (i, p) in out.iter_mut().enumerate() {
-            p.residual_ms = (f.slope * p.source_time + f.intercept - p.reference_time) * 1000.0;
-            if !inliers.get(i).copied().unwrap_or(true) {
-                // Mark points the robust fit rejected.
-                p.confidence.score = p.confidence.score.min(0.3);
-                p.confidence.reason = UncertaintyReason::Outlier;
+        for p in out.iter_mut() {
+            // "Measured minus model": a positive residual means the measurement sits
+            // later in the reference than the model predicts.
+            p.residual_ms = (p.reference_time - (f.slope * p.source_time + f.intercept)) * 1000.0;
+        }
+        // Mark the points the robust fit rejected. The inlier mask is indexed by the
+        // *fitted* points, so it has to be mapped back through `confident_indices`.
+        for (k, &i) in confident_indices.iter().enumerate() {
+            if !f.inliers.get(k).copied().unwrap_or(true) {
+                out[i].confidence.score = out[i].confidence.score.min(0.3);
+                out[i].confidence.reason = UncertaintyReason::Outlier;
             }
         }
     }
@@ -255,12 +270,16 @@ fn finish(points: Vec<MatchPoint>, skipped: usize, skip_reasons: SkipReasons) ->
     }
 }
 
-/// Percentile / max statistics of a residual series, in milliseconds.
+/// Absolute residual statistics of a residual series, in milliseconds.
+///
+/// The statistics are taken over the **absolute** residuals: a residual of -3 ms and one
+/// of +3 ms are the same disagreement with the model, and a report that showed the
+/// signed median would hide a bias that the maximum reveals.
 pub fn residual_stats(residuals: &[f64]) -> (f64, f64, f64) {
     if residuals.is_empty() {
         return (0.0, 0.0, 0.0);
     }
-    let mut sorted = residuals.to_vec();
+    let mut sorted: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let p50 = sorted[sorted.len() / 2];
     let p95 = sorted[((sorted.len() as f64 * 0.95).round() as usize).min(sorted.len() - 1)];

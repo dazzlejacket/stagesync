@@ -198,10 +198,23 @@ impl EnvelopeExtractor {
             quiet = db.iter().map(|v| *v < quiet_threshold_db).collect();
         }
 
-        let norm = local_zscore(
+        // The local statistics are taken from the frames that carry signal. A stretch of
+        // silence inside the window would otherwise drag the mean down and inflate the
+        // spread, which distorts the *shape* of the envelope around the silence and drags
+        // the correlation peak away from the true correspondence.
+        // The local statistics are taken from the frames that carry signal. A stretch of
+        // silence inside the window would otherwise drag the mean down and inflate the
+        // spread, which distorts the *shape* of the envelope around the silence and drags
+        // the correlation peak away from the true correspondence.
+        //
+        // The silent frames themselves are excluded from the correlation as well (see
+        // `ncc_correlate_masked`), so the bias this introduces into the statistics never
+        // reaches the measured correspondence.
+        let norm = local_zscore_masked(
             &db,
             (self.config.zscore_window_s * rate_hz).round().max(1.0) as usize,
             self.config.zscore_clip,
+            &quiet,
         );
 
         let duration_secs = self.samples_seen as f64 / self.sample_rate as f64;
@@ -254,25 +267,89 @@ pub fn percentile(values: &[f32], p: f64) -> f32 {
 }
 
 /// Locally z-score a signal using a centred window of `half_window` frames.
+///
+/// Every frame is scored against the statistics of the whole window. See
+/// [`local_zscore_masked`] for the variant that excludes silent frames from those
+/// statistics.
 pub fn local_zscore(values: &[f32], half_window: usize, clip: f32) -> Vec<f32> {
+    local_zscore_masked(values, half_window, clip, &[])
+}
+
+/// The minimum number of signal frames a local window must hold before the local
+/// statistics are taken from the signal frames alone.
+const MIN_SIGNAL_FRAMES: usize = 8;
+
+/// Locally z-score a signal, excluding silent frames from the local statistics.
+///
+/// The local mean and spread are computed over the frames that are *not* marked quiet.
+/// This matters whenever a recording contains a stretch of silence: with the silence
+/// included, the mean of the window is dragged down and the spread is inflated, so the
+/// music around the silence is scored against the wrong statistics. The resulting shape
+/// no longer matches the reference's shape, and the correlation peak moves — which shows
+/// up as a correspondence that is wrong by seconds, or as no correspondence at all.
+///
+/// The silent frames themselves are still scored against the statistics of the signal
+/// around them, so they read as strongly negative: silence is many standard deviations
+/// below the local music, which is exactly what it is.
+///
+/// The matcher excludes those frames from the correlation itself, so the bias this
+/// introduces into the *statistics* never reaches the measured correspondence.
+///
+/// If the window holds too few signal frames to give a stable estimate, the statistics
+/// of the whole window are used instead.
+pub fn local_zscore_masked(
+    values: &[f32],
+    half_window: usize,
+    clip: f32,
+    quiet: &[bool],
+) -> Vec<f32> {
     let n = values.len();
     let mut out = vec![0.0f32; n];
     if n == 0 {
         return out;
     }
-    let mut prefix = vec![0.0f64; n + 1];
-    let mut prefix_sq = vec![0.0f64; n + 1];
+
+    // Prefix sums over the signal frames, and over all frames as a fallback.
+    let mut pre_sum = vec![0.0f64; n + 1];
+    let mut pre_sq = vec![0.0f64; n + 1];
+    let mut pre_count = vec![0usize; n + 1];
+    let mut pre_all_sum = vec![0.0f64; n + 1];
+    let mut pre_all_sq = vec![0.0f64; n + 1];
     for i in 0..n {
         let v = values[i] as f64;
-        prefix[i + 1] = prefix[i] + v;
-        prefix_sq[i + 1] = prefix_sq[i] + v * v;
+        pre_all_sum[i + 1] = pre_all_sum[i] + v;
+        pre_all_sq[i + 1] = pre_all_sq[i] + v * v;
+        let is_quiet = quiet.get(i).copied().unwrap_or(false);
+        pre_count[i + 1] = pre_count[i] + usize::from(!is_quiet);
+        if !is_quiet {
+            pre_sum[i + 1] = pre_sum[i] + v;
+            pre_sq[i + 1] = pre_sq[i] + v * v;
+        } else {
+            pre_sum[i + 1] = pre_sum[i];
+            pre_sq[i + 1] = pre_sq[i];
+        }
     }
+
     for i in 0..n {
         let lo = i.saturating_sub(half_window);
         let hi = (i + half_window).min(n - 1);
-        let count = (hi - lo + 1) as f64;
-        let sum = prefix[hi + 1] - prefix[lo];
-        let sum_sq = prefix_sq[hi + 1] - prefix_sq[lo];
+        let all_count = (hi - lo + 1) as f64;
+
+        let signal_count = pre_count[hi + 1] - pre_count[lo];
+        let (sum, sum_sq, count) = if signal_count >= MIN_SIGNAL_FRAMES {
+            (
+                pre_sum[hi + 1] - pre_sum[lo],
+                pre_sq[hi + 1] - pre_sq[lo],
+                signal_count as f64,
+            )
+        } else {
+            (
+                pre_all_sum[hi + 1] - pre_all_sum[lo],
+                pre_all_sq[hi + 1] - pre_all_sq[lo],
+                all_count,
+            )
+        };
+
         let mean = sum / count;
         let var = (sum_sq / count - mean * mean).max(0.0);
         let std = var.sqrt();

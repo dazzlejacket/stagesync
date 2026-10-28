@@ -108,6 +108,24 @@ pub struct Peak {
 /// The correlation is normalised by the energy of the overlapping portion of both signals,
 /// so a match in a loud passage is not scored higher than the same match in a quiet one.
 pub fn ncc_correlate(query: &[f32], reference: &[f32]) -> Correlation {
+    ncc_correlate_masked(query, reference, None)
+}
+
+/// Normalised cross-correlation with some of the query's samples excluded.
+///
+/// `mask` holds one entry per query sample; `true` means "this sample carries no
+/// information". An excluded sample contributes to neither the correlation nor the
+/// normalisation, and the reference's energy is measured over exactly the same
+/// positions — so the two sides are always compared over the same material.
+///
+/// This is what makes a stretch of silence safe to leave in the recording. Without it,
+/// the silent part of a probe window is compared against music in the reference, which
+/// both corrupts the peak and drags the peak away from the true correspondence.
+pub fn ncc_correlate_masked(
+    query: &[f32],
+    reference: &[f32],
+    mask: Option<&[bool]>,
+) -> Correlation {
     let la = query.len();
     let lb = reference.len();
     if la == 0 || lb == 0 {
@@ -120,6 +138,8 @@ pub fn ncc_correlate(query: &[f32], reference: &[f32]) -> Correlation {
     }
 
     let n = next_pow2(la + lb);
+    let lag_min = -(la as i64 - 1);
+    let total = la + lb - 1;
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(n);
     let ifft = planner.plan_fft_inverse(n);
@@ -127,7 +147,9 @@ pub fn ncc_correlate(query: &[f32], reference: &[f32]) -> Correlation {
     let mut a: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n];
     let mut b: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n];
     for (i, &v) in query.iter().enumerate() {
-        a[i] = Complex32::new(v, 0.0);
+        // An excluded sample contributes nothing to the correlation either.
+        let excluded = mask.is_some_and(|m| m.get(i).copied().unwrap_or(false));
+        a[i] = Complex32::new(if excluded { 0.0 } else { v }, 0.0);
     }
     for (i, &v) in reference.iter().enumerate() {
         b[i] = Complex32::new(v, 0.0);
@@ -142,10 +164,52 @@ pub fn ncc_correlate(query: &[f32], reference: &[f32]) -> Correlation {
     ifft.process(&mut a);
     let scale = 1.0 / n as f32;
 
+    // The reference's energy under the *shifted* mask: e[j] = sum_n mask[n] * ref[n+j]^2.
+    // It is a second correlation of the mask against the squared reference, so it costs
+    // one more transform pair rather than a loop over every lag.
+    let masked = mask.is_some();
+    let mut masked_ref_energy: Vec<f32> = Vec::new();
+    if masked {
+        let mask = mask.expect("checked above");
+        let mut m: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n];
+        let mut r2: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n];
+        for (i, slot) in m.iter_mut().enumerate().take(la) {
+            if !mask.get(i).copied().unwrap_or(false) {
+                *slot = Complex32::new(1.0, 0.0);
+            }
+        }
+        for (i, &v) in reference.iter().enumerate() {
+            r2[i] = Complex32::new(v * v, 0.0);
+        }
+        fft.process(&mut m);
+        fft.process(&mut r2);
+        for i in 0..n {
+            m[i] = m[i].conj() * r2[i];
+        }
+        ifft.process(&mut m);
+        masked_ref_energy = (0..total)
+            .map(|k| {
+                let j = k as i64 + lag_min;
+                let idx = if j >= 0 {
+                    j as usize
+                } else {
+                    (n as i64 + j) as usize
+                };
+                m[idx].re * scale
+            })
+            .collect();
+    }
+
     // Prefix sums of squares for energy normalisation.
     let mut pre_q = vec![0.0f64; la + 1];
+    let mut pre_q_masked = vec![0.0f64; la + 1];
+    let mut pre_mask_count = vec![0usize; la + 1];
     for i in 0..la {
-        pre_q[i + 1] = pre_q[i] + (query[i] as f64).powi(2);
+        let v = query[i] as f64;
+        pre_q[i + 1] = pre_q[i] + v * v;
+        let excluded = mask.is_some_and(|m| m.get(i).copied().unwrap_or(false));
+        pre_q_masked[i + 1] = pre_q_masked[i] + if excluded { 0.0 } else { v * v };
+        pre_mask_count[i + 1] = pre_mask_count[i] + usize::from(!excluded);
     }
     let mut pre_r = vec![0.0f64; lb + 1];
     for i in 0..lb {
@@ -156,13 +220,20 @@ pub fn ncc_correlate(query: &[f32], reference: &[f32]) -> Correlation {
     let total = la + lb - 1;
     let mut values = vec![0.0f32; total];
     let mut fixed = vec![0.0f32; total];
-    let total_q = (pre_q[la] - pre_q[0]).max(0.0);
+    let total_q = if masked {
+        pre_q_masked[la]
+    } else {
+        pre_q[la] - pre_q[0]
+    }
+    .max(0.0);
     let total_r = (pre_r[lb] - pre_r[0]).max(0.0);
     let fixed_denom = (total_q * total_r).sqrt();
 
     // The overlap must be at least half of the shorter signal for the normalised
-    // correlation to mean anything.
-    let min_overlap = (la.min(lb) / 2).max(1);
+    // correlation to mean anything. With a mask, the overlap counts the samples that
+    // were actually compared.
+    let usable_samples = if masked { pre_mask_count[la] } else { la };
+    let min_overlap = (usable_samples.min(lb) / 2).max(1);
     let mut first_valid: Option<i64> = None;
     let mut last_valid: i64 = lag_min;
 
@@ -181,11 +252,27 @@ pub fn ncc_correlate(query: &[f32], reference: &[f32]) -> Correlation {
             *slot = 0.0;
             continue;
         }
-        let overlap = hi_q - lo_q;
-        let sum_q = pre_q[hi_q] - pre_q[lo_q];
-        let lo_r = (lo_q as i64 + lag) as usize;
-        let hi_r = (hi_q as i64 + lag) as usize;
-        let sum_r = pre_r[hi_r] - pre_r[lo_r];
+        let overlap = if masked {
+            pre_mask_count[hi_q] - pre_mask_count[lo_q]
+        } else {
+            hi_q - lo_q
+        };
+        if overlap == 0 {
+            *slot = 0.0;
+            continue;
+        }
+        let sum_q = if masked {
+            pre_q_masked[hi_q] - pre_q_masked[lo_q]
+        } else {
+            pre_q[hi_q] - pre_q[lo_q]
+        };
+        let sum_r = if masked {
+            masked_ref_energy[k].max(0.0) as f64
+        } else {
+            let lo_r = (lo_q as i64 + lag) as usize;
+            let hi_r = (hi_q as i64 + lag) as usize;
+            pre_r[hi_r] - pre_r[lo_r]
+        };
         let denom = (sum_q * sum_r).sqrt();
         *slot = if denom > 1e-12 {
             (raw as f64 / denom) as f32
@@ -220,11 +307,63 @@ pub fn ncc_correlate(query: &[f32], reference: &[f32]) -> Correlation {
     }
 }
 
+/// Silence in the middle of a recording is not an error, it is a fact about the
+/// recording. This module's job is to make sure it is *reported*, not papered over.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_masked_sample_contributes_nothing_to_the_correlation() {
+        let query: Vec<f32> = (0..200).map(|i| (i as f32 * 0.1).sin()).collect();
+        let mut reference = query.clone();
+        // Replace a quarter of the reference with something unrelated.
+        for v in reference.iter_mut().skip(50).take(50) {
+            *v = 0.0;
+        }
+
+        // The same corruption in the query, masked out, must give the same peak.
+        let mut masked_query = query.clone();
+        let mut mask = vec![false; 200];
+        for (i, v) in masked_query.iter_mut().enumerate().skip(50).take(50) {
+            *v = 0.0;
+            mask[i] = true;
+        }
+
+        let plain = ncc_correlate(&masked_query, &reference);
+        let masked = ncc_correlate_masked(&masked_query, &reference, Some(&mask));
+
+        let plain_best = plain
+            .values
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| plain.lag_min + i as i64);
+        let masked_best = masked
+            .values
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| masked.lag_min + i as i64);
+
+        assert_eq!(plain_best, Some(0), "the unmasked peak moved");
+        assert_eq!(masked_best, Some(0), "the masked peak moved");
+        assert!(
+            masked.values[(-masked.lag_min) as usize] > 0.99,
+            "the masked correlation is not a clean match: {}",
+            masked.values[(-masked.lag_min) as usize]
+        );
+    }
+}
+
 /// Find the strongest correlation peaks, with a minimum separation between them.
 ///
 /// Each peak carries a z-score relative to the sidelobe distribution (the curve with the
 /// peak's neighbourhood removed), which is the primary evidence that a match is real
 /// rather than a periodic artefact of the music.
+///
+/// The peaks are returned **strongest first**. A caller that wants the best match takes
+/// the first one; a caller that wants alternatives takes the rest.
 pub fn find_peaks(corr: &Correlation, max_peaks: usize, min_separation: i64) -> Vec<Peak> {
     if corr.len() < 3 {
         return Vec::new();
@@ -259,7 +398,12 @@ pub fn find_peaks(corr: &Correlation, max_peaks: usize, min_separation: i64) -> 
             picked.push(k);
         }
     }
-    picked.sort_unstable();
+    // Strongest first: the caller wants the best match at index zero.
+    picked.sort_unstable_by(|&x, &y| {
+        corr.fixed[y]
+            .partial_cmp(&corr.fixed[x])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     picked
         .into_iter()

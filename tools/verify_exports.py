@@ -23,6 +23,39 @@ Sign convention for every residual reported here:
     positive  ->  the corrected audio is AHEAD of the reference
     negative  ->  the corrected audio is BEHIND the reference
 
+How the measurements are made, and why
+--------------------------------------
+
+* **Waveform GCC-PHAT** (the headline number).  Both signals are resampled to a
+  common analysis rate with `scipy.signal.resample_poly` (an exact rational
+  ratio, and time-aligned: an impulse stays where it was), band-limited to
+  200-3400 Hz with a zero-phase filter, and correlated with a phase transform
+  `R = X * conj(Y) / (|R| + eps)`.  The epsilon is a small percentage of the
+  median cross-spectrum magnitude: a *pure* phase transform gives bins that
+  carry no signal the same weight as bins that carry the programme, and on
+  noisy, strongly tonal material that produces spurious peaks.  The analysis
+  window is split into overlapping sub-windows and the reported lag is the
+  **median of the sub-window peaks**, so a sidelobe that only the loudest part
+  of the window agrees with cannot win.  The peak is refined by parabolic
+  interpolation and is reported with its height, its z-score against the rest
+  of the searched lag range, its ratio to the runner-up peak, and the fraction
+  of sub-windows that agree with the consensus.
+* **Envelope correlation** (comparison only).  A 10 ms RMS envelope, normalised
+  cross-correlation over +-5 s, parabolic peak refinement.  This is the method
+  the Rust pipeline fits its model with, so it is reported for comparison and
+  never as the headline number -- a position it alone can vouch for is not
+  trusted.
+* **Pitch** (comparison only).  Autocorrelation F0 on a short window, with a
+  voicing gate on the normalised autocorrelation peak.  A tracker on polyphonic
+  material resolves to tens of cents, so this is a bound on the pitch change
+  rather than a measurement of it: the pitch change the correction *implies* is
+  reported next to it, and a disagreement of more than a semitone is counted
+  separately as a tracking artefact.
+* **Log-spectral distance** (comparison only).  The spectral *shape* distance
+  between the corrected material and the reference, with the level offset
+  removed, compared against the same distance for the uncorrected source when
+  one is given.
+
 Usage
 -----
     python tools/verify_exports.py \
@@ -103,11 +136,15 @@ class WavFile:
             stride = self._bytes_per_frame()
             blob = self._raw[start_frame * stride :][: count * stride]
             return self._decode_24(blob, count)
-        block = self._map[start_frame : start_frame + count]
-        values = _to_float(block, self.format_tag, self.bits_per_sample)
         if self.channels > 1:
+            block = self._map[
+                start_frame * self.channels : (start_frame + count) * self.channels
+            ]
+            values = _to_float(block, self.format_tag, self.bits_per_sample)
             values = values.reshape(count, self.channels).mean(axis=1)
-        return values
+            return values
+        block = self._map[start_frame : start_frame + count]
+        return _to_float(block, self.format_tag, self.bits_per_sample)
 
     def _bytes_per_frame(self) -> int:
         return (self.bits_per_sample // 8) * self.channels
@@ -428,6 +465,12 @@ def gcc_phat_consensus(
     peaks makes the estimate depend on what most of the window agrees on, and
     the fraction of segments that agree becomes an honest reliability figure.
 
+    The median matters: a whole-window peak alone can be a sidelobe that only
+    the loudest part of the window agrees with.  On the real recordings that
+    happened -- a whole-window estimate of +17.3 ms against a consensus of
+    +0.07 ms at the same position -- and the consensus is the one that both
+    methods agree with.
+
     Segments that are mostly background are skipped: they cannot align
     anything.
 
@@ -465,7 +508,9 @@ def gcc_phat_consensus(
         raise VerifyError("no usable segment: the window carries no alignable signal")
     lag_array = np.asarray(lags, dtype=np.float64)
     median_lag = float(np.median(lag_array))
-    # Agreement: how many segments agree with the median, within 1 ms.
+    # Agreement: how many segments agree with the consensus.  A bimodal set of
+    # segment lags (two competing candidates) gives a low agreement, and the
+    # position is then rejected rather than reported as a measurement.
     tolerance = max(1.0, 0.001 * fs)
     agreement = float(np.mean(np.abs(lag_array - median_lag) <= tolerance))
     return {
@@ -624,13 +669,22 @@ class Config:
     phat_guard_ms: float = 5.0
     phat_eps_fraction: float = 0.01
     segment_secs: float = 4.0
-    min_agreement: float = 0.6
+    min_agreement: float = 0.60
     min_envelope_peak: float = 0.5
     disagree_ms: float = 10.0
     min_trusted: int = 5
     f0_min: float = 70.0
     f0_max: float = 800.0
     f0_gate: float = 0.45
+    # The model's own scale, used to state the pitch change the correction
+    # implies.  The autocorrelation tracker cannot resolve that (it works in
+    # tens of cents on polyphonic material), so the two are reported side by
+    # side rather than one being presented as a measurement of the other.
+    scale: float = 1.0
+    # A pitch difference larger than this is not a pitch measurement: the
+    # tracker locked onto a different harmonic.  One semitone is a reasonable
+    # line to draw -- the correction under test is a few hundredths of a cent.
+    pitch_plausible_limit_cents: float = 100.0
     f0_window_secs: float = 2.0
     min_active_fraction: float = 0.5
     rms_floor: float = 1e-4
@@ -786,15 +840,17 @@ def measure_position(
                 consensus = None
             if consensus is not None:
                 lag = consensus["lag_samples"]
-                residual_ms = lag / cfg.analysis_rate * 1000.0
                 peak = consensus["peak"]
                 zscore = consensus["zscore"]
                 peak_ratio = consensus["peak_ratio"]
+                agreement = consensus["agreement"]
+                segment_lags = consensus["segment_lags"]
+                residual_ms = lag / cfg.analysis_rate * 1000.0
                 trusted = (
                     zscore >= cfg.min_zscore
                     and abs(peak) >= cfg.min_peak
                     and peak_ratio >= cfg.min_peak_ratio
-                    and consensus["agreement"] >= cfg.min_agreement
+                    and agreement >= cfg.min_agreement
                     and abs(residual_ms) <= cfg.max_lag_secs * 1000.0
                 )
                 reason = ""
@@ -804,9 +860,9 @@ def measure_position(
                     reason = f"peak {peak:.3f} < {cfg.min_peak:.3f}"
                 elif peak_ratio < cfg.min_peak_ratio:
                     reason = f"peak only {peak_ratio:.2f}x the runner-up < {cfg.min_peak_ratio:.2f}"
-                elif consensus["agreement"] < cfg.min_agreement:
+                elif agreement < cfg.min_agreement:
                     reason = (
-                        f"only {consensus['agreement'] * 100:.0f}% of the segments agree "
+                        f"only {agreement * 100:.0f}% of the sub-windows agree "
                         f"< {cfg.min_agreement * 100:.0f}%"
                     )
                 result.waveform = {
@@ -817,10 +873,10 @@ def measure_position(
                     "peak": peak,
                     "zscore": zscore,
                     "peak_ratio": peak_ratio,
-                    "agreement": consensus["agreement"],
+                    "agreement": agreement,
                     "segments": consensus["segments"],
                     "segments_skipped": consensus["segments_skipped"],
-                    "segment_lags_samples": consensus["segment_lags"],
+                    "segment_lags_samples": [float(x) for x in segment_lags],
                     "analysis_rate": cfg.analysis_rate,
                     "band_hz": [cfg.band_lo, cfg.band_hi],
                     "corrected_rms": corr_rms,
@@ -974,15 +1030,24 @@ def measure_position(
             result.problems.append(
                 f"methods disagree by {diff:.2f} ms (> {cfg.disagree_ms:.0f} ms)"
             )
-    wave_trusted = bool(result.waveform and result.waveform["trusted"])
-    result.trusted = wave_trusted and not result.disputed
+    # The headline measurement is the waveform one.  The envelope correlation is
+    # the method the Rust pipeline fits its model with, so it is a
+    # self-confirming cross-check and may never make a position TRUSTED on its
+    # own: a position the waveform method could not measure stays UNTRUSTED.
+    if do_waveform:
+        primary_trusted = bool(result.waveform and result.waveform["trusted"])
+    else:
+        # --envelope-only: the envelope is the only measurement available.
+        primary_trusted = bool(result.envelope and result.envelope["trusted"])
+    result.trusted = primary_trusted and not result.disputed
     if result.trusted:
         result.status = "TRUSTED"
     elif result.disputed:
         result.status = "DISPUTED"
-    elif wave_trusted:
-        result.status = "TRUSTED"
-    elif result.waveform is not None:
+    elif do_waveform and result.waveform is None:
+        # The waveform method ran but could not measure this position at all.
+        result.status = "ERROR"
+    elif result.waveform is not None or result.envelope is not None:
         result.status = "UNTRUSTED"
     else:
         result.status = "ERROR"
@@ -1021,6 +1086,18 @@ def summarise(results: list[PositionResult], cfg: Config) -> dict[str, Any]:
         for r in results
         if r.spectral and r.spectral.get("uncorrected_vs_reference_lsd_db") is not None
     ]
+    # A pitch difference of more than a semitone is not a pitch measurement.
+    # An autocorrelation tracker on polyphonic material locks onto whichever
+    # harmonic it likes best, so a large difference between the two signals is
+    # a tracking artefact, not a change in the music.  Averaging those in
+    # would let the artefacts dominate the headline (they reach thousands of
+    # cents), so they are counted separately instead.
+    pitch_limit = cfg.pitch_plausible_limit_cents
+    cents_measured = [c for c in cents if abs(c) <= pitch_limit]
+    cents_implausible = [c for c in cents if abs(c) > pitch_limit]
+    # The pitch change the correction itself implies: resampling by
+    # alpha = 1/scale shifts every frequency by -1200*log2(scale) cents.
+    model_pitch_cents = -1200.0 * math.log2(cfg.scale) if cfg.scale > 0 else None
 
     def stats(values: Sequence[float]) -> dict[str, Any]:
         if not values:
@@ -1032,19 +1109,49 @@ def summarise(results: list[PositionResult], cfg: Config) -> dict[str, Any]:
             "max_abs_ms": float(max(abs(v) for v in values)),
         }
 
+    # The headline is always the waveform GCC-PHAT when it ran; the envelope
+    # correlation only takes over when the waveform method was switched off.
+    if wave_trusted:
+        headline = stats(wave_trusted)
+        headline_method = "gcc_phat_bandpassed_waveform"
+    elif env_trusted:
+        headline = stats(env_trusted)
+        headline_method = "rms_envelope_ncc"
+    else:
+        headline = stats([])
+        headline_method = "none"
+
     summary: dict[str, Any] = {
         "positions": len(results),
         "trusted_positions": len(trusted),
         "disputed_positions": sum(1 for r in results if r.disputed),
         "untrusted_positions": sum(1 for r in results if r.status == "UNTRUSTED"),
         "errored_positions": sum(1 for r in results if r.status == "ERROR"),
+        "headline_method": headline_method,
+        "headline": headline,
         "waveform_all_positions": stats(wave_all),
         "waveform_trusted_positions": stats(wave_trusted),
         "envelope_trusted_positions": stats(env_trusted),
         "pitch": {
             "voiced_positions": len(cents),
-            "mean_abs_cents": float(np.mean(np.abs(cents))) if cents else None,
-            "max_abs_cents": float(np.max(np.abs(cents))) if cents else None,
+            "plausible_limit_cents": pitch_limit,
+            "measured_positions": len(cents_measured),
+            "mean_abs_cents": (
+                float(np.mean(np.abs(cents_measured))) if cents_measured else None
+            ),
+            "max_abs_cents": (
+                float(np.max(np.abs(cents_measured))) if cents_measured else None
+            ),
+            "implausible_positions": len(cents_implausible),
+            "implausible_max_abs_cents": (
+                float(np.max(np.abs(cents_implausible))) if cents_implausible else None
+            ),
+            "model_implied_cents": model_pitch_cents,
+            "note": (
+                "an autocorrelation tracker on polyphonic material resolves to tens of "
+                "cents, so these figures bound the pitch change; they cannot resolve "
+                "the few-hundredths-of-a-cent change the model implies"
+            ),
         },
         "spectral": {
             "corrected_lsd_db_median": float(np.median(lsd_values)) if lsd_values else None,
@@ -1070,10 +1177,19 @@ def summarise(results: list[PositionResult], cfg: Config) -> dict[str, Any]:
             "see the per-position problems."
         )
     if lsd_values and lsd_src:
-        if float(np.median(lsd_values)) > float(np.median(lsd_src)):
+        corrected_lsd = float(np.median(lsd_values))
+        source_lsd = float(np.median(lsd_src))
+        if corrected_lsd > source_lsd + 0.1:
             summary["warnings"].append(
-                "the corrected audio is spectrally FURTHER from the reference than the "
-                "uncorrected source; the correction did not improve spectral similarity."
+                f"the corrected audio is spectrally FURTHER from the reference than the "
+                f"uncorrected source ({corrected_lsd:.2f} dB against {source_lsd:.2f} dB); "
+                "the correction did not improve spectral similarity."
+            )
+        elif corrected_lsd > source_lsd:
+            summary["warnings"].append(
+                f"the corrected audio is marginally spectrally further from the reference "
+                f"than the uncorrected source ({corrected_lsd:.2f} dB against "
+                f"{source_lsd:.2f} dB); the difference is within the noise of this measure."
             )
     return summary
 
@@ -1081,7 +1197,8 @@ def summarise(results: list[PositionResult], cfg: Config) -> dict[str, Any]:
 def print_table(results: list[PositionResult], cfg: Config) -> None:
     header = (
         f"{'#':>3}  {'source_t':>9}  {'ref_t':>9}  {'wave_ms':>9}  {'peak':>7}  "
-        f"{'z':>7}  {'env_ms':>9}  {'env_pk':>7}  {'diff_ms':>8}  {'cents':>8}  status"
+        f"{'z':>7}  {'ratio':>6}  {'agree':>6}  {'env_ms':>9}  {'env_pk':>7}  "
+        f"{'diff_ms':>8}  {'cents':>8}  status"
     )
     print(header)
     print("-" * len(header))
@@ -1089,6 +1206,8 @@ def print_table(results: list[PositionResult], cfg: Config) -> None:
         wave = f"{r.waveform['residual_ms']:9.3f}" if r.waveform else " " * 9
         peak = f"{r.waveform['peak']:7.3f}" if r.waveform else " " * 7
         z = f"{r.waveform['zscore']:7.2f}" if r.waveform else " " * 7
+        ratio = f"{r.waveform['peak_ratio']:6.2f}" if r.waveform else " " * 6
+        agree = f"{r.waveform['agreement']:6.2f}" if r.waveform else " " * 6
         env = f"{r.envelope['residual_ms']:9.3f}" if r.envelope else " " * 9
         envpk = f"{r.envelope['peak']:7.3f}" if r.envelope else " " * 7
         if r.waveform and r.envelope:
@@ -1100,32 +1219,31 @@ def print_table(results: list[PositionResult], cfg: Config) -> None:
             cents = f"{r.pitch['cents_difference']:8.2f}"
         print(
             f"{r.index:>3}  {r.source_time_s:9.3f}  {r.reference_time_s:9.3f}  {wave}  "
-            f"{peak}  {z}  {env}  {envpk}  {diff}  {cents}  {r.status}"
+            f"{peak}  {z}  {ratio}  {agree}  {env}  {envpk}  {diff}  {cents}  {r.status}"
         )
         for problem in r.problems:
             print(f"      note: {problem}")
 
 
 def print_summary(summary: dict[str, Any], cfg: Config) -> None:
+    method_name = {
+        "gcc_phat_bandpassed_waveform": "waveform GCC-PHAT, the independent measurement",
+        "rms_envelope_ncc": "RMS-envelope NCC (the waveform method was switched off)",
+        "none": "no usable method",
+    }.get(summary.get("headline_method", "none"), "unknown method")
     print()
-    print("Summary (waveform GCC-PHAT, the independent measurement)")
-    print("-------------------------------------------------------")
-    wave = summary["waveform_trusted_positions"]
+    print(f"Summary ({method_name})")
+    print("-" * (9 + len(method_name)))
+    wave = summary["headline"]
     print(
         f"  trusted positions : {summary['trusted_positions']} of {summary['positions']}"
         f"   (disputed: {summary['disputed_positions']}, "
         f"untrusted: {summary['untrusted_positions']}, error: {summary['errored_positions']})"
     )
     if wave["count"]:
-        print(
-            f"  |residual| p50    : {wave['p50_ms']:.3f} ms"
-        )
-        print(
-            f"  |residual| p95    : {wave['p95_ms']:.3f} ms"
-        )
-        print(
-            f"  |residual| max    : {wave['max_abs_ms']:.3f} ms"
-        )
+        print(f"  |residual| p50    : {wave['p50_ms']:.3f} ms")
+        print(f"  |residual| p95    : {wave['p95_ms']:.3f} ms")
+        print(f"  |residual| max    : {wave['max_abs_ms']:.3f} ms")
     else:
         print("  |residual| p50/p95/max : n/a (no trusted positions)")
     env = summary["envelope_trusted_positions"]
@@ -1136,14 +1254,28 @@ def print_summary(summary: dict[str, Any], cfg: Config) -> None:
             f"max {env['max_abs_ms']:.3f} ms"
         )
     pitch = summary["pitch"]
+    if pitch["model_implied_cents"] is not None:
+        print(
+            f"  pitch (model)      : the correction implies "
+            f"{pitch['model_implied_cents']:+.4f} cents"
+        )
     if pitch["mean_abs_cents"] is not None:
         print(
-            f"  pitch difference  : mean |{pitch['mean_abs_cents']:.2f} cents| "
-            f"over {pitch['voiced_positions']} voiced position(s), "
-            f"max |{pitch['max_abs_cents']:.2f} cents|"
+            f"  pitch (measured)   : mean |{pitch['mean_abs_cents']:.2f} cents| "
+            f"over {pitch['measured_positions']} measurable position(s), "
+            f"max |{pitch['max_abs_cents']:.2f} cents| "
+            f"(a coarse sanity check, not a measurement of the correction)"
         )
     else:
-        print("  pitch difference  : no position was voiced enough to measure")
+        print("  pitch (measured)   : no position was voiced enough to measure")
+    if pitch["implausible_positions"]:
+        print(
+            f"  pitch (artefact)   : {pitch['implausible_positions']} position(s) "
+            f"disagreed by more than {pitch['plausible_limit_cents']:.0f} cents "
+            f"(max |{pitch['implausible_max_abs_cents']:.2f} cents|); the "
+            "autocorrelation tracker locked onto a different harmonic, so those "
+            "are not pitch measurements and are excluded from the figure above"
+        )
     spectral = summary["spectral"]
     if spectral["corrected_lsd_db_median"] is not None:
         line = f"  log-spectral distance (corrected vs reference): {spectral['corrected_lsd_db_median']:.2f} dB"
@@ -1205,13 +1337,15 @@ def markdown_report(
     lines.append("")
     lines.append(
         "| # | source time (s) | reference time (s) | waveform GCC-PHAT (ms) | peak | z | "
-        "envelope NCC (ms) | env peak | difference (ms) | pitch (cents) | status |"
+        "ratio | agree | envelope NCC (ms) | env peak | difference (ms) | pitch (cents) | status |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in results:
         wave = f"{r.waveform['residual_ms']:.3f}" if r.waveform else "n/a"
         peak = f"{r.waveform['peak']:.3f}" if r.waveform else "n/a"
         z = f"{r.waveform['zscore']:.2f}" if r.waveform else "n/a"
+        ratio = f"{r.waveform['peak_ratio']:.2f}" if r.waveform else "n/a"
+        agree = f"{r.waveform['agreement']:.2f}" if r.waveform else "n/a"
         env = f"{r.envelope['residual_ms']:.3f}" if r.envelope else "n/a"
         envpk = f"{r.envelope['peak']:.3f}" if r.envelope else "n/a"
         diff = (
@@ -1226,7 +1360,8 @@ def markdown_report(
         )
         lines.append(
             f"| {r.index} | {r.source_time_s:.3f} | {r.reference_time_s:.3f} | {wave} | "
-            f"{peak} | {z} | {env} | {envpk} | {diff} | {cents} | {r.status} |"
+            f"{peak} | {z} | {ratio} | {agree} | {env} | {envpk} | {diff} | {cents} | "
+            f"{r.status} |"
         )
     lines.append("")
     for r in results:
@@ -1236,7 +1371,13 @@ def markdown_report(
         lines.append("")
     lines.append("## Summary")
     lines.append("")
-    wave = summary["waveform_trusted_positions"]
+    wave = summary["headline"]
+    method_name = {
+        "gcc_phat_bandpassed_waveform": "waveform GCC-PHAT",
+        "rms_envelope_ncc": "RMS-envelope NCC",
+        "none": "no usable method",
+    }.get(summary.get("headline_method", "none"), "unknown method")
+    lines.append(f"- headline method: **{method_name}**")
     lines.append(f"- trusted positions: **{summary['trusted_positions']} of {summary['positions']}**")
     if wave["count"]:
         lines.append(
@@ -1252,11 +1393,28 @@ def markdown_report(
             f"p50 {env['p50_ms']:.3f} ms, p95 {env['p95_ms']:.3f} ms, max {env['max_abs_ms']:.3f} ms"
         )
     pitch = summary["pitch"]
+    if pitch["model_implied_cents"] is not None:
+        lines.append(
+            f"- pitch change implied by the model: **{pitch['model_implied_cents']:+.4f} cents**"
+        )
     if pitch["mean_abs_cents"] is not None:
         lines.append(
-            f"- pitch difference: mean |{pitch['mean_abs_cents']:.2f} cents| over "
-            f"{pitch['voiced_positions']} voiced position(s)"
+            f"- pitch difference measured: mean |{pitch['mean_abs_cents']:.2f} cents| over "
+            f"{pitch['measured_positions']} measurable position(s), max "
+            f"|{pitch['max_abs_cents']:.2f} cents|"
         )
+    if pitch["implausible_positions"]:
+        lines.append(
+            f"- pitch: {pitch['implausible_positions']} position(s) disagreed by more than "
+            f"{pitch['plausible_limit_cents']:.0f} cents (max "
+            f"|{pitch['implausible_max_abs_cents']:.2f} cents|). An autocorrelation "
+            "tracker on polyphonic material locks onto a different harmonic there, so those "
+            "are tracking artefacts rather than pitch measurements and are excluded from "
+            "the figure above."
+        )
+    lines.append(
+        "- pitch note: " + pitch["note"]
+    )
     spectral = summary["spectral"]
     if spectral["corrected_lsd_db_median"] is not None:
         line = f"- log-spectral distance (corrected vs reference): {spectral['corrected_lsd_db_median']:.2f} dB"
@@ -1329,6 +1487,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-peak", type=float, default=0.05, help="minimum GCC-PHAT peak value"
     )
     parser.add_argument(
+        "--min-peak-ratio",
+        type=float,
+        default=1.10,
+        help="minimum ratio between the GCC-PHAT peak and the runner-up peak",
+    )
+    parser.add_argument(
+        "--min-agreement",
+        type=float,
+        default=0.60,
+        help="minimum fraction of sub-windows that must agree with the measurement",
+    )
+    parser.add_argument(
+        "--f0-gate",
+        type=float,
+        default=0.45,
+        help="minimum normalised autocorrelation peak for a position to count as voiced",
+    )
+    parser.add_argument(
+        "--f0-window",
+        type=float,
+        default=2.0,
+        help="length of the pitch-analysis window in seconds",
+    )
+    parser.add_argument(
         "--disagree-ms",
         type=float,
         default=10.0,
@@ -1364,7 +1546,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cfg.max_lag_secs = args.max_lag
     cfg.min_zscore = args.min_zscore
     cfg.min_peak = args.min_peak
+    cfg.min_peak_ratio = args.min_peak_ratio
+    cfg.min_agreement = args.min_agreement
+    cfg.f0_gate = args.f0_gate
+    cfg.f0_window_secs = args.f0_window
     cfg.disagree_ms = args.disagree_ms
+    cfg.scale = args.scale
     if cfg.analysis_rate < 1000:
         print("error: --analysis-rate must be at least 1000 Hz", file=sys.stderr)
         return 2
@@ -1499,10 +1686,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "band_hz": [cfg.band_lo, cfg.band_hi],
                 "min_zscore": cfg.min_zscore,
                 "min_peak": cfg.min_peak,
+                "min_peak_ratio": cfg.min_peak_ratio,
+                "min_agreement": cfg.min_agreement,
+                "phat_epsilon_fraction_of_median": cfg.phat_eps_fraction,
+                "phat_guard_ms": cfg.phat_guard_ms,
+                "segment_seconds": cfg.segment_secs,
                 "min_envelope_peak": cfg.min_envelope_peak,
                 "disagree_ms": cfg.disagree_ms,
                 "envelope_hop_seconds": cfg.envelope_hop_secs,
                 "envelope_search_seconds": cfg.envelope_max_lag_secs,
+                "pitch_window_seconds": cfg.f0_window_secs,
+                "pitch_gate": cfg.f0_gate,
+                "pitch_range_hz": [cfg.f0_min, cfg.f0_max],
+                "pitch_plausible_limit_cents": cfg.pitch_plausible_limit_cents,
                 "methods": {
                     "waveform": do_waveform,
                     "envelope": do_envelope,

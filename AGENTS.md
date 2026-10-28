@@ -121,15 +121,61 @@ test is genuinely wrong — and then say so explicitly.
 * **Ranking correlation peaks by the overlap-normalised score.** Short-overlap edge
   artefacts then outrank real matches. Rank on a fixed-normalisation curve and keep the
   normalised value for the confidence score.
+* **Returning correlation peaks sorted by lag.** The caller then takes the *earliest*
+  peak as the best match instead of the strongest. `find_peaks` returns them strongest
+  first.
 * **Using a fixed coarse-window hop.** Short recordings end up with a single window,
   which can never be corroborated. Spread the windows evenly instead.
 * **A fixed gap threshold in the segmenter.** With a 15 s probe hop every inter-probe
   span then looks like a gap. The threshold has to follow the spacing the matcher
-  actually achieved.
+  actually achieved — and that spacing has to come from *all* the measured points, not
+  from the trusted ones, or a hole raises the threshold that was meant to detect it.
+* **Fitting a drift rate from the coarse stage's window lags.** Those lags are read off
+  a 20 Hz decimated envelope, so they are quantised at 50 ms; one window that latched
+  onto the wrong place turns into a per-cent rate error that then displaces every fine
+  probe. The coarse stage finds *where* the recording is. The fine stage, with hundreds
+  of probes, measures *how fast its clock ran*.
+* **Making the envelope's normalisation depend on where the silence is.** If the local
+  z-score is computed from the signal frames only, the source and the reference get
+  different shapes wherever their silence differs — and that difference is a bias in the
+  measured drift. Keep the statistics identical for both files and exclude the silent
+  frames from the *correlation* instead (`ncc_correlate_masked`), where they cannot bias
+  anything.
 * **A correlation that multiplies `A * conj(B)`** inverts the lag sign. The convention
   is `a[n] ~= b[n + lag]`, positive lag means `b` runs late.
+* **Decoding a packet without stopping.** A decode loop that keeps pulling packets after
+  a successful decode reads the *whole file* into memory in one call, whatever the
+  caller asked for. Break after each packet.
 * **Test signals made of harmonically related pure tones.** They share a common period
   and create exact aliases. Use inharmonic partials plus noise.
+* **Asserting a drift to a few ppm on a short fixture.** A drift is a slope, and a slope
+  fitted through points that carry a millisecond of noise is only good to about ±20 ppm
+  over three minutes. Use a fixture long enough for the precision the assertion demands,
+  or express the tolerance in the accumulated milliseconds, which is what matters.
+* **Applying the robust fit's inlier mask to the wrong list.** The mask is indexed by the
+  *fitted* points; applying it to every measured point marks the wrong ones as outliers
+  and lets the bad ones through.
+* **Trusting a whole-window correlation peak on its own.** On real music the tallest peak
+  of a 20 s correlation curve is often a sidelobe that only the loudest part of the window
+  agrees with. Take the **median of the overlapping sub-window peaks**, and use the
+  fraction of sub-windows that agree with that consensus as the reliability gate. On the
+  real recordings the whole-window estimate gave +17.3 ms where the consensus gave
+  +0.07 ms at the same position.
+* **Letting the envelope correlation vouch for a position.** The envelope NCC is the
+  method the Rust pipeline fits its model with, so a position it alone can confirm is
+  self-confirming, not verified. The independent waveform measurement is the only thing
+  that can mark a position trusted.
+* **Loosening a verifier's gates to make a run green.** The trust thresholds in
+  `tools/verify_exports.py` (`--min-peak-ratio`, `--min-agreement`) are the difference
+  between a measurement and a guess. Changing them to admit more positions is the wrong
+  direction; fix the estimator instead. Both variants were run side by side on the same
+  export and both sets of numbers are in `PROJECT_STATUS.md`.
+* **Averaging tracker artefacts into a headline figure.** An autocorrelation pitch
+  tracker on polyphonic material locks onto whichever harmonic it likes best, so
+  individual pitch differences reach thousands of cents. Report the pitch change the
+  *model* implies next to the measured one, count the differences that are too large to
+  be pitch measurements separately, and say plainly that the tracker cannot resolve a
+  correction of a few hundredths of a cent.
 
 ## Git
 
