@@ -71,6 +71,13 @@ pub struct Artifact {
     pub path: PathBuf,
     /// Size in bytes.
     pub bytes: u64,
+    /// SHA-256 of the file, when it could be computed.
+    ///
+    /// This is what makes the "run it twice and the artefacts are identical"
+    /// claim checkable rather than a matter of opinion: two runs that agree
+    /// produce the same hash here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /// Write the point-by-point sync map as CSV.

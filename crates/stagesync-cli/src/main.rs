@@ -519,12 +519,17 @@ fn write_artefacts(
 }
 
 /// Describe a written file.
+///
+/// The SHA-256 is recorded as well as the size, so that "the artefacts are
+/// byte-identical between two runs" is a checkable statement rather than a
+/// claim: the hash of each output is in `report.json`.
 fn artifact(kind: &str, path: &Path) -> Result<Artifact> {
     let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     Ok(Artifact {
         kind: kind.to_string(),
         path: path.to_path_buf(),
         bytes,
+        sha256: stagesync_core::audio::hash::sha256_file(path).ok(),
     })
 }
 

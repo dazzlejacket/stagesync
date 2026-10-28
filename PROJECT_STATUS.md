@@ -143,10 +143,15 @@ timeline.txt              IDENTICAL
 report.json               IDENTICAL once the output directory name is normalised
 ```
 
+This was checked by running the whole real-data export twice and comparing SHA-256
+digests: every artefact was identical except `report.json`, and `report.json` differed
+only in the output paths it lists. `report.json` now also records the **SHA-256 of every
+output artefact**, so the claim is checkable from the report itself rather than by
+comparing files by hand.
+
 The corrected WAV is identical, so the resampler is genuinely deterministic and the
-chunked path matches the single-shot path. `report.json` differs only in the absolute
-paths of the artefacts it lists — it carries no timestamp, so nothing in it varies
-between runs.
+chunked path matches the single-shot path. `report.json` carries no timestamp, so nothing
+in it varies between runs.
 
 ### The uncovered span
 
@@ -377,8 +382,8 @@ stagesync-desktop               6 passed
                           total 62 passed, 0 failed
 ```
 
-Both release binaries build and run: `target\release\stagesync.exe` (6,052,352 bytes)
-and `target\release\stagesync-desktop.exe` (20,461,016 bytes). The desktop binary was
+Both release binaries build and run: `target\release\stagesync.exe` (6,054,912 bytes)
+and `target\release\stagesync-desktop.exe` (20,470,784 bytes). The desktop binary was
 started and left running for eight seconds without exiting and without writing a byte
 to stdout or stderr; `stagesync.exe --help` lists `analyze`, `export`, `verify` and
 `info`.

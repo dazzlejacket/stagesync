@@ -473,6 +473,7 @@ fn artifact(kind: &str, path: &Path) -> Artifact {
         kind: kind.to_string(),
         path: path.to_path_buf(),
         bytes,
+        sha256: stagesync_core::audio::hash::sha256_file(path).ok(),
     }
 }
 

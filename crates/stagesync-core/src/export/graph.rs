@@ -104,6 +104,20 @@ impl Svg {
         ));
     }
 
+    /// A text element rotated about its own anchor point.
+    ///
+    /// The y-axis title is rotated rather than written horizontally: a
+    /// horizontal one overlaps the tick labels, which are also written
+    /// horizontally just to the left of the frame.
+    fn text_rotated(&mut self, x: f64, y: f64, content: &str, size: f64, fill: &str) {
+        self.body.push_str(&format!(
+            "<text x=\"{x:.2}\" y=\"{y:.2}\" font-family=\"Segoe UI, DejaVu Sans, sans-serif\" \
+             font-size=\"{size:.1}\" text-anchor=\"middle\" fill=\"{fill}\" \
+             transform=\"rotate(-90 {x:.2} {y:.2})\">{}</text>\n",
+            escape_xml(content)
+        ));
+    }
+
     fn finish(self) -> String {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" \
@@ -391,14 +405,7 @@ fn draw_panel(
         "middle",
         "#333333",
     );
-    svg.text(
-        panel.x - 62.0,
-        panel.y + panel.h / 2.0,
-        y_label,
-        14.0,
-        "middle",
-        "#333333",
-    );
+    svg.text_rotated(34.0, panel.y + panel.h / 2.0, y_label, 14.0, "#333333");
 }
 
 /// Format an axis value compactly.

@@ -179,13 +179,21 @@ cargo run --release -p stagesync-desktop
 | `<source>_corrected.wav` | the drift-corrected source, native channel count, native level, target sample rate |
 | `syncmap.csv` | one row per measurement: source time, measured reference time, measured lag, model lag, residual in ms, confidence, method, and a note saying why a point is not fully trusted |
 | `segments.csv` | every span of every source: matched, uncovered reference, recorder gap, low confidence, beyond reference |
-| `report.json` | the complete machine-readable analysis, including the SHA-256 of every input and output |
+| `report.json` | the complete machine-readable analysis: the SHA-256 of every input, and the size and SHA-256 of every output artefact |
 | `drift_graph.svg` | the drift and residual graph, hand-written SVG — no plotting dependency |
 | `timeline.txt` | a human-readable summary of the merged timeline |
 | `plan.json` | the resolved model for each source |
 
+The graph is written as SVG. To get a PNG of the same file without installing an SVG
+rasteriser:
+
+```powershell
+python tools\svg_to_png.py out\corrected\drift_graph.svg out\corrected\drift_graph.png 2.0
+```
+
 Reports carry **no timestamps**, so re-running the same analysis produces byte-identical
-artefacts and the hashes in `report.json` are meaningful.
+artefacts — and `report.json` records the SHA-256 of each output, so that is a checkable
+statement rather than a claim.
 
 ---
 
@@ -346,6 +354,7 @@ crates/stagesync-cli/       the `stagesync` command-line tool
 crates/stagesync-desktop/   the `stagesync-desktop` egui/eframe application
 tools/make_fixtures.py      deterministic synthetic fixtures with exact ground truth
 tools/verify_exports.py     an independent numpy/scipy verifier (not part of the app)
+tools/svg_to_png.py         rasterise the exported drift graph to PNG (Pillow only)
 cleanroom/                  the clean-room specification and provenance documents
 audio/                      source recordings — READ ONLY, never committed
 ```
