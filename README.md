@@ -15,10 +15,11 @@ decompilation, internal table, parameter or weight was used, and the user interf
 was not cloned. See [`PROVENANCE.md`](PROVENANCE.md) and
 [`cleanroom/`](cleanroom/).
 
-> **Status: first usable vertical slice.** The core, the CLI, the desktop application,
-> the exports and the test suite all work. Camera/video retiming and NLE multicam
-> export are Phase 2 and are not implemented. See
-> [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for the exact state of every part.
+> **Status: a working cross-platform synchroniser.** The core, the CLI, the desktop
+> application, the exports and the test suite all work on **Windows, macOS and Linux**
+> from one Rust/egui codebase. Camera/video retiming and NLE multicam export are Phase 2
+> and are not implemented. See [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for the exact
+> state of every part, including which platforms have actually been built and tested.
 
 ---
 
@@ -42,7 +43,7 @@ audibility, but the number is reported rather than rounded away.
 ## Build
 
 Requires a stable Rust toolchain (the workspace declares `rust-version = 1.82`; it has
-been built and tested on 1.99.1) and a Windows toolchain with the MSVC toolchain.
+been built and tested on 1.99.1).
 
 ```powershell
 cargo build --release
@@ -52,8 +53,13 @@ This produces two executables:
 
 | Binary | What it is |
 |---|---|
-| `target\release\stagesync.exe` | the command-line tool |
-| `target\release\stagesync-desktop.exe` | the native Windows desktop application |
+| `target/release/stagesync` | the command-line tool |
+| `target/release/stagesync-desktop` | the native desktop application |
+
+On Windows the executables get a `.exe` suffix. The desktop application is one
+eframe/egui codebase on all three platforms; the differences that matter — where the
+settings live, how a file name is spelled safely on disk, how a path is shown — are
+isolated in `crates/stagesync-desktop/src/platform.rs`.
 
 Quality gates — all four are expected to pass:
 
@@ -64,9 +70,18 @@ cargo test --workspace
 cargo build --release
 ```
 
-All four exit 0 on the committed tree. The test suite is **62 tests**: 18 core unit
-tests, 12 alignment scenarios, 12 render tests, 10 robustness tests, 6 desktop tests,
-3 doc tests and 1 CLI test.
+On Linux the desktop crate needs the usual X11/Wayland development packages; see
+[`BUILDING.md`](BUILDING.md) for the exact list and for the packaging steps.
+
+The test suite is **121 tests**, all passing: 13 core unit tests, 12 alignment
+scenarios, 6 drift-verdict scenarios, 18 DSP tests, 12 render tests, 10 robustness
+tests, and 50 desktop tests.
+
+**What is verified, and what is not.** The Windows x64 build and the whole test suite
+were run on a Windows 11 x64 development machine. The macOS and Linux builds and the
+packaging steps are **configured but unverified** — this repository has no GitHub
+remote, so the CI workflows that would build them have never run. That is stated in
+[`BUILDING.md`](BUILDING.md) rather than glossed over.
 
 ---
 
@@ -84,32 +99,42 @@ stagesync analyze `
 
 Prints the offset, the drift in ppm, the coverage, the number of measured and skipped
 probes, every coarse candidate it considered, and every warning it raised. This is the
-real output for the two recorders against the DJI soundboard — 23.8 seconds for 2.69
+real output for the two recorders against the DJI soundboard — 32 seconds for 2.69
 hours of reference:
 
 ```
 reference: combined.wav (9685.46 s, 48000 Hz, 1 ch)
-Voice 005_W_20250208_152158.m4a: offset +317.389 s, drift +16.116 ppm, 49.6% covered, 638 points (0 skipped), 1 warnings
+Voice 005_W_20250208_152158.m4a: offset +317.389 s, drift +16.116 ppm, 49.6% covered, 662 points (0 skipped), 2 warnings
     note: direct drift +16.169 ppm vs calibrated +16.116 ppm (difference -0.053 ppm)
     fine probes: 319 measured, 0 skipped (quiet 0, no region 0, no peak 0)
+    drift: established by the envelope method, +16.116 ppm ± 0.033 ppm, applied over 319 measurement(s)
+      envelope estimate: +16.116 ppm ± 0.033 ppm, residual 1.60 ms, 319 measurement(s)
+      waveform estimate: +16.116 ppm ± 0.081 ppm, residual 2.32 ms, 142 measurement(s), mean waveform correlation 0.04
+      note: the waveform estimate was used because it is the more precise measurement
     coarse candidate: lag +317.400 s, 15 vote(s), mean score 0.057
-    coarse candidate: lag +7826.100 s, 1 vote(s), mean score 0.050
-    whole-file correlation: lag +317.400 s, score 0.569
-    warning: the spectral cross-check disagreed with the envelope fit at 259 of 319 positions (threshold 50 ms; median disagreement -317 ms, largest 685 ms); the envelope fit was kept and the disagreement is reported
-Voice 006_W_20250208_164548.m4a: offset +5753.314 s, drift +16.500 ppm, 41.8% covered, 522 points (10 skipped), 1 warnings
-    note: direct drift +16.434 ppm vs calibrated +16.500 ppm (difference +0.066 ppm)
-    fine probes: 259 measured, 10 skipped (quiet 4, no region 6, no peak 0)
-    coarse candidate: lag +5753.350 s, 13 vote(s), mean score 0.057
-    whole-file correlation: lag +5753.350 s, score 0.574
-    warning: the spectral cross-check disagreed with the envelope fit at 181 of 263 positions (threshold 50 ms; median disagreement -233 ms, largest 566 ms); the envelope fit was kept and the disagreement is reported
-timeline: 9685.46 s total, 950.87 s with no recorder coverage
+    ...
+    warning: no waveform probe produced a usable correlation, so the raw waveforms do not appear to be the same signal
 ```
 
-The `note:` line is deliberate: the *direct* slope, the *calibrated* slope and their
-difference are three separate quantities, and a disagreement between them is reported
-rather than quietly averaged away. The `warning:` line is deliberate too: the log-mel
-cross-check disagrees with the envelope fit on this material, the envelope fit is kept,
-and the disagreement is stated rather than hidden.
+The `drift:` block is the important part. A drift is a **slope**, and a slope fitted
+through points that carry a millisecond of noise is only good to about
+`noise / sqrt(Sxx)`. StageSync therefore reports every drift figure **with the
+uncertainty that produced it**, measures the drift a second time on the raw waveform at
+positions the fit did not use, and says which of the two it applied and why.
+
+Three flags control it:
+
+| Flag | Effect |
+|---|---|
+| `--no-waveform-drift` | skip the raw-waveform second opinion; the drift then rests on the envelope measurement alone |
+| `--offset-only` | correct the position and leave the rate alone — nothing is resampled. The report still records what the drift evidence was |
+| `--no-log-mel` | skip the log-mel spectral cross-check |
+
+The `note:` line about the direct and calibrated slopes is deliberate: they are three
+separate quantities, and a disagreement between them is reported rather than quietly
+averaged away. The `warning:` line is deliberate too: the log-mel cross-check disagrees
+with the envelope fit on this material, the envelope fit is kept, and the disagreement
+is stated rather than hidden.
 
 ### Export — analyse, render corrected audio, and verify the result
 
@@ -149,6 +174,18 @@ stagesync verify `
 stagesync info "audio\Voice 005_W_20250208_152158.m4a"
 ```
 
+### Level — the loudness profile of a file over a span
+
+```powershell
+stagesync level "audio\Voice 005_W_20250208_152158.m4a" --from 3635 --to 3672 --block-ms 500
+```
+
+This is the tool for checking a reported gap against the audio itself: it prints the
+level of the recording in blocks, so a hole in the coverage can be confirmed rather
+than taken on trust. It is what established that the 11.18 s span reported inside
+Voice 005 is a quiet passage in the performance — the reference is silent over the
+same span — and not a recorder failure.
+
 ---
 
 ## Desktop application
@@ -157,8 +194,14 @@ stagesync info "audio\Voice 005_W_20250208_152158.m4a"
 cargo run --release -p stagesync-desktop
 ```
 
-* Drag files onto the window, or use **Browse**. The reference is the first file you
-  add; every further file becomes a target.
+One Rust/egui codebase, running on **Windows, macOS and Linux**. The operating-system
+differences — where the settings live, how a file name is spelled safely on disk, how a
+path is shown to the user — are isolated in `crates/stagesync-desktop/src/platform.rs`,
+so the rest of the application is written once.
+
+* Drag files onto the window, or use **Browse**. A dropped folder is expanded to the
+  audio files inside it. The reference is the first file you add; every further file
+  becomes a target.
 * **Analyze** runs the whole pipeline on a worker thread, reports each stage, and
   **Cancel** really stops it — the cancellation is checked inside the decoding loop, so
   it takes effect within about a second rather than at the end of a three-hour file.
@@ -166,9 +209,22 @@ cargo run --release -p stagesync-desktop
   hatched rather than hidden.
 * Per target you see the offset, the drift in ppm *and* in accumulated milliseconds,
   the coverage, the residual p50/p95/max, and every warning the analyser raised.
+* The **drift verdict** panel shows whether the drift was established, which estimator
+  produced it, the applied drift **with its uncertainty**, the two estimators' figures
+  side by side, and every note explaining the decision. When the drift could not be
+  established it says plainly that only the offset was corrected.
+* A **drift chart** plots the local drift in ppm against the source time: the envelope
+  measurements and the independent raw-waveform hold-out measurements in different
+  colours, so the two can be told apart at a glance.
+* Two toggles: **Waveform drift check** (on by default) turns the raw-waveform second
+  opinion on and off; **Offset only** corrects the position and leaves the rate alone,
+  so nothing is resampled.
 * **Manual anchor** sets a correspondence by hand when the automatic lock fails. It is
   a hard constraint: the final model is forced through it.
 * **Export** writes the real files and tells you their real absolute paths.
+* Your settings are remembered between runs, in the platform's own configuration
+  folder (`%APPDATA%\StageSync` on Windows, `~/Library/Application Support/StageSync`
+  on macOS, `$XDG_CONFIG_HOME/StageSync` on Linux).
 
 ---
 
@@ -239,10 +295,37 @@ is measured again, and the residual relation is folded back into the model. The
 correction is bounded (at most 100 ppm and 2 s); a larger proposal is reported as a
 disagreement and not applied.
 
+**Drift measurement — and the decision about whether to apply it.** A drift is a
+*slope*, and a slope fitted through points that each carry a millisecond of noise is
+only good to about `noise / sqrt(Sxx)`. On a short recording the drift signal is
+smaller than that noise, so the fitted slope is a number without a measurement behind
+it. StageSync therefore does three things:
+
+1. It fits the slope **with its uncertainty**, and reports both.
+2. It measures the drift a second time, on the **raw waveform**, at positions the fit
+   did not use — the midpoints between the fine probes, which the model was not fitted
+   through. The search centre is interpolated from the *measured* neighbouring probes,
+   not from the model, so a model with the wrong slope cannot drag the search onto the
+   wrong part of the recording. Two different microphones have uncorrelated waveforms,
+   so the normalised correlation at the measured lag is what tells a genuine
+   same-signal match apart from a coincidence; a waveform figure whose correlation is
+   low is rejected rather than reported.
+3. It **decides**. A waveform measurement that is well determined wins, because it has
+   far less noise. An envelope measurement that is well determined is used when no
+   usable waveform measurement exists. When neither is well determined — when the drift
+   does not exceed its own uncertainty by a factor of three — **no rate change is
+   applied**: the correction is offset-only, and the report says so.
+
 **Hold-out verification.** The rendered audio is measured against the reference on the
 **raw waveform** with GCC-PHAT, at positions that sit *between* the fine-map probes, so
 they are genuine hold-out positions and a different estimator. The pitch change is
 measured independently by autocorrelation.
+
+The hold-out also measures **how wrong the applied drift is**. A correctly corrected
+file has flat residuals — the same offset error everywhere. A slope in the residuals
+against the source time means the applied *rate* is wrong, and the slope says by how
+much. This is measured on the audio that was actually written, so it is a statement
+about what was applied rather than a restatement of the model that was fitted.
 
 **Rendering.** A deterministic polyphase Kaiser-windowed-sinc resampler (63 taps, 1024
 phases) corrects the drift; a zero-drift source is corrected with a constant offset and
@@ -251,7 +334,10 @@ no resampling at all.
 **Segmentation.** The gap threshold follows the spacing the matcher actually achieved,
 estimated from *all* the measured points, and the hole is located from the envelope's
 quiet flags — so the reported gap covers the hole itself rather than the whole span
-around it, and the good material on either side of it is never stretched over it.
+around it, and the good material on either side of it is never stretched over it. A
+hole is only reported as a **recorder gap** when the reference has material over the
+same span; where the reference is silent too, the performance itself was quiet and the
+report says that no material was lost.
 
 ---
 
@@ -287,33 +373,43 @@ The target — **≤ 5 ms at ≥ 5 independent high-confidence positions** — i
 scenario except the deliberately brutal +1000 ppm one, where it is met at p50 and
 exceeded at p95 by 2.8 ms.
 
-### The Python fixture, and where it is noise-limited
+### The Python fixture, and where it stops being measurable
 
 `tools/make_fixtures.py` builds a harder fixture: +37.5 s offset, +35 ppm drift, −20 dB
-level, 44.1 kHz source against a 48 kHz reference, over 600 s. Measured on the 600 s
-fixture:
+level, 44.1 kHz source against a 48 kHz reference. Measured on the 600 s fixture:
 
 | Quantity | Value |
 |---|---|
 | True drift (from the generator's own arithmetic) | +35.00 ppm |
 | True offset | +37.5013 s |
-| Fitted offset | +37.5035 s |
-| Fitted drift | +26.834 ppm direct, +27.836 ppm calibrated |
-| **Model error across the whole file** | **≤ 2.2 ms** |
-| Independent waveform-domain measurement | **+34.828 ppm**, offset 37.501299 s, fit residual ≤ 0.076 ms |
+| Drift, envelope domain | +26.834 ppm direct, +27.836 ppm calibrated |
+| **Drift, waveform domain — the one applied** | **+35.121 ppm ± 0.17 ppm** |
+| Residual RMS of the waveform fit | 0.009 ms |
+| Model error across the whole file | **≤ 0.4 ms** |
 
-The **alignment** is good: ≤ 2.2 ms of model error across 562 s, inside the 5 ms target.
-The **slope** is not: the core fits the drift from RMS-envelope probes whose noise on
-this fixture is ±5 ms, and 35 ppm over 562 s is only 19.7 ms of signal, so the slope
-carries roughly ±8 ppm of uncertainty. A waveform-domain measurement of the same fixture
-resolves the drift to +34.83 ppm against a truth of +35.00 ppm.
+The **alignment** was always good: ≤ 2.2 ms of model error across 562 s, inside the
+5 ms target. The **slope** was not, and the reason is worth stating plainly rather than
+hiding: the envelope probes carry about ±5 ms of noise on this fixture, while 35 ppm
+over 562 s is only 19.7 ms of signal, so the slope carried roughly ±8 ppm of
+uncertainty. The waveform-domain estimator resolves the same fixture to +35.12 ppm
+against a truth of +35.00 ppm.
 
-That is a property of the *fixture*, not of the real recordings: on the real data the
-probe noise is about 1 ms and the drift signal is 77 ms, so the slope is resolved to
-better than ±0.03 ppm. The shorter 180 s variant of the same fixture resolves the
-drift not at all — it develops 5 ms of signal against the same ±5 ms of noise, and the
-measured slope comes out at −47.7 ppm. Use the Rust suite for drift assertions; use
-this fixture for the offset, level and sample-rate behaviour.
+**The fixture's length matters more than anything else here.** The 180 s variant of the
+same fixture develops only 5 ms of drift signal against the same ±5 ms of noise, and
+the envelope-domain fit comes out at **−47.7 ppm** — not a small error, the wrong sign.
+
+That case is now handled rather than merely documented:
+
+| 180 s fixture | Envelope domain | Waveform domain |
+|---|---|---|
+| Drift | −47.7 ppm ± 53.2 ppm | **+35.39 ppm ± 0.17 ppm** |
+| Residual RMS | 3.24 ms | 0.009 ms |
+| Mean waveform correlation | — | 0.99 |
+| **Applied** | rejected: the drift does not exceed its own uncertainty | **+35.39 ppm** |
+
+The drift estimate travels with the precision that produced it, and a figure that
+cannot be defended is not applied. When *neither* estimator can establish the drift,
+StageSync corrects the **offset only** and says so, rather than guessing a rate.
 
 ### The real recordings
 
@@ -328,6 +424,24 @@ The two implementations agree, both put the real alignment inside the 5 ms targe
 and p95, and both exclude the positions where their two methods disagree by more than
 10 ms rather than counting them.
 
+**How good is the drift itself?** The hold-out measures it on the *rendered* file: a
+correctly corrected file has flat residuals, and a slope in them means the applied rate
+is wrong.
+
+| Source | Drift error on the rendered file | Implied true drift |
+|---|---|---|
+| Voice 005 | **+0.081 ppm ± 0.022 ppm** | +16.197 ppm |
+| Voice 006 | **−0.458 ppm ± 0.103 ppm** | +16.042 ppm |
+
+So the two recorders' true drifts agree with each other to **0.16 ppm**, and the
+historical figures of 33–37 ppm and 12.95 ppm are excluded by two to three orders of
+magnitude.
+
+The waveform estimator finds no usable correlation on the real material — two different
+microphones record uncorrelated waveforms — so it is rejected there, and the envelope
+measurement stands. That is the correct answer for that material, and it is reported
+rather than papered over.
+
 The pitch change is reported two ways. The **model** implies −0.0279 cents (Voice 005)
 and −0.0286 cents (Voice 006) — `-1200 * log2(scale)`, which is the exact answer. An
 autocorrelation tracker on polyphonic material resolves to tens of cents, so the
@@ -337,8 +451,11 @@ hundredths of a cent, and the tool says so rather than pretending otherwise.
 
 **10 m 22 s of the reference was never recorded by anybody.** The merged timeline
 reports it as an explicit gap: **950.87 s** in total is not covered by any recorder —
-317.39 s before the first recorder starts, an 11.18 s recorder gap inside Voice 005, and
-the 622.30 s hole between the two recorders. It is not filled in with invented material.
+317.39 s before the first recorder starts, the 622.30 s hole between the two recorders,
+and 11.18 s inside Voice 005 where the recorder produced no usable signal. That last
+span was checked against the audio itself: the source drops to its own noise floor
+there, and the reference is silent over the same span, so no material was lost. It is
+not filled in with invented material.
 
 The full detail, including the drift figures from the handoff documents that this work
 does **not** reproduce, is in [`PROJECT_STATUS.md`](PROJECT_STATUS.md).

@@ -48,7 +48,24 @@ Break one of these and the result is wrong in a way that is easy to miss.
    corrected with a constant offset and **no** resampling — do not describe a rate
    change as "no resampling".
 
-7. **Honest reporting.** Never present an estimate as a measurement, a stub as a
+7. **A drift figure travels with its uncertainty, and an unestablished drift is not
+   applied.** A drift is a slope, and a slope fitted through points that carry a
+   millisecond of noise is only good to about `noise / sqrt(Sxx)`. Every drift figure
+   StageSync reports must carry the standard error that produced it, measured by
+   `matching::drift::fit_with_uncertainty`. When the drift does not exceed its own
+   uncertainty by a factor of three, it is **not** applied: the correction falls back
+   to the offset alone and says so. Never present a slope without the precision that
+   justifies it.
+
+8. **Two estimators, and the disagreement between them is the point.** The drift is
+   measured in the RMS-envelope domain and, independently, on the raw waveform at
+   positions the fit did not use. Where the raw waveforms are the same signal the
+   waveform measurement is far more precise and is the one applied; where they are two
+   different microphones the waveforms are uncorrelated, the waveform measurement is
+   rejected, and the envelope measurement stands. A disagreement between the two is
+   reported, never averaged away.
+
+9. **Honest reporting.** Never present an estimate as a measurement, a stub as a
    feature, or a plan as a result. If a number could not be measured, say so and say
    why. Disagreement between methods is reported, not averaged away.
 
@@ -176,6 +193,46 @@ test is genuinely wrong — and then say so explicitly.
   *model* implies next to the measured one, count the differences that are too large to
   be pitch measurements separately, and say plainly that the tracker cannot resolve a
   correction of a few hundredths of a cent.
+* **Reporting a drift without the uncertainty that produced it.** The envelope probes
+  resolve the *position* to about a millisecond, but a drift of a few tens of parts per
+  million over a few minutes is itself only a few milliseconds — so on a short
+  recording the envelope's slope is a number without a measurement behind it. It came
+  out at −47.7 ppm against a truth of +35 ppm, with a standard error of 53 ppm. The
+  figure was not wrong because the fit was careless; it was wrong because nobody
+  asked how well it was determined. Always fit the slope *with* its uncertainty, and
+  compare the two.
+* **Preferring the envelope drift when a waveform measurement is available.** The
+  waveform measurement is a different estimator with different noise, and it is an
+  order of magnitude more precise when the two files really are the same signal. Use
+  it. Use the envelope when the waveform measurement is not available or not
+  meaningful — and say which one was used.
+* **Trusting a waveform measurement on two different microphones.** Two recorders of
+  the same performance have uncorrelated waveforms but strongly correlated envelopes.
+  The normalised correlation at the measured lag is what tells the two cases apart; a
+  waveform figure whose mean correlation is low is not a measurement of anything, and
+  it must be rejected rather than reported.
+* **Probing the waveform at the positions the model was fitted through.** That only
+  restates the model. Probe at the midpoints between the fine probes, which the fit
+  did not use, and interpolate the search centre from the *measured* neighbouring
+  probes rather than from the model — a model with the wrong slope would otherwise
+  drag the search onto the wrong part of the recording.
+* **Calling a hole in the source a recorder gap when the reference is silent there
+  too.** A hole is only *lost material* if the reference has material over the same
+  span. When the performance itself was quiet, the source carries its recorder's
+  self-noise and nothing was missed. Check the reference before calling it a gap.
+* **Writing a source's material past the end of its covered range.** The merged
+  render works in blocks, and a block boundary that falls near the end of a source
+  will otherwise carry that source's resampler ringing into a span that nothing
+  covers — and lose the first fraction of the next source. Honour the exact ranges.
+* **A test whose verdict depends on where a block boundary happens to fall.** The
+  merged-timeline hole test passed only because the hole boundary landed on a block
+  edge; change the model slightly and the source's own boundary ringing landed inside
+  the checked region and the test failed. A test that measures the source's last
+  samples is measuring the boundary, not the hole. Measure a margin inside the hole.
+* **Reading a drift error off the model's own residuals.** The drift error has to be
+  measured on the **rendered** file, where the residuals are flat if the rate is
+  right and slope if it is wrong. Measured against the model that produced them, the
+  residuals are flat by construction and the figure is meaningless.
 
 ## Git
 
