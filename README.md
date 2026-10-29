@@ -107,10 +107,9 @@ reference: combined.wav (9685.46 s, 48000 Hz, 1 ch)
 Voice 005_W_20250208_152158.m4a: offset +317.389 s, drift +16.116 ppm, 49.6% covered, 662 points (0 skipped), 2 warnings
     note: direct drift +16.169 ppm vs calibrated +16.116 ppm (difference -0.053 ppm)
     fine probes: 319 measured, 0 skipped (quiet 0, no region 0, no peak 0)
-    drift: established by the envelope method, +16.116 ppm ± 0.033 ppm, applied over 319 measurement(s)
-      envelope estimate: +16.116 ppm ± 0.033 ppm, residual 1.60 ms, 319 measurement(s)
-      waveform estimate: +16.116 ppm ± 0.081 ppm, residual 2.32 ms, 142 measurement(s), mean waveform correlation 0.04
-      note: the waveform estimate was used because it is the more precise measurement
+    drift: established by the envelope method, +16.116 ppm ± 0.099 ppm, applied over 282 measurement(s)
+      envelope estimate: +16.116 ppm ± 0.099 ppm, residual 1.95 ms, 282 measurement(s)
+      note: the waveform-domain measurement was rejected, so the envelope estimate was used
     coarse candidate: lag +317.400 s, 15 vote(s), mean score 0.057
     ...
     warning: no waveform probe produced a usable correlation, so the raw waveforms do not appear to be the same signal
@@ -121,6 +120,12 @@ through points that carry a millisecond of noise is only good to about
 `noise / sqrt(Sxx)`. StageSync therefore reports every drift figure **with the
 uncertainty that produced it**, measures the drift a second time on the raw waveform at
 positions the fit did not use, and says which of the two it applied and why.
+
+On the real recordings the waveform measurement is **rejected** — two different
+microphones record uncorrelated waveforms, so there is no waveform measurement to be
+had — and the envelope estimate stands, which is the correct answer for that material.
+On material where the two files really are the same signal, the waveform estimate is
+far more precise and it is the one applied; see the fixture figures below.
 
 Three flags control it:
 
