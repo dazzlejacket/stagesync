@@ -5,11 +5,9 @@ checked, what was found, what was fixed, what was deliberately left alone, and w
 could **not** be verified from the machine this work was done on.
 
 The short version: **the repository is in a state where a release can be prepared, but
-it should not be tagged yet.** Two things stand in the way. The macOS and Linux builds
+it should not be tagged yet.** One thing stands in the way: the macOS and Linux builds
 have never been run — this repository has no remote, so the workflows that would build
-them have never executed — and an export that fails part-way through leaves a partial
-WAV file behind that looks like a finished one. Both are stated plainly below rather
-than glossed over.
+them have never executed. That is stated plainly below rather than glossed over.
 
 Everything else that was found has been fixed, and each fix has a test or a command
 that proves it.
@@ -165,7 +163,38 @@ The cancel flag was checked between renders but not after the last one, so a can
 that arrived while the artefacts were being written was ignored and the export
 reported success. The flag is now read after the last file is written as well.
 
-### 2.10 The declared minimum Rust version was false — **corrected**
+### 2.10 An export that failed part-way through left a half-written file — **fixed**
+
+The export wrote straight to the destination. A failure part-way through — a full
+disk, a revoked permission, a cancelled render — left a WAV file that was shorter
+than it should be, with nothing in it saying so, and a user could mistake it for a
+finished export.
+
+The samples are now written to a temporary file beside the destination and moved into
+place when the file is finished. A file at the destination is therefore always a
+complete one, and an abandoned write leaves the destination untouched. The temporary
+file is removed when the writer is dropped, so nothing is left behind either.
+
+Three regression tests cover it: an unfinished write leaves nothing at the
+destination and no temporary file behind, a finished write is at the destination with
+no temporary file left, and a render that cannot finish leaves the destination as it
+was.
+
+### 2.11 Two recordings with the same name were exported onto each other — **fixed**
+
+The corrected file of a recording is named after the recording, so two recordings that
+share a file name — the same track captured by two recorders into different folders —
+were given the same output name. The second render replaced the first, and one of the
+two exports was lost without a word.
+
+An export now refuses to go ahead when two of its planned outputs name the same file,
+and the message says which file it is and what to do about it. The check runs before
+anything is written, in the command line and in the window alike.
+
+A test covers it: two recordings with the same name are refused, two files with the same
+name in two different folders are not, and a single output is not.
+
+### 2.12 The declared minimum Rust version was false — **corrected**
 
 The manifest said `rust-version = 1.82`. The build cannot honour that: `eframe` and
 `egui` 0.37 declare `rust-version = 1.95`, `wgpu` 30 needs 1.87, and `symphonia` 0.6
@@ -182,7 +211,7 @@ floor is set by the dependencies rather than chosen.
 > the floor follows the dependencies and is not churned — is preserved in the updated
 > wording.
 
-### 2.11 Text in eight source files had been destroyed — **fixed**
+### 2.13 Text in eight source files had been destroyed — **fixed**
 
 Several files carried text that had been decoded as Windows-1252 and re-encoded as
 UTF-8: an em dash had become `aEUR a-quote`, a sigma `A-circumflex A-hyphen`, an
@@ -194,13 +223,13 @@ corruption transform forwards from a candidate and comparing the result with the
 observed bytes, rather than by guessing. The remainder are the em dash the rest of the
 repository uses.
 
-### 2.12 The Intel macOS runner had been retired — **fixed**
+### 2.14 The Intel macOS runner had been retired — **fixed**
 
 Both workflows asked for `macos-13`, a label GitHub has retired. The whole release
 workflow would have failed at the matrix expansion. It now asks for
 `macos-15-intel`.
 
-### 2.13 Smaller fixes
+### 2.15 Smaller fixes
 
 | What | Why it mattered |
 |---|---|
@@ -230,7 +259,7 @@ Run on Windows 11 x64, with Rust 1.99.1:
 |---|---|
 | `cargo fmt --check` | exit 0 |
 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0 |
-| `cargo test --workspace` | exit 0, every test passed |
+| `cargo test --workspace` | exit 0, 133 tests, every one passed |
 | `cargo build --release` | exit 0 |
 
 ### 3.2 The real recordings
@@ -251,6 +280,13 @@ fixes in this pass did not move the measurement.
 
 The export of the same material took 103.8 s and wrote both corrected files and every
 artefact.
+
+The export was then run again, after the write path was made atomic. The two corrected
+files came out **byte for byte identical** to the first run (`c78382fa…` and
+`b3c5653f…`), as did `syncmap.csv`, `segments.csv`, `plan.json`, `timeline.txt` and the
+drift graph. `report.json` differs in exactly five leaves — the paths of the artefacts,
+because the second export went to a different directory — and in no measurement. The
+atomic write changed how the file is put in place, and nothing else.
 
 ### 3.3 The independent verifier
 
@@ -301,19 +337,7 @@ application's minimum.
 
 These were found and **not** fixed. They are listed so that nothing is a surprise.
 
-### 4.1 An export that fails part-way through leaves a partial file — **P1**
-
-The export writes directly to the destination. A failure part-way through — a full
-disk, a revoked permission, a cancelled render — leaves a WAV file that is shorter
-than it should be, and nothing in it says so. A user could mistake it for a finished
-export.
-
-The fix is to write to a temporary file in the same directory and rename it into
-place, so that a file at the destination is always complete. It was not done here
-because it touches every write path in the renderer and the WAV writer, and it
-deserves its own change with its own tests.
-
-### 4.2 The macOS and Linux builds are unverified — **P0 for a release**
+### 4.1 The macOS and Linux builds are unverified — **P0 for a release**
 
 This repository has no GitHub remote, so the workflows that would build them have
 never run. The Intel runner label has been corrected, but **nothing has been built on
@@ -322,18 +346,18 @@ dialog, the path handling, the packaging — is configured but unexercised.
 
 This is the main reason the release should not be tagged yet.
 
-### 4.3 The independent verifier could not verify the second recording — **P2**
+### 4.2 The independent verifier could not verify the second recording — **P2**
 
 Two positions were *disputed* — the waveform and envelope methods disagreed by more
 than 10 ms — and one position fell past the end of the reference. The verifier's
 gates were not relaxed to produce a number.
 
-### 4.4 The application asks for more room than a small HiDPI display has — **P2**
+### 4.3 The application asks for more room than a small HiDPI display has — **P2**
 
 The minimum window is 960×640 logical points. A 1440×900 display at 200 % offers
 720×450. On such a display the window is smaller than the application asks for.
 
-### 4.5 Smaller open items
+### 4.4 Smaller open items
 
 | Item | Note |
 |---|---|
@@ -363,12 +387,10 @@ follows the conventions already in the repository.
 1. **Build and test on macOS and Linux.** Push the repository to a remote and let the
    workflows run. The Intel runner label has been changed; check that it exists on the
    day it runs.
-2. **Make the export atomic.** Write to a temporary file and rename it into place, so
-   that a file at the destination is always a complete one.
-3. **Run an advisory scan.** `cargo audit` and `cargo deny` were not available here.
-4. **Decide about the `continuous` appimagetool.** Pin it to a numbered release with a
+2. **Run an advisory scan.** `cargo audit` and `cargo deny` were not available here.
+3. **Decide about the `continuous` appimagetool.** Pin it to a numbered release with a
    checksum that has been verified against the upstream release.
-5. **Re-run the four gates** on the machine that will cut the release, and record the
+4. **Re-run the four gates** on the machine that will cut the release, and record the
    exit codes.
 
 Everything else in this report has been done, and each fix has a test or a command

@@ -77,8 +77,8 @@ cargo build --release
 On Linux the desktop crate needs the usual X11/Wayland development packages; see
 [`BUILDING.md`](BUILDING.md) for the exact list and for the packaging steps.
 
-The test suite is **129 tests**, all passing: 13 core unit tests, 12 alignment
-scenarios, 6 drift-verdict scenarios, 18 DSP tests, 17 render tests, 12 robustness
+The test suite is **133 tests**, all passing: 13 core unit tests, 12 alignment
+scenarios, 6 drift-verdict scenarios, 18 DSP tests, 21 render tests, 12 robustness
 tests, and 51 desktop tests. It is **hermetic**: it generates its own fixtures, uses a
 temporary directory, and depends on nothing outside the test - no Python, no network,
 no checked-in media.

@@ -752,6 +752,48 @@ fn the_planned_outputs_are_checked_against_the_recordings() {
     );
 }
 
+/// Two recordings with the same file name must not be exported onto each other.
+///
+/// The corrected file of a recording is named after the recording, so two
+/// recordings called `track.wav` — the same track captured by two recorders
+/// into different folders — are given the same output name. The second write
+/// would replace the first, and one of the two exports would be lost without a
+/// word.
+#[test]
+fn two_recordings_with_the_same_name_are_refused() {
+    let dir = TempDir::new().expect("temp dir");
+    let out = dir.path();
+
+    // Two recordings with the same name in different folders.
+    let one = out.join("a");
+    let two = out.join("b");
+    std::fs::create_dir_all(&one).expect("first folder");
+    std::fs::create_dir_all(&two).expect("second folder");
+
+    let colliding = vec![
+        out.join("track_corrected.wav"),
+        out.join("track_corrected.wav"),
+    ];
+    let error = stagesync_core::render::ensure_outputs_are_distinct(&colliding)
+        .expect_err("the collision must be refused");
+    assert!(
+        format!("{error:#}").contains("would be written twice"),
+        "the refusal must say why, got {error:#}"
+    );
+
+    // The same name in different directories is two files, not one.
+    let distinct = vec![
+        one.join("track_corrected.wav"),
+        two.join("track_corrected.wav"),
+    ];
+    stagesync_core::render::ensure_outputs_are_distinct(&distinct)
+        .expect("two files in two folders are not a collision");
+
+    // A single output is not a collision either.
+    stagesync_core::render::ensure_outputs_are_distinct(&[out.join("track_corrected.wav")])
+        .expect("one output is not a collision");
+}
+
 /// The output name must not carry a path separator out of the output folder.
 #[test]
 fn an_output_name_never_carries_a_path_separator() {
@@ -760,4 +802,91 @@ fn an_output_name_never_carries_a_path_separator() {
     assert_eq!(stagesync_core::render::safe_stem(r"c\d.wav"), "d");
     assert_eq!(stagesync_core::render::safe_stem(""), "source");
     assert_eq!(stagesync_core::render::safe_stem(".."), "source");
+}
+
+/// A writer that is dropped without being finalised leaves nothing behind.
+///
+/// The samples go to a temporary file beside the destination, so a write that
+/// fails half way through never leaves a half-written file where a finished
+/// export is expected.
+#[test]
+fn an_unfinished_write_leaves_nothing_at_the_destination() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("out.wav");
+    {
+        let mut writer =
+            WavWriter::create(&path, 44_100, 1, WavFormat::Float32).expect("the writer is created");
+        writer
+            .write_planar(&[vec![0.1f32; 1000]])
+            .expect("the samples are written");
+        // The writer is dropped here without being finalised.
+    }
+    assert!(
+        !path.exists(),
+        "the destination must not hold a half-written file"
+    );
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("the directory can be read")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the temporary file was left behind: {leftovers:?}"
+    );
+}
+
+/// A finished write is at the destination, and the temporary file is gone.
+#[test]
+fn a_finished_write_is_at_the_destination() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("out.wav");
+    let samples: Vec<f32> = (0..1000).map(|i| (i as f32 / 1000.0).sin()).collect();
+    {
+        let mut writer =
+            WavWriter::create(&path, 44_100, 1, WavFormat::Float32).expect("the writer is created");
+        writer
+            .write_planar(std::slice::from_ref(&samples))
+            .expect("the samples are written");
+        writer.finalize().expect("the file is finalised");
+    }
+    assert!(path.exists(), "the destination holds the finished file");
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("the directory can be read")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name != "out.wav")
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the temporary file was left behind: {leftovers:?}"
+    );
+
+    let reader = WavReader::open(&path).expect("the finished file can be read");
+    assert_eq!(reader.sample_rate(), 44_100);
+    assert_eq!(reader.channels(), 1);
+}
+
+/// A render that cannot finish leaves the destination as it was.
+///
+/// The destination here is a directory, so the file cannot be moved into place.
+/// Whatever was there before has to survive the failure.
+#[test]
+fn a_failed_render_leaves_the_destination_alone() {
+    let dir = TempDir::new().expect("temp dir");
+    let reference = reference_file(RATE, DURATION, 0xC0FFEE);
+    let source = build_source(&dir, "src.wav", 1.0, 25.0, SOURCE_RATE, -20.0, None);
+    let report = analyse(&reference, std::slice::from_ref(&source), &config());
+    let model = model_for(&report, 0);
+
+    // A directory cannot be replaced by a file.
+    let destination = dir.path().join("taken");
+    std::fs::create_dir_all(&destination).expect("the directory is created");
+
+    let result = render_source_aligned(&source, &model, &destination, &RenderOptions::default());
+    assert!(result.is_err(), "the render must fail");
+    assert!(
+        destination.is_dir(),
+        "the destination must still be what it was"
+    );
 }

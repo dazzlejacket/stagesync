@@ -368,7 +368,7 @@ construction. No Python, no network, no checked-in media.
 | `tests/alignment_tests.rs` | 12 | offsets (positive, negative, multi-hour), drift (+10, +35, −35, +1000 ppm), sample-rate mismatch, level difference, EQ + noise, repeated choruses, head/tail silence, the log-mel cross-check as an independent method. |
 | `tests/drift_tests.rs` | 6 | the drift verdict: the waveform estimator on a short recording, the waveform correcting an envelope estimate that looks precise but is not, offset-only on request, the hold-out probes being genuine hold-out positions, the applied model agreeing with the waveform measurements, and the hold-out drift-error measurement having **no systematic bias**. |
 | `tests/dsp_tests.rs` | 18 | the correlation, the peak finding, the model and the masking. |
-| `tests/render_tests.rs` | 17 | render determinism, no NaNs, no clipping, stereo channel relationship, int16 level, beyond-reference tails, input immutability, the merged timeline, the pitch shift, WAV round trip, timeline silence, the recorder gap. |
+| `tests/render_tests.rs` | 21 | render determinism, no NaNs, no clipping, stereo channel relationship, int16 level, beyond-reference tails, input immutability, the merged timeline, the pitch shift, WAV round trip, timeline silence, the recorder gap, the **atomic write** (an unfinished write leaves nothing behind) and **two recordings with the same name being refused**. |
 | `tests/robustness_tests.rs` | 12 | non-audio / empty / missing file rejected, truncated WAV, too-short source, cancellation before and during analysis, a shared cancellation token, AAC/M4A via ffmpeg, and a **2-hour recording handled without loading it whole**. |
 | core unit tests (in the library) | 13 | the DSP, the window extractor and the drift assessment. |
 | `crates/stagesync-desktop` unit tests | 29 | the desktop crate's painters and its state helpers, and the head-less layout test. |
@@ -451,9 +451,10 @@ that changed the state of the project were:
 | The Intel macOS runner | `macos-13`, a retired label | `macos-15-intel` |
 | The release workflow | ran no tests | runs the suite before it builds |
 
-Two things were **not** fixed, and are the reason the release should not be tagged
-yet: an export that fails part-way through leaves a partial WAV behind, and the macOS
-and Linux builds have never run because the repository has no remote.
+One thing was **not** fixed, and is the reason the release should not be tagged yet:
+the macOS and Linux builds have never run because the repository has no remote. An
+export that fails part-way through no longer leaves a partial WAV behind - the
+samples go to a temporary file and are moved into place when the file is finished.
 
 ---
 

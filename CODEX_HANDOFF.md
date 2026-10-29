@@ -37,14 +37,12 @@ either.
 **The four gates pass on Windows 11 x64 with Rust 1.99.1**, and every test passes.
 The workspace is clean apart from the changes of this pass, which are committed.
 
-The release preparation is **not finished**. Two things stand in the way of tagging:
+The release preparation is **not finished**. One thing stands in the way of tagging:
 
 1. **The macOS and Linux builds have never run.** The repository has no GitHub remote,
    so the workflows that would build them have never executed. The Intel runner label
    has been corrected (`macos-13` → `macos-15-intel`), but nothing has been built on
    it.
-2. **An export that fails part-way through leaves a partial WAV** that looks like a
-   finished one.
 
 The full account is in [`PRE_RELEASE_REPORT.md`](PRE_RELEASE_REPORT.md). Read that
 rather than this file if you want the detail.
@@ -72,6 +70,13 @@ rather than this file if you want the detail.
 - **A second job could be started**, orphaning the first one's cancel flag. Fixed.
 - **A stale result could be shown against a changed file list.** Fixed.
 - **A cancelled export could report success.** Fixed.
+- **An export that failed part-way through left a half-written file at the
+  destination.** The samples now go to a temporary file beside the destination and are
+  moved into place when the file is finished, so a file at the destination is always a
+  complete one.
+- **Two recordings with the same file name were exported onto each other.** Their
+  corrected files share a name, so the second render replaced the first. An export is
+  now refused when two of its outputs name the same file.
 - **The declared minimum Rust version was false** (`1.82`; the dependencies need
   1.95). Corrected, and `AGENTS.md` updated to record why.
 - **Text in eight source files had been destroyed** by a Windows-1252 mis-decode,
@@ -152,20 +157,14 @@ neighbouring probes rather than from the model.
 
 ## 5. The open items, in the order they are worth doing
 
-1. **Make the export atomic.** Write to a temporary file in the destination directory
-   and rename it into place, so that a file at the destination is always complete.
-   This touches every write path in `crates/stagesync-core/src/render/mod.rs` and
-   `crates/stagesync-core/src/audio/wav.rs`, and it wants its own tests: one that a
-   failed render leaves nothing behind, and one that the bytes at the destination are
-   the bytes that were rendered.
-2. **Build on macOS and Linux.** Nothing else in this list matters as much.
-3. **Run an advisory scan**, and pin `appimagetool`.
-4. **Decide what `report.json` should record about paths.** It currently records the
+1. **Build on macOS and Linux.** Nothing else in this list matters as much.
+2. **Run an advisory scan**, and pin `appimagetool`.
+3. **Decide what `report.json` should record about paths.** It currently records the
    absolute path of every file that was read, which is useful and also embeds the
    user's directory layout in a file that gets attached to support requests.
-5. **Separate a recorder gap from an uncovered reference in the coverage figure.** The
+4. **Separate a recorder gap from an uncovered reference in the coverage figure.** The
    segments report distinguishes them; the summary figure does not.
-6. **Drive the real window in continuous integration.** Only the headless layout test
+5. **Drive the real window in continuous integration.** Only the headless layout test
    is exercised there.
 
 ---

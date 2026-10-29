@@ -266,7 +266,11 @@ fn main() -> Result<()> {
             let inputs: Vec<PathBuf> = std::iter::once(reference.clone())
                 .chain(report.sources.iter().map(|a| a.source.path.clone()))
                 .collect();
-            for output in render::planned_outputs(&out, &report, options.layout) {
+            let planned = render::planned_outputs(&out, &report, options.layout);
+            // Two recordings that share a file name are given the same output
+            // name, and the second write would silently replace the first.
+            render::ensure_outputs_are_distinct(&planned)?;
+            for output in planned {
                 render::ensure_output_does_not_overwrite(&output, &inputs)?;
             }
 

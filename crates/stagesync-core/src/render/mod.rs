@@ -521,6 +521,36 @@ pub fn ensure_output_does_not_overwrite(output: &Path, inputs: &[PathBuf]) -> Re
     Ok(())
 }
 
+/// Refuse an export whose planned outputs would land on one another.
+///
+/// The corrected file of a recording is named after the recording, so two
+/// recordings that share a file name — the same track captured by two recorders
+/// into different folders, say — are given the same output name. The second
+/// write would silently replace the first, and one of the two exports would be
+/// lost without a word. The export is refused instead, and the message names
+/// the file that would have been written twice.
+pub fn ensure_outputs_are_distinct(outputs: &[PathBuf]) -> Result<()> {
+    for (index, output) in outputs.iter().enumerate() {
+        let Some(target) = comparable_path(output) else {
+            continue;
+        };
+        for other in &outputs[index + 1..] {
+            let Some(source) = comparable_path(other) else {
+                continue;
+            };
+            if same_path(&target, &source) {
+                anyhow::bail!(
+                    "refusing to export: {} would be written twice, because two of the \
+                     recordings have the same file name. Rename one of them, or export \
+                     them one at a time.",
+                    output.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A path in a form that can be compared with another path.
 ///
 /// The output usually does not exist yet, so its parent directory is resolved

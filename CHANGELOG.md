@@ -45,6 +45,14 @@ commit of the initial working version.
 - **A cancelled export could still report success.** The cancel flag is now read after
   the last file is written, so a cancel that arrived during the export is reported as a
   cancellation.
+- **An export that failed part-way through left a half-written WAV file behind.** The
+  samples are now written to a temporary file beside the destination and moved into place
+  when the file is finished, so a file at the destination is always a complete one. A
+  write that is abandoned leaves the destination untouched.
+- **Two recordings with the same file name were exported onto each other.** Their
+  corrected files share a name, so the second render replaced the first and one of the
+  two exports was lost. An export is now refused when two of its outputs name the same
+  file, and the message says what to do about it.
 - **Several source files carried mojibake.** Some text had been decoded as Windows-1252
   and re-encoded as UTF-8, so an em dash became `aEUR a-quote` and a sigma became
   `A-circumflex A-hyphen`. The command line printed the garbage to the terminal.

@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -33,12 +33,41 @@ impl WavFormat {
 }
 
 /// Streaming WAV writer that accepts blocks of planar frames.
+///
+/// The samples are written to a temporary file beside the destination, and that
+/// file is moved into place when the writer is finalised. A file at the
+/// destination is therefore always a complete one: a render that fails half way
+/// through leaves the destination untouched, and the temporary file is removed
+/// when the writer is dropped.
 pub struct WavWriter {
-    writer: hound::WavWriter<BufWriter<File>>,
+    /// The writer itself, taken out when the file is finalised.
+    writer: Option<hound::WavWriter<BufWriter<File>>>,
     format: WavFormat,
     channels: usize,
     sample_rate: u32,
     frames_written: u64,
+    /// Where the finished file belongs.
+    destination: PathBuf,
+    /// The file being written to.
+    temporary: PathBuf,
+    /// Whether the file has been moved into place.
+    committed: bool,
+}
+
+/// The name of the temporary file a destination is written through.
+///
+/// The name is hidden, and carries the process id, so that two exports running
+/// at the same time do not write over one another's temporary file.
+fn temporary_path(destination: &Path) -> PathBuf {
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "output".to_string());
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent.join(format!(".{name}.{}.stagesync-part", std::process::id()))
 }
 
 impl WavWriter {
@@ -66,17 +95,31 @@ impl WavWriter {
                 WavFormat::Int16 => hound::SampleFormat::Int,
             },
         };
-        let file = File::create(path)
+        let temporary = temporary_path(path);
+        // The destination is named in the error rather than the temporary file: the
+        // temporary name is a hidden, process-specific one that the user did not ask
+        // for and cannot act on.
+        let file = File::create(&temporary)
             .with_context(|| format!("failed to create WAV file: {}", path.display()))?;
         let writer = hound::WavWriter::new(BufWriter::with_capacity(1 << 20, file), spec)
             .with_context(|| format!("failed to initialise WAV file: {}", path.display()))?;
         Ok(Self {
-            writer,
+            writer: Some(writer),
             format,
             channels,
             sample_rate,
             frames_written: 0,
+            destination: path.to_path_buf(),
+            temporary,
+            committed: false,
         })
+    }
+
+    /// The writer, while the file is still being written.
+    fn writer(&mut self) -> Result<&mut hound::WavWriter<BufWriter<File>>> {
+        self.writer
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the WAV file has already been finalised"))
     }
 
     /// Sample rate of the output file.
@@ -116,7 +159,7 @@ impl WavWriter {
             WavFormat::Float32 => {
                 for i in 0..n {
                     for p in planes {
-                        self.writer.write_sample(p.as_ref()[i])?;
+                        self.writer()?.write_sample(p.as_ref()[i])?;
                     }
                 }
             }
@@ -125,7 +168,7 @@ impl WavWriter {
                     for p in planes {
                         let v = (p.as_ref()[i] * 32767.0).round();
                         let v = v.clamp(-32768.0, 32767.0);
-                        self.writer.write_sample(v as i16)?;
+                        self.writer()?.write_sample(v as i16)?;
                     }
                 }
             }
@@ -140,14 +183,14 @@ impl WavWriter {
             WavFormat::Float32 => {
                 for _ in 0..frames {
                     for _ in 0..self.channels {
-                        self.writer.write_sample(0.0f32)?;
+                        self.writer()?.write_sample(0.0f32)?;
                     }
                 }
             }
             WavFormat::Int16 => {
                 for _ in 0..frames {
                     for _ in 0..self.channels {
-                        self.writer.write_sample(0i16)?;
+                        self.writer()?.write_sample(0i16)?;
                     }
                 }
             }
@@ -156,10 +199,38 @@ impl WavWriter {
         Ok(())
     }
 
-    /// Finalise the WAV header and flush to disk.
-    pub fn finalize(self) -> Result<()> {
-        self.writer.finalize()?;
+    /// Finalise the WAV header, flush it to disk, and move the file into place.
+    pub fn finalize(mut self) -> Result<()> {
+        let writer = self
+            .writer
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("the WAV file has already been finalised"))?;
+        writer.finalize().with_context(|| {
+            format!(
+                "failed to finalise WAV file: {}",
+                self.destination.display()
+            )
+        })?;
+        std::fs::rename(&self.temporary, &self.destination).with_context(|| {
+            format!(
+                "failed to move the finished WAV file into place at {}",
+                self.destination.display()
+            )
+        })?;
+        self.committed = true;
         Ok(())
+    }
+}
+
+impl Drop for WavWriter {
+    /// Remove the temporary file when the writer was not finalised.
+    ///
+    /// The file at the destination is left alone, so a failed write never
+    /// replaces a good export with a broken one.
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.temporary);
+        }
     }
 }
 
