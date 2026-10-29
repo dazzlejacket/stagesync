@@ -410,9 +410,7 @@ pub fn render_merged_timeline(
     let block = (output_rate as u64 / 10).max(1); // ~100 ms blocks
 
     while cursor < total_frames {
-        let block_end = (cursor + block).min(total_frames);
-
-        // The lowest-index source covering this block owns it.
+        // The owner is the lowest-index source whose range covers this frame.
         let mut owner: Option<usize> = None;
         for (i, (s, e)) in ranges.iter().copied().enumerate() {
             if cursor >= s && cursor < e {
@@ -420,6 +418,23 @@ pub fn render_merged_timeline(
                 break;
             }
         }
+
+        // The span ends at the earliest of: the end of this block, the end of the
+        // owner's range, and the start of the next source.
+        //
+        // Honouring the exact boundaries matters. A source's material begins and ends
+        // where its range says, and a block boundary that happens to fall nearby is
+        // not a reason to carry a source's material past the end of its range — that
+        // would put a source's resampler ringing into a span that nothing covers, and
+        // would lose the first fraction of the next source.
+        let mut span_end = (cursor + block).min(total_frames);
+        if let Some(i) = owner {
+            span_end = span_end.min(ranges[i].1);
+        }
+        if let Some(next_start) = ranges.iter().map(|(s, _)| *s).filter(|s| *s > cursor).min() {
+            span_end = span_end.min(next_start);
+        }
+        span_end = span_end.max(cursor + 1).min(total_frames);
 
         match owner {
             Some(i) => {
@@ -429,7 +444,7 @@ pub fn render_merged_timeline(
                     cursors[i] = Some(SourceCursor::new(path, geom, cursor as i64, options)?);
                 }
                 let c = cursors[i].as_mut().expect("cursor just created");
-                let frames = c.take(cursor as i64, block_end as i64)?;
+                let frames = c.take(cursor as i64, span_end as i64)?;
                 let n = frames.len();
                 if n > 0 {
                     let per_channel = vec![frames; channels];
@@ -437,16 +452,16 @@ pub fn render_merged_timeline(
                     source_frames += n as u64;
                 }
                 let advanced = cursor + n as u64;
-                if advanced < block_end {
-                    writer.write_silence((block_end - advanced) as usize)?;
-                    silence_frames += block_end - advanced;
+                if advanced < span_end {
+                    writer.write_silence((span_end - advanced) as usize)?;
+                    silence_frames += span_end - advanced;
                 }
-                cursor = block_end;
+                cursor = span_end;
             }
             None => {
-                writer.write_silence((block_end - cursor) as usize)?;
-                silence_frames += block_end - cursor;
-                cursor = block_end;
+                writer.write_silence((span_end - cursor) as usize)?;
+                silence_frames += span_end - cursor;
+                cursor = span_end;
             }
         }
     }

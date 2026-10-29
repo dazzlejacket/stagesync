@@ -44,7 +44,7 @@ impl Default for FineOptions {
 }
 
 /// The result of the fine stage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FineResult {
     /// Every measured point, including low-confidence ones.
     pub points: Vec<MatchPoint>,
@@ -167,6 +167,7 @@ pub fn fine_match(
             residual_ms: 0.0,
             confidence: Confidence::new(score, reason),
             method: MatchMethod::FineEnvelope,
+            note: String::new(),
         });
 
         probe += options.hop_secs * rate;
@@ -381,6 +382,7 @@ pub fn spectral_offsets(
                 residual_ms: 0.0,
                 confidence: Confidence::new(score, reason),
                 method: MatchMethod::FineSpectral,
+                note: String::new(),
             });
         }
         probe += options.hop_secs * rate;

@@ -82,8 +82,7 @@ fn build_source_from(
 fn model_for(report: &stagesync_core::matching::AlignmentReport, index: usize) -> LinearModel {
     let alignment = &report.sources[index];
     alignment
-        .calibrated_model
-        .or(alignment.direct_model)
+        .model()
         .expect("the analysis should have produced a model")
 }
 
@@ -497,9 +496,25 @@ fn the_merged_timeline_combines_two_sources_without_losing_either() {
         hole_end - hole_start > 5.0,
         "the fixture does not leave a hole: {hole_start}..{hole_end}"
     );
-    let a = (hole_start * RATE as f64) as usize;
-    let b = (hole_end * RATE as f64) as usize;
+    // The hole must not be filled with material. It is not *exactly* zero: the
+    // windowed-sinc resampler rings for a few milliseconds after the last sample it
+    // could use, and that ringing belongs to the source, so it is left in place. It
+    // has to sit far below the signal, though.
+    //
+    // The check starts a few milliseconds past the boundary, because the frames
+    // immediately after it are the source's own last samples and their ringing. That
+    // the boundary lands where it does is not something the test should depend on: the
+    // renderer works in blocks, so a boundary that happens to fall on a block edge
+    // would otherwise hide the ringing and make the test pass for the wrong reason.
+    let signal_peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    let margin = (0.05 * RATE as f64).round() as usize;
+    let a = (hole_start * RATE as f64).round() as usize + margin;
+    let b = (hole_end * RATE as f64).round() as usize - margin;
     let region = &samples[a.min(samples.len())..b.min(samples.len())];
+    assert!(
+        !region.is_empty(),
+        "the hole is too short to check: {hole_start}..{hole_end}"
+    );
     let region_peak = region.iter().fold(0.0f32, |m, v| m.max(v.abs()));
     let mut sq = 0.0f64;
     for v in region {
@@ -507,11 +522,6 @@ fn the_merged_timeline_combines_two_sources_without_losing_either() {
     }
     let region_rms = (sq / region.len().max(1) as f64).sqrt();
 
-    // The hole must not be filled with material. It is not *exactly* zero: the
-    // windowed-sinc resampler rings for a few milliseconds after the last sample it
-    // could use, and that ringing belongs to the source, so it is left in place. It
-    // has to sit far below the signal, though.
-    let signal_peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
     assert!(
         region_peak < signal_peak * 0.01,
         "the gap between the two sources was filled with material (peak {region_peak}, signal {signal_peak})"

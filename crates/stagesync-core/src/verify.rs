@@ -76,6 +76,11 @@ impl Default for VerifyConfig {
 /// One hold-out measurement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoldoutPoint {
+    /// Position in the source, in seconds.
+    ///
+    /// The residuals are measured against the model, so the position in the source is
+    /// what turns a residual into a statement about the drift.
+    pub source_time: f64,
     /// Reference time of the measurement, in seconds.
     pub reference_time: f64,
     /// Measured residual in milliseconds. Positive means the corrected audio is ahead.
@@ -131,6 +136,20 @@ pub struct HoldoutResult {
     pub pitch_cents: f64,
     /// Rate used for the waveform comparison.
     pub analysis_rate: u32,
+    /// How wrong the applied drift is, in parts per million, according to the hold-out.
+    ///
+    /// A correctly corrected file has *flat* residuals: the same offset error
+    /// everywhere. A slope in the residuals against the source time means the applied
+    /// drift is wrong, and the slope says by how much. This is measured on the
+    /// **rendered** file, so it is a statement about what was actually applied rather
+    /// than a restatement of the model that was fitted.
+    ///
+    /// `None` when there were too few mutually corroborated positions to fit a slope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_error_ppm: Option<f64>,
+    /// The standard error of [`HoldoutResult::drift_error_ppm`], in parts per million.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_error_se_ppm: Option<f64>,
     /// Notes about the verification.
     pub notes: Vec<String>,
 }
@@ -238,6 +257,7 @@ pub fn verify_corrected(
         };
 
         points.push(HoldoutPoint {
+            source_time: u,
             reference_time,
             residual_ms,
             phat_peak,
@@ -291,6 +311,71 @@ pub fn verify_corrected(
         .collect();
     let (p50, p95, max) = residual_stats(&agreed);
     let (raw_p50, raw_p95, raw_max) = residual_stats(&counted);
+
+    // How wrong the applied drift is, according to the rendered file.
+    //
+    // The residuals of a correctly corrected file are flat: the same offset error
+    // everywhere. A slope in them against the source time means the applied *rate* is
+    // wrong, and the slope says by how much. Because this is measured on the rendered
+    // audio, it is a statement about what was actually applied — not a restatement of
+    // the model that was fitted.
+    let agreed_with_time: Vec<(f64, f64)> = points
+        .iter()
+        .zip(disputed.iter())
+        .filter(|(p, d)| p.counted && !**d)
+        .map(|(p, _)| (p.source_time, p.residual_ms))
+        .collect();
+    let (drift_error_ppm, drift_error_se_ppm) = drift_error(&agreed_with_time);
+    if let (Some(error), Some(error_se)) = (drift_error_ppm, drift_error_se_ppm) {
+        notes.push(format!(
+            "the hold-out residuals change by {:+.3} ppm across the source, so the drift that was \
+             applied is out by {:+.3} ppm ± {:.3} ppm; a drift that is out by 20 ppm would leave a \
+             residual of about 100 ms at the end of a file this long",
+            -error, error, error_se
+        ));
+    } else if agreed.len() >= 3 {
+        notes.push(
+            "the hold-out residuals were too few or too scattered to give a slope, so no independent \
+             figure for the drift error could be established"
+                .to_string(),
+        );
+    }
+
+    // The largest residual is worth naming, because a single weak correlation can be the
+    // whole of the "max" figure. Saying which position it was, how strong the
+    // correlation was there, and what the other method said is more useful than the
+    // number on its own.
+    if let Some(worst) = points
+        .iter()
+        .zip(disputed.iter())
+        .filter(|(p, d)| p.counted && !**d)
+        .max_by(|a, b| a.0.residual_ms.abs().total_cmp(&b.0.residual_ms.abs()))
+        .map(|(p, _)| p)
+    {
+        let mut peaks: Vec<f32> = points
+            .iter()
+            .zip(disputed.iter())
+            .filter(|(p, d)| p.counted && !**d)
+            .map(|(p, _)| p.phat_peak)
+            .collect();
+        peaks.sort_by(|a, b| a.total_cmp(b));
+        let median_peak = if peaks.is_empty() {
+            0.0
+        } else {
+            peaks[peaks.len() / 2]
+        };
+        let other = match worst.envelope_residual_ms {
+            Some(value) => {
+                format!("the RMS-envelope method measured {value:+.3} ms at the same position")
+            }
+            None => "the RMS-envelope method could not measure that position".to_string(),
+        };
+        notes.push(format!(
+            "the largest residual ({:+.3} ms) is at {:.1} s, where the waveform correlation peak was \
+             only {:.3} against a median of {:.3}; {other}",
+            worst.residual_ms, worst.source_time, worst.phat_peak, median_peak
+        ));
+    }
 
     let env_all: Vec<f64> = points
         .iter()
@@ -376,8 +461,30 @@ pub fn verify_corrected(
         envelope_rejected: env_rejected,
         pitch_cents,
         analysis_rate: config.analysis_rate,
+        drift_error_ppm,
+        drift_error_se_ppm,
         notes,
     })
+}
+
+/// The drift error implied by the hold-out residuals, in parts per million.
+///
+/// The residuals are in milliseconds and the source times in seconds, so the slope of
+/// the fit is in milliseconds per second. One part per million of drift shows up as
+/// one microsecond per second, that is `0.001` milliseconds per second, so the slope
+/// is multiplied by a thousand.
+///
+/// The sign: the residual is positive when the corrected audio is *ahead* of the
+/// reference. A drift that is too small leaves the corrected audio progressively
+/// ahead of where it should be, so the slope is the negative of the error.
+fn drift_error(points: &[(f64, f64)]) -> (Option<f64>, Option<f64>) {
+    let Some(fit) = crate::matching::drift::fit_with_uncertainty(points) else {
+        return (None, None);
+    };
+    if !fit.slope_se.is_finite() {
+        return (None, None);
+    }
+    (Some(-fit.slope * 1000.0), Some(fit.slope_se * 1000.0))
 }
 
 /// Choose hold-out positions that sit *between* the fine-map probes.

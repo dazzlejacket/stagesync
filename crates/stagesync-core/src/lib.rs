@@ -21,9 +21,12 @@
 //! drift_ppm               = (scale - 1) * 1_000_000
 //! ```
 //!
-//! `scale > 1` means the source clock runs *fast* (its material is compressed in time
-//! relative to the reference), `scale < 1` means it runs slow. `offset` is the reference
-//! time that corresponds to source time zero.
+//! `scale > 1` means the source's own clock ran **slow**: it reached 100 s on its own
+//! counter while the reference, which is accurate, had reached 100.0035 s. Its labelled
+//! timeline is therefore compressed, and correcting it stretches the file by `scale` —
+//! `alpha = 1/scale`, which pitches the material down by `-1200 * log2(scale)` cents.
+//! `scale < 1` means the source clock ran fast. `offset` is the reference time that
+//! corresponds to source time zero.
 
 pub mod audio;
 pub mod calibration;

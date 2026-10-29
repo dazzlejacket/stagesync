@@ -209,7 +209,7 @@ pub fn render_drift_graph(report: &AlignmentReport) -> String {
     let mut lag_min = lags.iter().cloned().fold(f64::INFINITY, f64::min);
     let mut lag_max = lags.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     for source in &report.sources {
-        if let Some(model) = source.calibrated_model.or(source.direct_model) {
+        if let Some(model) = source.model() {
             for i in 0..=20 {
                 let t = source.source.duration_secs * i as f64 / 20.0;
                 let lag = model.reference_time(t) - t;
@@ -282,7 +282,7 @@ pub fn render_drift_graph(report: &AlignmentReport) -> String {
         }
 
         // Model line (upper panel).
-        if let Some(model) = source.calibrated_model.or(source.direct_model) {
+        if let Some(model) = source.model() {
             let pts: Vec<(f64, f64)> = (0..=60)
                 .map(|k| {
                     let t = source.source.duration_secs * k as f64 / 60.0;

@@ -263,10 +263,7 @@ fn a_37_decibel_level_difference_does_not_break_the_match() {
     assert!(p95 <= 25.0, "p95 error {p95:.3} ms is too large");
 
     // The correction must not have amplified the source.
-    let model = alignment
-        .calibrated_model
-        .or(alignment.direct_model)
-        .expect("a model");
+    let model = alignment.model().expect("a model");
     assert!(
         model.scale.abs() > 0.99 && model.scale < 1.01,
         "the model implies a large scale change of {} for a level-only difference",

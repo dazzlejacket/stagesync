@@ -1,20 +1,27 @@
 //! Matching: coarse global lock, fine alignment, robust drift model and segmentation.
 
 pub mod coarse;
+pub mod drift;
 pub mod dsp;
 pub mod fine;
 pub mod model;
 pub mod regression;
 pub mod segments;
+pub mod waveform;
 
 use serde::{Deserialize, Serialize};
 
 use crate::audio::SourceMeta;
 
 pub use coarse::{CoarseCandidate, CoarseLock, CoarseWindow};
+pub use drift::{
+    assess, fit_offset_only, fit_with_uncertainty, DriftAssessment, DriftMethod, DriftOptions,
+    DriftStatus, MethodFigures, SlopeFit,
+};
 pub use fine::{FineOptions, FineResult, SkipReasons};
 pub use model::{LinearModel, MapSegment, TimeMap};
 pub use segments::{Coverage, TimelineSpan};
+pub use waveform::{WaveformDrift, WaveformOptions, WaveformProbe};
 
 /// Why a match is not fully trusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +144,9 @@ pub struct MatchPoint {
     pub confidence: Confidence,
     /// Which stage produced it.
     pub method: MatchMethod,
+    /// A plain-language note about this point, when there is something to say.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 /// The kind of a timeline segment.
@@ -215,6 +225,14 @@ pub struct SourceAlignment {
     pub direct_model: Option<LinearModel>,
     /// The model after the end-to-end calibration loop.
     pub calibrated_model: Option<LinearModel>,
+    /// The model the drift assessment settled on, and why.
+    ///
+    /// This is the model that is actually applied: it is the calibrated model when the
+    /// envelope evidence was good enough, the waveform-domain model when the envelope
+    /// was too imprecise to trust, and an offset-only model when the drift could not be
+    /// established at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift: Option<DriftAssessment>,
     /// All measured match points.
     pub points: Vec<MatchPoint>,
     /// Segments describing coverage and gaps.
@@ -225,6 +243,20 @@ pub struct SourceAlignment {
     pub holdout: Option<crate::verify::HoldoutResult>,
     /// Warnings raised while analysing this source.
     pub warnings: Vec<String>,
+}
+
+impl SourceAlignment {
+    /// The model that will be applied to this source.
+    ///
+    /// The drift assessment has the final say, because it is the only stage that knows
+    /// whether the drift was measured to a precision that justifies applying it.
+    pub fn model(&self) -> Option<LinearModel> {
+        self.drift
+            .as_ref()
+            .map(|d| d.model)
+            .or(self.calibrated_model)
+            .or(self.direct_model)
+    }
 }
 
 /// The complete analysis of a reference against one or more sources.

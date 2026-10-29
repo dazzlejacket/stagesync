@@ -66,16 +66,45 @@ pub struct Coverage {
     pub fraction: f64,
 }
 
+/// Everything the segmentation needs to describe one source against the reference.
+///
+/// This is a struct rather than a long argument list: the order of eight arguments is
+/// easy to get wrong in a way that still compiles.
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentationInput<'a> {
+    /// Which source this is, in the report's order.
+    pub source_index: usize,
+    /// The time map that places the source on the reference.
+    pub map: &'a TimeMap,
+    /// The measured points.
+    pub points: &'a [MatchPoint],
+    /// The source's loudness envelope.
+    pub source_env: &'a Envelope,
+    /// The reference's loudness envelope.
+    ///
+    /// The reference is consulted so that a hole in the source is only called a
+    /// *recorder gap* when the reference has material over the same span.
+    pub reference_env: &'a Envelope,
+    /// How long the source runs, in seconds.
+    pub source_duration: f64,
+    /// How long the reference runs, in seconds.
+    pub reference_duration: f64,
+}
+
 /// Analyse one source against the reference and produce its segments.
 pub fn analyse_source(
-    source_index: usize,
-    map: &TimeMap,
-    points: &[MatchPoint],
-    source_env: &Envelope,
-    source_duration: f64,
-    reference_duration: f64,
+    input: &SegmentationInput<'_>,
     options: &SegmentOptions,
 ) -> (Vec<Segment>, Coverage) {
+    let SegmentationInput {
+        source_index,
+        map,
+        points,
+        source_env,
+        reference_env,
+        source_duration,
+        reference_duration,
+    } = *input;
     let mut segments: Vec<Segment> = Vec::new();
 
     let mut sorted: Vec<&MatchPoint> = points.iter().collect();
@@ -233,18 +262,43 @@ pub fn analyse_source(
                     (a.confidence.score + b.confidence.score) / 2.0,
                 ));
             }
+            let reference_start = map.reference_time(hole_start);
+            let reference_end = map.reference_time(hole_end);
+
+            // A hole in the source is only *lost material* if the reference has
+            // something there. When the reference is silent over the same span, the
+            // performance itself was quiet and nothing was missed; calling that a
+            // recorder gap would overstate the damage.
+            let reference_silent = is_silent(reference_env, reference_start, reference_end);
+            let (kind, note) = if reference_silent {
+                (
+                    SegmentKind::Matched,
+                    format!(
+                        "the recorder produced no usable signal for {:.1} s here and the reference is \
+                         silent over the same span, so no material was lost",
+                        hole_end - hole_start
+                    ),
+                )
+            } else {
+                (
+                    SegmentKind::RecorderGap,
+                    format!(
+                        "the recorder produced no usable signal for {:.1} s here while the reference has \
+                         material, so this span was not captured",
+                        hole_end - hole_start
+                    ),
+                )
+            };
+
             segments.push(Segment {
-                kind: SegmentKind::RecorderGap,
+                kind,
                 source_index: Some(source_index),
                 source_start: Some(hole_start),
                 source_end: Some(hole_end),
-                reference_start: map.reference_time(hole_start),
-                reference_end: map.reference_time(hole_end),
+                reference_start,
+                reference_end,
                 confidence: Confidence::new(0.0, UncertaintyReason::LowEnergy),
-                note: format!(
-                    "the recorder produced no usable signal for {:.1} s here",
-                    hole_end - hole_start
-                ),
+                note,
             });
             cursor = hole_end;
         }
@@ -386,6 +440,22 @@ fn silent_intervals(env: &Envelope, t0: f64, t1: f64) -> Vec<(f64, f64)> {
         out.push((s as f64 / env.rate_hz, (hi + 1) as f64 / env.rate_hz));
     }
     out
+}
+
+/// Whether an envelope is silent across a whole span.
+///
+/// The envelope's quiet flags are the direct evidence of a hole, so a span counts as
+/// silent when every frame in it is flagged quiet.
+fn is_silent(env: &Envelope, t0: f64, t1: f64) -> bool {
+    if t1 <= t0 {
+        return true;
+    }
+    let lo = env.index_at(t0);
+    let hi = env.index_at(t1).min(env.len().saturating_sub(1));
+    if hi < lo {
+        return true;
+    }
+    (lo..=hi).all(|i| env.quiet.get(i).copied().unwrap_or(false))
 }
 
 /// The typical spacing between consecutive measured points, in seconds.

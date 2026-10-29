@@ -104,11 +104,18 @@ pub fn write_syncmap_csv(path: &Path, report: &AlignmentReport) -> Result<()> {
         "source_file,t_source_s,t_reference_s,measured_lag_s,model_lag_s,residual_ms,confidence_score,method,status_or_note\n",
     );
     for source in &report.sources {
-        let model = source.calibrated_model.or(source.direct_model);
+        let model = source.model();
         for p in &source.points {
             let model_lag =
                 model.map_or(p.lag, |m| m.reference_time(p.source_time) - p.source_time);
             let residual_ms = (p.lag - model_lag) * 1000.0;
+            // A point's own note says what happened to it; the confidence reason is
+            // the fallback for the stages that do not have one.
+            let status = if p.note.is_empty() {
+                p.confidence.reason.describe()
+            } else {
+                p.note.as_str()
+            };
             csv.push_str(&format!(
                 "{},{:.6},{:.6},{:.6},{:.6},{:.3},{:.4},{},{}\n",
                 csv_escape(&source.source.file_name),
@@ -119,7 +126,7 @@ pub fn write_syncmap_csv(path: &Path, report: &AlignmentReport) -> Result<()> {
                 residual_ms,
                 p.confidence.score,
                 p.method.name(),
-                csv_escape(p.confidence.reason.describe()),
+                csv_escape(status),
             ));
         }
     }
@@ -221,7 +228,7 @@ pub fn write_timeline_summary(path: &Path, report: &AlignmentReport) -> Result<(
     }
     text.push('\n');
     for source in &report.sources {
-        let model = source.calibrated_model.or(source.direct_model);
+        let model = source.model();
         text.push_str(&format!("--- {} ---\n", source.source.file_name));
         if let Some(m) = model {
             text.push_str(&format!(
@@ -283,7 +290,7 @@ pub fn segment_kinds(report: &AlignmentReport) -> Vec<SegmentKind> {
 
 /// Summarise one source alignment for display.
 pub fn summarise_source(source: &SourceAlignment) -> String {
-    let model = source.calibrated_model.or(source.direct_model);
+    let model = source.model();
     match model {
         Some(m) => format!(
             "{}: offset {:.3} s, drift {:+.2} ppm, {:.1}% covered",

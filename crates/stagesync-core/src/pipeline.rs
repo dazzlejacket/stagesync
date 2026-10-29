@@ -15,9 +15,19 @@ use crate::features::envelope::{extract_envelope, EnvelopeConfig};
 use crate::features::mel::{extract_log_mel, LogMel, LogMelConfig};
 use crate::features::Envelope;
 use crate::matching::coarse::{coarse_lock, CoarseConfig, CoarseLock};
-use crate::matching::fine::{fine_match, spectral_offsets, FineOptions};
+use crate::matching::drift::{
+    assess, fit_offset_only, fit_with_uncertainty, DriftMethod, DriftOptions, DriftStatus,
+    MethodFigures,
+};
+use crate::matching::fine::{fine_match, spectral_offsets, FineOptions, FineResult};
 use crate::matching::model::LinearModel;
-use crate::matching::segments::{analyse_source, merge_timeline, SegmentOptions};
+use crate::matching::segments::{
+    analyse_source, merge_timeline, SegmentOptions, SegmentationInput,
+};
+use crate::matching::waveform::{
+    extract_reference_windows, extract_source_windows, measure_from_windows, WaveformDrift,
+    WaveformOptions,
+};
 use crate::matching::{
     AlignmentReport, Confidence, MatchMethod, MatchPoint, Segment, SegmentKind, SourceAlignment,
     UncertaintyReason,
@@ -87,8 +97,22 @@ pub struct AnalysisConfig {
     pub segments: SegmentOptions,
     /// End-to-end calibration.
     pub calibration: CalibrationConfig,
+    /// The waveform-domain drift estimator.
+    pub waveform: WaveformOptions,
+    /// The thresholds that decide whether a drift may be applied.
+    pub drift: DriftOptions,
     /// Whether to compute the log-mel cross-check at all.
     pub compute_log_mel: bool,
+    /// Whether to measure the drift on the raw waveform as an independent second opinion.
+    ///
+    /// This costs one extra decode of each file. It is worth it: it is the only way to
+    /// tell a drift that was *measured* from one that was *guessed*.
+    pub measure_waveform_drift: bool,
+    /// Force an offset-only correction, whatever the evidence says.
+    ///
+    /// The user asked for it, so it is applied — but the report still records what the
+    /// evidence was, so the choice is visible rather than hidden.
+    pub force_offset_only: bool,
     /// Frames per decoded block.
     pub block_frames: usize,
     /// An optional manual anchor, used when the automatic lock fails.
@@ -115,7 +139,11 @@ impl Default for AnalysisConfig {
             fine: FineOptions::default(),
             segments: SegmentOptions::default(),
             calibration: CalibrationConfig::default(),
+            waveform: WaveformOptions::default(),
+            drift: DriftOptions::default(),
             compute_log_mel: true,
+            measure_waveform_drift: true,
+            force_offset_only: false,
             block_frames: 1 << 16,
             manual_anchor: None,
             manual_anchors: Vec::new(),
@@ -153,6 +181,8 @@ pub enum Stage {
     Fine,
     /// End-to-end calibration.
     Calibration,
+    /// Waveform-domain drift measurement and the drift verdict.
+    Drift,
     /// Coverage and gap analysis.
     Segmentation,
 }
@@ -166,6 +196,7 @@ impl Stage {
             Stage::Coarse => "Finding coarse offset",
             Stage::Fine => "Fine alignment",
             Stage::Calibration => "Calibrating",
+            Stage::Drift => "Measuring drift",
             Stage::Segmentation => "Analysing coverage",
         }
     }
@@ -206,7 +237,9 @@ pub fn analyze(
         Ok(())
     };
 
-    let total_steps = 2 + source_paths.len() * 4;
+    // One tick for the reference ingest, one for the drift measurement and five for
+    // each source: ingest, coarse lock, fine alignment, calibration and segmentation.
+    let total_steps = 2 + source_paths.len() * 5;
     let mut step = 0usize;
     let mut tick = |progress: &mut dyn FnMut(Progress), stage: Stage, message: String| {
         step += 1;
@@ -228,10 +261,16 @@ pub fn analyze(
         ingest(reference_path, config, cancel_ref)?;
     let reference_duration = reference_meta.duration_secs;
 
-    // --- Sources ---------------------------------------------------------------
-    let mut alignments: Vec<SourceAlignment> = Vec::new();
+    // --- Sources: matching ----------------------------------------------------
+    //
+    // The first pass finds *where* each source sits on the reference timeline. The
+    // drift verdict then needs a second, independent measurement on the raw
+    // waveform, and that measurement wants the reference decoded only once no matter
+    // how many sources there are. So the sources are matched first and the waveform
+    // measurement is a separate pass.
+    let mut work: Vec<SourceWork> = Vec::with_capacity(source_paths.len());
 
-    for (index, source_path) in source_paths.iter().enumerate() {
+    for source_path in source_paths.iter() {
         checkpoint()?;
         tick(
             progress,
@@ -268,34 +307,18 @@ pub fn analyze(
                     "no correspondence could be established for this source; it is reported as uncovered"
                         .into(),
                 );
-                alignments.push(SourceAlignment {
-                    source: source_meta,
-                    map: crate::matching::model::TimeMap::from_segments(vec![]),
-                    coarse: Some(lock),
-                    fine_measured: 0,
-                    fine_skipped: 0,
-                    fine_skip_reasons: Default::default(),
-                    direct_model: None,
-                    calibrated_model: None,
-                    points: Vec::new(),
-                    segments: vec![Segment {
-                        kind: SegmentKind::UncoveredReference,
-                        source_index: Some(index),
-                        source_start: None,
-                        source_end: None,
-                        reference_start: 0.0,
-                        reference_end: reference_duration,
-                        confidence: Confidence::new(0.0, UncertaintyReason::LowPeakSeparation),
-                        note: "no reliable correspondence was found for this source".into(),
-                    }],
-                    coverage: crate::matching::segments::Coverage {
-                        covered_seconds: 0.0,
-                        low_confidence_seconds: 0.0,
-                        uncovered_seconds: reference_duration,
-                        fraction: 0.0,
-                    },
-                    holdout: None,
+                work.push(SourceWork {
+                    path: source_path.clone(),
+                    meta: source_meta,
+                    lock: Some(lock),
                     warnings,
+                    matched: false,
+                    points: Vec::new(),
+                    fine: FineResult::default(),
+                    direct_model: LinearModel::new(1.0, 0.0),
+                    calibrated: LinearModel::new(1.0, 0.0),
+                    trusted: Vec::new(),
+                    envelope: source_env,
                 });
                 continue;
             }
@@ -358,44 +381,235 @@ pub fn analyze(
             calibrated.offset = anchor.reference_time - calibrated.scale * anchor.source_time;
         }
 
+        // The trusted points are the ones the envelope fit actually rests on.
+        let trusted: Vec<(f64, f64)> = fine
+            .points
+            .iter()
+            .filter(|p| p.confidence.is_trustworthy())
+            .map(|p| (p.source_time, p.reference_time))
+            .collect();
+
+        work.push(SourceWork {
+            path: source_path.clone(),
+            meta: source_meta,
+            lock: Some(lock),
+            warnings,
+            matched: true,
+            points,
+            fine,
+            direct_model,
+            calibrated,
+            trusted,
+            envelope: source_env,
+        });
+    }
+
+    // --- Drift measurement ----------------------------------------------------
+    //
+    // One pass over the reference serves every source. The probes sit at positions
+    // that were *not* used to fit the envelope model, so the waveform measurement is
+    // an independent opinion about the drift rather than a restatement of the model.
+    let mut measurements: Vec<Option<WaveformDrift>> = vec![None; work.len()];
+    if config.measure_waveform_drift {
+        checkpoint()?;
+        tick(
+            progress,
+            Stage::Drift,
+            "measuring the drift on the raw waveform".to_string(),
+        );
+        let probe_sets: Vec<Vec<(f64, f64)>> = work
+            .iter()
+            .map(|w| {
+                if !w.matched {
+                    return Vec::new();
+                }
+                holdout_probe_positions(&w.trusted, &w.calibrated, config.waveform.max_probes)
+            })
+            .collect();
+
+        let reference_windows =
+            extract_reference_windows(reference_path, &probe_sets, &config.waveform, cancel_ref)?;
+
+        for (index, item) in work.iter_mut().enumerate() {
+            if !item.matched || probe_sets[index].is_empty() {
+                continue;
+            }
+            checkpoint()?;
+            let source_windows = extract_source_windows(
+                &item.path,
+                &probe_sets[index],
+                &config.waveform,
+                cancel_ref,
+            )?;
+            let empty = Vec::new();
+            let windows = reference_windows.get(index).unwrap_or(&empty);
+            measurements[index] = Some(measure_from_windows(
+                &probe_sets[index],
+                &source_windows,
+                windows,
+                &config.waveform,
+            )?);
+        }
+    }
+
+    // --- Verdict, residuals and segmentation ----------------------------------
+    let mut alignments: Vec<SourceAlignment> = Vec::with_capacity(work.len());
+
+    for (index, item) in work.into_iter().enumerate() {
+        let mut warnings = item.warnings;
+        let mut points = item.points;
+
+        if !item.matched {
+            alignments.push(SourceAlignment {
+                source: item.meta,
+                map: crate::matching::model::TimeMap::from_segments(vec![]),
+                coarse: item.lock,
+                fine_measured: 0,
+                fine_skipped: 0,
+                fine_skip_reasons: Default::default(),
+                direct_model: None,
+                calibrated_model: None,
+                drift: None,
+                points: Vec::new(),
+                segments: vec![Segment {
+                    kind: SegmentKind::UncoveredReference,
+                    source_index: Some(index),
+                    source_start: None,
+                    source_end: None,
+                    reference_start: 0.0,
+                    reference_end: reference_duration,
+                    confidence: Confidence::new(0.0, UncertaintyReason::LowPeakSeparation),
+                    note: "no reliable correspondence was found for this source".into(),
+                }],
+                coverage: crate::matching::segments::Coverage {
+                    covered_seconds: 0.0,
+                    low_confidence_seconds: 0.0,
+                    uncovered_seconds: reference_duration,
+                    fraction: 0.0,
+                },
+                holdout: None,
+                warnings,
+            });
+            continue;
+        }
+
+        // The envelope's own measurement of the drift, and how sure it is.
+        let direct_fit = fit_with_uncertainty(&item.trusted);
+        let envelope_figures = envelope_method_figures(&item.calibrated, direct_fit, &item.trusted);
+
+        let mut waveform_figures: Option<MethodFigures> = None;
+        let mut waveform_points: Vec<MatchPoint> = Vec::new();
+        match &measurements[index] {
+            Some(measurement) => {
+                waveform_figures = waveform_method_figures(measurement);
+                waveform_points = measurement
+                    .probes
+                    .iter()
+                    .map(|p| MatchPoint {
+                        source_time: p.source_time,
+                        reference_time: p.reference_time,
+                        lag: p.reference_time - p.source_time,
+                        confidence: Confidence::new(
+                            if p.counted { 1.0 } else { 0.0 },
+                            if p.counted {
+                                UncertaintyReason::None
+                            } else {
+                                UncertaintyReason::LowPeakSeparation
+                            },
+                        ),
+                        method: MatchMethod::WaveformPhat,
+                        residual_ms: 0.0,
+                        note: p.note.clone().unwrap_or_default(),
+                    })
+                    .collect();
+                for note in &measurement.notes {
+                    warnings.push(note.clone());
+                }
+            }
+            None if config.measure_waveform_drift => warnings.push(
+                "there were no positions left over to probe on the raw waveform, so the drift rests \
+                 on the envelope measurement alone"
+                    .to_string(),
+            ),
+            None => {}
+        }
+
+        let mut assessment = assess(
+            envelope_figures,
+            waveform_figures,
+            config.measure_waveform_drift,
+            item.calibrated,
+            &config.drift,
+        );
+
+        if config.force_offset_only {
+            let offset =
+                fit_offset_only(&item.trusted).map_or(item.calibrated.offset, |m| m.offset);
+            // The evidence is still reported, but the notes must not describe a
+            // decision the user overrode.
+            let mut notes = vec![
+                "offset-only synchronisation was requested, so the drift was not applied and the \
+                 rate was left alone"
+                    .to_string(),
+            ];
+            notes.extend(assessment.notes.drain(..).filter(|note| {
+                !note.contains("was used because")
+                    && !note.contains("the envelope estimate was used")
+                    && !note.contains("the waveform estimate was used")
+            }));
+            assessment.notes = notes;
+            assessment.status = DriftStatus::OffsetOnly;
+            assessment.method = DriftMethod::OffsetOnly;
+            assessment.model = LinearModel::new(1.0, offset);
+            assessment.drift_ppm = 0.0;
+            assessment.slope_se_ppm = 0.0;
+        }
+
+        let final_model = assessment.model;
         let map =
-            crate::matching::model::TimeMap::from_linear(calibrated, source_meta.duration_secs);
+            crate::matching::model::TimeMap::from_linear(final_model, item.meta.duration_secs);
+
+        points.extend(waveform_points);
 
         // Recompute residuals against the final model. The sign convention is
         // "measured minus model": a positive residual means the measurement sits later
         // in the reference than the model predicts.
         for p in points.iter_mut() {
-            p.residual_ms = (p.reference_time - calibrated.reference_time(p.source_time)) * 1000.0;
+            p.residual_ms = (p.reference_time - final_model.reference_time(p.source_time)) * 1000.0;
         }
 
         // --- Segmentation ------------------------------------------------------
         tick(
             progress,
             Stage::Segmentation,
-            format!("analysing coverage of {}", source_meta.file_name),
+            format!("analysing coverage of {}", item.meta.file_name),
         );
         // The segmentation works from the points that actually fitted the model. The
         // spectral points sit at almost the same source times; letting them into the
         // segmentation would split every covered span into slivers.
         let (segments, coverage) = analyse_source(
-            index,
-            &map,
-            &fine.points,
-            &source_env,
-            source_meta.duration_secs,
-            reference_duration,
+            &SegmentationInput {
+                source_index: index,
+                map: &map,
+                points: &item.fine.points,
+                source_env: &item.envelope,
+                reference_env: &reference_env,
+                source_duration: item.meta.duration_secs,
+                reference_duration,
+            },
             &config.segments,
         );
 
         alignments.push(SourceAlignment {
-            source: source_meta,
+            source: item.meta,
             map,
-            coarse: Some(lock),
-            fine_measured: fine.measured,
-            fine_skipped: fine.skipped,
-            fine_skip_reasons: fine.skip_reasons,
-            direct_model: Some(direct_model),
-            calibrated_model: Some(calibrated),
+            coarse: item.lock,
+            fine_measured: item.fine.measured,
+            fine_skipped: item.fine.skipped,
+            fine_skip_reasons: item.fine.skip_reasons,
+            direct_model: Some(item.direct_model),
+            calibrated_model: Some(item.calibrated),
+            drift: Some(assessment),
             points,
             segments,
             coverage,
@@ -413,6 +627,32 @@ pub fn analyze(
         timeline,
         timeline_duration: reference_duration,
     })
+}
+
+/// The state of one source between the matching stages and the drift verdict.
+struct SourceWork {
+    /// The source file.
+    path: PathBuf,
+    /// The file's metadata.
+    meta: crate::audio::SourceMeta,
+    /// The coarse global lock.
+    lock: Option<CoarseLock>,
+    /// Warnings raised so far.
+    warnings: Vec<String>,
+    /// `false` when no correspondence could be established at all.
+    matched: bool,
+    /// The envelope and spectral match points.
+    points: Vec<MatchPoint>,
+    /// The fine alignment result.
+    fine: FineResult,
+    /// The model fitted directly from the fine matches.
+    direct_model: LinearModel,
+    /// The model after the end-to-end calibration loop.
+    calibrated: LinearModel,
+    /// The trusted points the envelope fit rests on.
+    trusted: Vec<(f64, f64)>,
+    /// The source's loudness envelope, needed for the segmentation.
+    envelope: Envelope,
 }
 
 /// Decode a file and extract its features.
@@ -441,6 +681,162 @@ fn ingest(
     };
 
     Ok((meta, env, mel))
+}
+
+/// Choose positions that were **not** used to fit the model, and where to search for them.
+///
+/// The fine probes are the points the envelope model was fitted through, so probing
+/// there would only re-measure the model. The midpoints between consecutive probes
+/// are not: the waveform measurement there is an independent opinion about the drift.
+///
+/// The reference position each probe searches around is interpolated from the
+/// *measured* neighbouring probes rather than read off the model, so a model with the
+/// wrong slope cannot drag the search onto the wrong part of the recording.
+fn holdout_probe_positions(
+    trusted: &[(f64, f64)],
+    model: &LinearModel,
+    max_probes: usize,
+) -> Vec<(f64, f64)> {
+    if trusted.len() < 2 || max_probes == 0 {
+        return Vec::new();
+    }
+    let mut sorted: Vec<(f64, f64)> = trusted.to_vec();
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut candidates: Vec<(f64, f64)> = Vec::new();
+    for window in sorted.windows(2) {
+        let (x0, y0) = window[0];
+        let (x1, y1) = window[1];
+        if x1 <= x0 {
+            continue;
+        }
+        let midpoint = 0.5 * (x0 + x1);
+        let centre = 0.5 * (y0 + y1);
+        candidates.push((midpoint, centre));
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // Spread the probes evenly over the recording: the precision of a slope depends on
+    // the *span* the points cover, not on how many there are.
+    if candidates.len() > max_probes {
+        let mut thinned = Vec::with_capacity(max_probes);
+        for i in 0..max_probes {
+            let index = (i * candidates.len()) / max_probes;
+            thinned.push(candidates[index.min(candidates.len() - 1)]);
+        }
+        candidates = thinned;
+    }
+
+    // The interpolated centre is the starting point; the model's prediction is only a
+    // fallback for a position that no measured point brackets.
+    candidates
+        .into_iter()
+        .map(|(source_time, centre)| {
+            let interpolated = interpolate_reference(&sorted, source_time, centre);
+            (source_time, interpolated)
+        })
+        .map(|(source_time, centre)| {
+            // A wildly off centre would send the search into empty material.
+            let predicted = model.reference_time(source_time);
+            let centre = if (centre - predicted).abs() > 1.0 {
+                predicted
+            } else {
+                centre
+            };
+            (source_time, centre)
+        })
+        .collect()
+}
+
+/// Interpolate a reference position from measured points, falling back when bracketed.
+fn interpolate_reference(points: &[(f64, f64)], x: f64, fallback: f64) -> f64 {
+    match points.len() {
+        0 => fallback,
+        1 => {
+            let (x0, y0) = points[0];
+            y0 + (x - x0)
+        }
+        _ => {
+            let last = points.len() - 1;
+            if x <= points[0].0 {
+                let (x0, y0) = points[0];
+                let (x1, y1) = points[1];
+                let slope = (y1 - y0) / (x1 - x0).max(f64::EPSILON);
+                return y0 + slope * (x - x0);
+            }
+            if x >= points[last].0 {
+                let (x0, y0) = points[last - 1];
+                let (x1, y1) = points[last];
+                let slope = (y1 - y0) / (x1 - x0).max(f64::EPSILON);
+                return y1 + slope * (x - x1);
+            }
+            for window in points.windows(2) {
+                let (x0, y0) = window[0];
+                let (x1, y1) = window[1];
+                if x >= x0 && x <= x1 {
+                    let t = (x - x0) / (x1 - x0).max(f64::EPSILON);
+                    return y0 + t * (y1 - y0);
+                }
+            }
+            fallback
+        }
+    }
+}
+
+/// The envelope estimator's figures, with the uncertainty that goes with them.
+///
+/// The uncertainty of the *fitted* slope is the classical standard error. The
+/// calibration is a second envelope-domain estimate of the same slope, so the distance
+/// it moved the model is added to the uncertainty in quadrature: the calibration is
+/// not known to be better than the fit it started from.
+fn envelope_method_figures(
+    calibrated: &LinearModel,
+    direct_fit: Option<crate::matching::SlopeFit>,
+    trusted: &[(f64, f64)],
+) -> Option<MethodFigures> {
+    let direct = direct_fit?;
+    let calibration_shift_ppm = (calibrated.drift_ppm() - direct.drift_ppm()).abs();
+    let slope_se_ppm = (direct.slope_se_ppm().powi(2) + calibration_shift_ppm.powi(2)).sqrt();
+
+    let residuals: Vec<f64> = trusted
+        .iter()
+        .map(|(x, y)| y - calibrated.reference_time(*x))
+        .collect();
+    let residual_rms_ms = if residuals.is_empty() {
+        0.0
+    } else {
+        (residuals.iter().map(|r| r * r).sum::<f64>() / residuals.len() as f64).sqrt() * 1000.0
+    };
+
+    Some(MethodFigures {
+        method: DriftMethod::Envelope,
+        drift_ppm: calibrated.drift_ppm(),
+        scale: calibrated.scale,
+        slope_se_ppm,
+        residual_rms_ms,
+        points_used: trusted.len(),
+        offset_seconds: calibrated.offset,
+        mean_correlation: None,
+    })
+}
+
+/// The waveform estimator's figures, when it produced a usable fit.
+fn waveform_method_figures(
+    measurement: &crate::matching::waveform::WaveformDrift,
+) -> Option<MethodFigures> {
+    let fit = measurement.fit?;
+    Some(MethodFigures {
+        method: DriftMethod::Waveform,
+        drift_ppm: fit.drift_ppm(),
+        scale: fit.slope,
+        slope_se_ppm: fit.slope_se_ppm(),
+        residual_rms_ms: fit.residual_rms * 1000.0,
+        points_used: fit.points,
+        offset_seconds: fit.intercept,
+        mean_correlation: Some(measurement.mean_correlation as f64),
+    })
 }
 
 /// The outcome of comparing two independent measurement methods.
