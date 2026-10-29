@@ -1,11 +1,11 @@
-//! Level-normalised RMS envelope â€” the primary alignment feature.
+//! Level-normalised RMS envelope — the primary alignment feature.
 //!
 //! The envelope is computed on a **logarithmic (dB)** scale and then **locally z-scored**.
 //! Both steps matter for concert material:
 //!
-//! * dB scale â€” a 37 dB level difference between a soundboard and a watch recording becomes
+//! * dB scale — a 37 dB level difference between a soundboard and a watch recording becomes
 //!   a constant offset, not a change of shape;
-//! * local z-score â€” removes that constant offset *and* normalises the local dynamic range,
+//! * local z-score — removes that constant offset *and* normalises the local dynamic range,
 //!   so a loud passage and a quiet passage have comparable feature statistics.
 //!
 //! The resulting `norm` sequence is what the matcher correlates against.

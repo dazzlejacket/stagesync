@@ -2,10 +2,10 @@
 //!
 //! Correcting a clock drift of a few tens of parts per million changes the *effective
 //! playback rate* of the recording. The only honest way to apply that change while keeping
-//! the material transparent is to resample Ã¢â‚¬â€ and the resampler must be good enough that
+//! the material transparent is to resample — and the resampler must be good enough that
 //! the correction is audibly invisible.
 //!
-//! The design here is the classic CrochiereÃ¢â‚¬â€œRabiner polyphase interpolator:
+//! The design here is the classic Crochiere–Rabiner polyphase interpolator:
 //!
 //! * the kernel is a windowed sinc, Kaiser-windowed for ~90 dB of stop-band rejection;
 //! * the cutoff follows the *actual* output/input rate ratio, so the filter also acts as

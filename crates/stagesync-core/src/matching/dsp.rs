@@ -3,7 +3,7 @@
 //! All correlations in this crate use one convention:
 //!
 //! ```text
-//! corr(lag) = ÃƒÅ½Ã‚Â£_n query[n] * reference[n + lag]
+//! corr(lag) = Σ_n query[n] * reference[n + lag]
 //! ```
 //!
 //! i.e. `lag` is the position in the **reference** where `query[0]` lands. Positive lag
@@ -474,7 +474,7 @@ pub fn parabolic_offset(corr: &Correlation, index: usize) -> f64 {
 /// Result of a waveform GCC-PHAT measurement.
 #[derive(Debug, Clone, Copy)]
 pub struct PhatResult {
-    /// Measured lag in samples. The convention is `a[n] Ã¢â€°Ë† b[n + lag]`: a **positive**
+    /// Measured lag in samples. The convention is `a[n] ≈ b[n + lag]`: a **positive**
     /// lag means `b` has to be advanced to match `a`, i.e. `b` is running late.
     pub lag: f64,
     /// Peak value of the PHAT-weighted correlation.
@@ -587,7 +587,7 @@ pub fn gcc_phat(a: &[f32], b: &[f32], max_lag: usize) -> Option<PhatResult> {
     };
 
     // `c[j] = sum_n a[n] b[n - j]` peaks at `j`; the reported convention is
-    // `a[n] Ã¢â€°Ë† b[n + lag]`, so the lag is the negated index.
+    // `a[n] ≈ b[n + lag]`, so the lag is the negated index.
     Some(PhatResult {
         lag: -(peak_lag as f64 + raw_offset),
         peak: best_val,

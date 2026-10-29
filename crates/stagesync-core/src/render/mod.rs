@@ -2,13 +2,13 @@
 //!
 //! Three layouts are supported:
 //!
-//! * [`Layout::SourceAligned`] ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â one file per source, carrying the drift correction and
+//! * [`Layout::SourceAligned`] — one file per source, carrying the drift correction and
 //!   nothing else. The source's own material is never truncated; its duration changes by
 //!   the measured drift, which is the honest consequence of correcting a clock.
-//! * [`Layout::ReferenceTimelinePerSource`] ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â one file per source, placed on the
+//! * [`Layout::ReferenceTimelinePerSource`] — one file per source, placed on the
 //!   reference's timeline. Spans no source covers are **digital silence placeholders**,
 //!   explicitly labelled as such, never invented audio.
-//! * [`Layout::ReferenceTimelineMerged`] ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â one file covering the whole reference timeline,
+//! * [`Layout::ReferenceTimelineMerged`] — one file covering the whole reference timeline,
 //!   with every source placed and overlaps resolved by user priority.
 //!
 //! Every layout uses the same polyphase resampler and the same exact position map, so the
@@ -125,7 +125,7 @@ fn geometry_timeline(model: &LinearModel, source_rate: u32, output_rate: u32) ->
     }
 }
 
-/// A bank of resamplers ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â one per channel ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â driven by an identical position map.
+/// A bank of resamplers — one per channel — driven by an identical position map.
 ///
 /// Every channel therefore receives exactly the same time mapping, which preserves the
 /// inter-channel relationships (the stereo image) exactly.

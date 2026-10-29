@@ -1,4 +1,4 @@
-//! **StageSync** ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â command-line interface.
+//! **StageSync** — command-line interface.
 //!
 //! ```text
 //! stagesync analyze --reference REF --source A [--source B] --out DIR
@@ -631,7 +631,7 @@ fn run_analysis(
     let started = Instant::now();
     let mut progress = |p: stagesync_core::pipeline::Progress| {
         println!(
-            "[{:>5.1}%] {} ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â {}",
+            "[{:>5.1}%] {} — {}",
             p.fraction * 100.0,
             p.stage.label(),
             p.message

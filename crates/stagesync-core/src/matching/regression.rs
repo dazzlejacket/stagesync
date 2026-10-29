@@ -57,7 +57,7 @@ impl LinearFit {
     }
 }
 
-/// TheilÃ¢â‚¬â€œSen estimator: the median of all pairwise slopes.
+/// Theil–Sen estimator: the median of all pairwise slopes.
 ///
 /// Its breakdown point is ~29 %, so it survives a substantial fraction of wrong matches
 /// without needing any tuning.
@@ -171,7 +171,7 @@ pub fn ransac(
 
 /// Fit a line and iteratively reject outliers (points more than `k` MADs from the fit).
 ///
-/// This is the workhorse: TheilÃ¢â‚¬â€œSen provides a robust starting slope, and this pass
+/// This is the workhorse: Theil–Sen provides a robust starting slope, and this pass
 /// removes the points that do not belong to the dominant correspondence.
 pub fn robust_fit(points: &[(f64, f64)], k: f64, max_iterations: usize) -> Option<LinearFit> {
     let initial = theil_sen(points)?;

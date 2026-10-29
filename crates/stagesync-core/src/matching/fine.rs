@@ -3,7 +3,7 @@
 //! The coarse stage says *where* a source lives; the fine stage measures *exactly* where,
 //! at regular intervals along the recording, and reports how much to trust each
 //! measurement. Every point carries a confidence and an explicit reason when that
-//! confidence is limited ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â nothing is silently forced to match.
+//! confidence is limited — nothing is silently forced to match.
 
 use serde::{Deserialize, Serialize};
 

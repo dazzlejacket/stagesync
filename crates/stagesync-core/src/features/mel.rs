@@ -1,11 +1,11 @@
-//! Log-mel spectrogram Ã¢â‚¬â€ the *independent* feature family.
+//! Log-mel spectrogram — the *independent* feature family.
 //!
 //! The RMS envelope is the primary matching feature. The log-mel spectrogram serves two
 //! different purposes:
 //!
-//! 1. **Disambiguation** Ã¢â‚¬â€ envelope correlation of quasi-periodic music can produce false
+//! 1. **Disambiguation** — envelope correlation of quasi-periodic music can produce false
 //!    peaks; a spectral shape match is much less ambiguous for repeated sections.
-//! 2. **Independent validation** Ã¢â‚¬â€ the holdout verifier uses spectral features while the
+//! 2. **Independent validation** — the holdout verifier uses spectral features while the
 //!    model was fitted with envelopes, so a measurement is never simply confirming itself.
 //!
 //! Band edges are defined in **hertz**, so the feature is sample-rate independent: a 44.1 kHz
