@@ -34,8 +34,9 @@ either.
 
 ## 2. The state of the repository right now
 
-**The four gates pass on Windows 11 x64 with Rust 1.99.1**, and every test passes.
-The workspace is clean apart from the changes of this pass, which are committed.
+**The four gates pass on Windows 11 x64 with Rust 1.99.1**, and all 133 tests pass.
+Every change of this pass is committed, and a fresh clone of the result builds and passes
+the same suite.
 
 The release preparation is **not finished**. One thing stands in the way of tagging:
 

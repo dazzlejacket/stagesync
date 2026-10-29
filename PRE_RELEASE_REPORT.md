@@ -262,6 +262,12 @@ Run on Windows 11 x64, with Rust 1.99.1:
 | `cargo test --workspace` | exit 0, 133 tests, every one passed |
 | `cargo build --release` | exit 0 |
 
+The same gates were then run again in a **fresh clone** of the committed tree, with no
+network and no shared build directory: `cargo fmt --check` exit 0, `cargo build
+--workspace --offline` exit 0, `cargo test --workspace --offline` exit 0 with the same
+133 tests passing. The clone carries 89 tracked files, and the audio module — the one
+that was missing before — is among them.
+
 ### 3.2 The real recordings
 
 The two recorders against the DJI soundboard — 2.69 hours of reference:
@@ -317,6 +323,10 @@ verified to a stated accuracy. The Rust pipeline's own hold-out check, which use
 positions and a different analysis rate, measured the applied drift as out by
 −0.458 ppm ± 0.103 ppm on that recording — but that is the pipeline's own opinion,
 measured on its own output, and it is not the same thing as an independent check.
+
+The verifier was run against the export made before the write path was made atomic. The
+files it measured are byte for byte identical to the ones the atomic writer produces
+(§3.2), so the result carries over unchanged.
 
 ### 3.4 The desktop application
 
