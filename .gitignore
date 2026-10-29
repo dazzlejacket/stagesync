@@ -1,5 +1,9 @@
 # --- Recordings and generated media (never commit) ---
-audio/
+#
+# The rules below are anchored to the root of the repository. An unanchored
+# "audio/" also matched crates/stagesync-core/src/audio/, which is the source
+# of the decoder and the WAV writer — a fresh clone could not compile.
+/audio/
 *.wav
 *.m4a
 *.mp4
