@@ -258,6 +258,18 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&out)
                 .with_context(|| format!("failed to create output directory: {}", out.display()))?;
 
+            // The corrected files are named after the recordings they come
+            // from, so an export into a directory that already holds a
+            // recording of that name would land on the recording itself. The
+            // originals are read-only and the reference is never altered, so
+            // this is refused before anything is written.
+            let inputs: Vec<PathBuf> = std::iter::once(reference.clone())
+                .chain(report.sources.iter().map(|a| a.source.path.clone()))
+                .collect();
+            for output in render::planned_outputs(&out, &report, options.layout) {
+                render::ensure_output_does_not_overwrite(&output, &inputs)?;
+            }
+
             let mut results: Vec<RenderResult> = Vec::new();
             let mut holdouts: Vec<(usize, HoldoutResult)> = Vec::new();
             match options.layout {
@@ -835,10 +847,9 @@ fn drift_verdict(assessment: &stagesync_core::matching::DriftAssessment) -> Stri
 }
 
 /// File name without extension.
+///
+/// The naming is the core's, so that the command line and the desktop
+/// application write the same files for the same recordings.
 fn stem(name: &str) -> String {
-    let base = Path::new(name)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| name.to_string());
-    base.replace(' ', "_")
+    render::safe_stem(name)
 }

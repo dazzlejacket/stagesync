@@ -164,6 +164,17 @@ impl AudioDecoder {
                 }
             };
 
+        // A file with no sample rate, or with one so low that the analysis
+        // has no band to work with, cannot be analysed. It is refused here,
+        // with a message that says what is wrong, rather than being allowed
+        // to reach the filterbank and fail there.
+        if sample_rate == 0 {
+            return Err(anyhow!(
+                "{} claims a sample rate of zero, so it holds no timing information",
+                path.display()
+            ));
+        }
+
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(
                 match &codec_params {

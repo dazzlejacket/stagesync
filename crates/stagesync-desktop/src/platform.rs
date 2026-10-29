@@ -128,6 +128,28 @@ pub fn display_path(path: &Path) -> String {
     strip_verbatim_prefix(path).to_string_lossy().into_owned()
 }
 
+/// A path shortened to fit a narrow column, with the middle elided.
+///
+/// The tail of a path — the directory and the file name — is what identifies
+/// the recording, so the *front* is what gets elided. Cutting the tail instead
+/// would hide the name of the file that the row is about.
+pub fn elide_path(path: &Path, max_chars: usize) -> String {
+    let text = display_path(path);
+    let count = text.chars().count();
+    if count <= max_chars || max_chars < 8 {
+        return text;
+    }
+    // Keep a little more of the tail than of the head: the file name matters
+    // more than the drive or the home directory.
+    let tail = max_chars * 2 / 3;
+    let head = max_chars - tail - 1;
+    let mut out = String::with_capacity(max_chars);
+    out.extend(text.chars().take(head));
+    out.push('\u{2026}');
+    out.extend(text.chars().skip(count - tail));
+    out
+}
+
 /// Remove the Windows verbatim (`\\?\`) prefix from a path.
 ///
 /// On every other platform the path is returned unchanged, because no other platform

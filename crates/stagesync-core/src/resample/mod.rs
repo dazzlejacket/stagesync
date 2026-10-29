@@ -42,7 +42,11 @@ impl PolyphaseFilter {
     /// `step` is the ratio of the output sample rate to the input sample rate expressed
     /// in input frames: `step = fs_in / fs_out`.
     pub fn design(step: f64, taps: usize, phases: usize) -> Self {
-        let taps = if taps % 2 == 0 { taps + 1 } else { taps };
+        let taps = if taps.is_multiple_of(2) {
+            taps + 1
+        } else {
+            taps
+        };
         let half = taps / 2;
         let step = if step.abs() < 1e-12 { 1.0 } else { step.abs() };
 

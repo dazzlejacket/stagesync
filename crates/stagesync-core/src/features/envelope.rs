@@ -165,7 +165,7 @@ impl EnvelopeExtractor {
             self.samples_seen += 1;
 
             if self.samples_seen >= self.frame_len as u64
-                && (self.samples_seen as usize - self.frame_len) % self.hop_len == 0
+                && (self.samples_seen as usize - self.frame_len).is_multiple_of(self.hop_len)
             {
                 let rms = (self.sq_sum / self.frame_len as f64).max(0.0).sqrt();
                 self.db.push((20.0 * rms.max(1e-9).log10()) as f32);

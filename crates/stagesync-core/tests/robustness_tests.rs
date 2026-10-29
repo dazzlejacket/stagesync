@@ -413,3 +413,80 @@ fn peak_working_set_bytes() -> Option<u64> {
 fn peak_working_set_bytes() -> Option<u64> {
     None
 }
+
+/// Write a WAV file whose header claims the given sample rate.
+///
+/// The header is written by hand, because a sample rate of zero cannot be
+/// asked for through the usual writer.
+fn write_wav_with_sample_rate(path: &Path, sample_rate: u32, frames: usize) {
+    let mut data = Vec::with_capacity(frames * 2);
+    for i in 0..frames {
+        let value = (i % 37) as i16 * 400;
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes()); // block align
+    bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&data);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create the directory");
+    }
+    std::fs::write(path, bytes).expect("write the file");
+}
+
+/// A file that claims a sample rate of zero is refused, with a clear message.
+///
+/// Nothing can be measured against a file whose clock does not run.
+#[test]
+fn a_file_with_no_sample_rate_is_refused() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("no_rate.wav");
+    write_wav_with_sample_rate(&path, 0, 800);
+
+    let opened = AudioDecoder::open(&path);
+    assert!(
+        opened.is_err(),
+        "a file with no sample rate must be refused"
+    );
+    let error = opened.err().expect("the file must be refused");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("sample rate of zero"),
+        "the refusal must say why, got: {message}"
+    );
+}
+
+/// A very low sample rate must not crash the analysis.
+///
+/// The lowest band of the mel filterbank can fall above the highest FFT bin
+/// when the sample rate is low, and the band then had nowhere to read from.
+#[test]
+fn a_very_low_sample_rate_does_not_crash_the_analysis() {
+    let dir = TempDir::new().expect("temp dir");
+    let reference = reference_file(RATE, DURATION, 0xC0FFEE);
+    for rate in [1u32, 8, 40, 77, 78, 100] {
+        let path = dir.path().join(format!("low_{rate}.wav"));
+        write_wav_with_sample_rate(&path, rate, 800);
+
+        // The spectral cross-check is the stage that builds the filterbank.
+        let mut config = config();
+        config.compute_log_mel = true;
+        let result = try_analyse(&reference, std::slice::from_ref(&path), &config);
+        assert!(
+            result.is_ok(),
+            "a sample rate of {rate} Hz must not fail the analysis: {:?}",
+            result.err()
+        );
+    }
+}

@@ -299,10 +299,13 @@ fn paint_plot(ui: &mut Ui, plot: Plot<'_>) {
     }
 
     if legend {
+        // The legend is drawn at the right-hand end of the title row, so that
+        // a long title and the legend do not sit on top of one another.
+        let width = legend_width(series);
         paint_legend(
             &painter,
             series,
-            Pos2::new(plot.left() + 6.0, outer.top() + 2.0),
+            Pos2::new(outer.right() - MARGIN_RIGHT - width, outer.top() + 2.0),
         );
     }
 
@@ -371,6 +374,14 @@ fn paint_marker(
             painter.rect_stroke(rect, 1.0, Stroke::new(1.5, fill), StrokeKind::Middle);
         }
     }
+}
+
+/// The width the legend of a plot needs.
+fn legend_width(series: &[Series]) -> f32 {
+    series
+        .iter()
+        .map(|series| 11.0 + 6.5 * series.label.chars().count() as f32 + 14.0)
+        .sum()
 }
 
 /// Draw the legend of a plot, at the top of it.

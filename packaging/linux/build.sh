@@ -44,7 +44,7 @@ fi
 # --- the build -----------------------------------------------------------------
 
 echo "==> building the stagesync-desktop binary (linux, ${arch})"
-cargo build --release --bin stagesync-desktop
+cargo build --release --locked --bin stagesync-desktop
 
 binary="${repo_root}/target/release/stagesync-desktop"
 if [ ! -f "${binary}" ]; then
@@ -73,6 +73,7 @@ APPRUN
 chmod +x "${app_dir}/AppRun"
 
 repo_icon="${repo_root}/assets/icon.png"
+placeholder_icon="${dist_dir}/placeholder-icon.png"
 if [ -f "${repo_icon}" ]; then
   install -m 0644 "${repo_icon}" "${app_dir}/assets/icon.png"
   install -m 0644 "${repo_icon}" "${app_dir}/stagesync.png"
@@ -83,7 +84,7 @@ else
   echo "      placeholder icon is written to AppDir/stagesync.png. It is not artwork:"
   echo "      replace assets/icon.png in the repository and build again for a real icon."
   icon_source="a generated placeholder"
-  base64 -d > "${app_dir}/stagesync.png" <<'PLACEHOLDER_ICON'
+  base64 -d > "${placeholder_icon}" <<'PLACEHOLDER_ICON'
 iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAADHUlEQVR42u3TMQ0AIAxE0QrqwIR/
 DR2qBwcd2Agv+Qru8iLXlr4tTCAAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQA
 JAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJACu
@@ -100,6 +101,7 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgRAAAEAAACAAABAAAAkACQACY
 QABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABI
 AEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASEMHOPZNA7nEdnMAAAAASUVORK5CYII=
 PLACEHOLDER_ICON
+  install -m 0644 "${placeholder_icon}" "${app_dir}/stagesync.png"
 fi
 
 # --- the AppImage --------------------------------------------------------------
@@ -153,6 +155,12 @@ if [ -f "${repo_icon}" ]; then
   mkdir -p "${deb_root}/usr/share/icons/hicolor/256x256/apps"
   install -m 0644 "${repo_icon}" \
     "${deb_root}/usr/share/icons/hicolor/256x256/apps/stagesync.png"
+else
+  # The desktop entry names the icon `stagesync`, so the package has to carry
+  # one. Without it the launcher shows a broken icon on every desktop.
+  mkdir -p "${deb_root}/usr/share/icons/hicolor/256x256/apps"
+  install -m 0644 "${placeholder_icon}" \
+    "${deb_root}/usr/share/icons/hicolor/256x256/apps/stagesync.png"
 fi
 
 cat > "${deb_root}/DEBIAN/control" <<CONTROL
@@ -162,7 +170,7 @@ Architecture: ${arch}
 Section: audio
 Priority: optional
 Maintainer: ${maintainer}
-Depends: libc6, libgcc-s1
+Depends: libc6, libgcc-s1, libx11-6, libxkbcommon0, libx11-xcb1, libwayland-client0, libgl1 | libegl1
 Description: Drift-aware multi-recorder audio synchronisation
  StageSync aligns several recordings of the same concert or play against
  one reference recording, measures the clock drift of each recorder, and

@@ -627,3 +627,137 @@ fn a_writer_can_produce_a_file_the_reader_can_read_back() {
         );
     }
 }
+
+/// An export must never write over one of the recordings it read.
+///
+/// The corrected file is named after the recording it comes from, so an export
+/// into a directory that already holds a recording of that name lands on the
+/// recording itself. The originals are read-only and the reference is never
+/// altered at all.
+#[test]
+fn an_export_refuses_to_write_over_the_recording_it_read() {
+    let dir = TempDir::new().expect("temp dir");
+    let reference = reference_file(RATE, DURATION, 0xC0FFEE);
+    let source = build_source(&dir, "src.wav", 1.0, 25.0, SOURCE_RATE, -20.0, None);
+    let report = analyse(&reference, std::slice::from_ref(&source), &config());
+    let model = model_for(&report, 0);
+
+    // The corrected file would be written under the source's own name.
+    let out = source.clone();
+    let options = RenderOptions::default();
+
+    let error = render_source_aligned(&source, &model, &out, &options)
+        .expect_err("the render must be refused");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("would overwrite"),
+        "the refusal must say why, got: {message}"
+    );
+    assert!(
+        source.exists(),
+        "the refused render must not have destroyed the recording"
+    );
+}
+
+/// The reference is never altered, even when the output name lands on it.
+#[test]
+fn an_export_refuses_to_write_over_the_reference() {
+    let dir = TempDir::new().expect("temp dir");
+    let reference = reference_file(RATE, DURATION, 0xC0FFEE);
+    let source = build_source(&dir, "src.wav", 1.0, 25.0, SOURCE_RATE, -20.0, None);
+    let report = analyse(&reference, std::slice::from_ref(&source), &config());
+    let model = model_for(&report, 0);
+
+    // A recording that is already called `ref_corrected.wav` would have its
+    // corrected twin written over it.
+    let reference_copy = dir.path().join("ref_corrected.wav");
+    std::fs::copy(&reference, &reference_copy).expect("copy the reference");
+    let before = std::fs::read(&reference_copy).expect("read the reference copy");
+
+    let error = render_source_aligned(
+        &reference_copy,
+        &model,
+        &reference_copy,
+        &RenderOptions::default(),
+    )
+    .expect_err("the render must be refused");
+    assert!(
+        format!("{error:#}").contains("would overwrite"),
+        "the refusal must say why"
+    );
+    assert_eq!(
+        std::fs::read(&reference_copy).expect("read the reference copy"),
+        before,
+        "the reference was altered"
+    );
+}
+
+/// A file that is not one of the recordings may be written over.
+#[test]
+fn an_export_may_write_over_a_file_it_did_not_read() {
+    let dir = TempDir::new().expect("temp dir");
+    let reference = reference_file(RATE, DURATION, 0xC0FFEE);
+    let source = build_source(&dir, "src.wav", 1.0, 25.0, SOURCE_RATE, -20.0, None);
+    let report = analyse(&reference, std::slice::from_ref(&source), &config());
+    let model = model_for(&report, 0);
+
+    let out = dir.path().join("previous_export.wav");
+    std::fs::write(&out, b"an old export").expect("write the old export");
+    render_source_aligned(&source, &model, &out, &RenderOptions::default())
+        .expect("the render must go ahead");
+    assert!(out.exists(), "the render must have written the file");
+}
+
+/// The names an export writes must not land on one of the recordings.
+///
+/// The corrected file of a recording called `foo.wav` is called
+/// `foo_corrected.wav`, so a recording that is already called
+/// `foo_corrected.wav` — or a reference of that name — would be written over.
+#[test]
+fn the_planned_outputs_are_checked_against_the_recordings() {
+    let dir = TempDir::new().expect("temp dir");
+    let reference = reference_file(RATE, DURATION, 0xC0FFEE);
+    let source = build_source(&dir, "src.wav", 1.0, 25.0, SOURCE_RATE, -20.0, None);
+    let report = analyse(&reference, std::slice::from_ref(&source), &config());
+
+    let out = dir.path();
+    let outputs = stagesync_core::render::planned_outputs(out, &report, Layout::SourceAligned);
+    assert_eq!(outputs.len(), 1);
+    assert!(
+        outputs[0].ends_with("src_corrected.wav"),
+        "the corrected file is named after the recording, got {:?}",
+        outputs[0]
+    );
+
+    // Nothing collides here, so the guard is quiet.
+    let inputs: Vec<PathBuf> = std::iter::once(reference.clone())
+        .chain(report.sources.iter().map(|a| a.source.path.clone()))
+        .collect();
+    stagesync_core::render::ensure_output_does_not_overwrite(&outputs[0], &inputs)
+        .expect("there is no collision here");
+
+    // A reference called `src_corrected.wav`, exported into the directory it
+    // lives in, is the very file the export would write. The guard must
+    // refuse it, because the reference is never altered.
+    let colliding_reference = out.join("src_corrected.wav");
+    std::fs::copy(&reference, &colliding_reference).expect("copy the reference");
+    let inputs: Vec<PathBuf> = std::iter::once(colliding_reference.clone())
+        .chain(report.sources.iter().map(|a| a.source.path.clone()))
+        .collect();
+    let error = stagesync_core::render::ensure_output_does_not_overwrite(&outputs[0], &inputs)
+        .expect_err("the collision must be refused");
+    assert!(
+        format!("{error:#}").contains("would overwrite"),
+        "the refusal must say why"
+    );
+}
+
+/// The output name must not carry a path separator out of the output folder.
+#[test]
+fn an_output_name_never_carries_a_path_separator() {
+    assert_eq!(stagesync_core::render::safe_stem("take 2.wav"), "take_2");
+    assert_eq!(stagesync_core::render::safe_stem("a/b.wav"), "b");
+    assert_eq!(stagesync_core::render::safe_stem(r"c\d.wav"), "d");
+    assert_eq!(stagesync_core::render::safe_stem(""), "source");
+    assert_eq!(stagesync_core::render::safe_stem(".."), "source");
+}

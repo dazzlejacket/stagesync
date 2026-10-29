@@ -54,7 +54,7 @@ echo "==> building the stagesync-desktop binary (macOS, ${arch})"
 
 # --- the build -----------------------------------------------------------------
 
-cargo build --release --bin stagesync-desktop
+cargo build --release --locked --bin stagesync-desktop
 
 binary="${repo_root}/target/release/stagesync-desktop"
 if [ ! -f "${binary}" ]; then

@@ -181,6 +181,7 @@ pub fn render_source_aligned(
     out_path: &Path,
     options: &RenderOptions,
 ) -> Result<RenderResult> {
+    ensure_output_does_not_overwrite(out_path, &[source_path.to_path_buf()])?;
     let mut decoder = AudioDecoder::open(source_path)?;
     let meta = decoder.meta().clone();
     let source_rate = meta.sample_rate;
@@ -239,6 +240,7 @@ pub fn render_reference_timeline(
     out_path: &Path,
     options: &RenderOptions,
 ) -> Result<RenderResult> {
+    ensure_output_does_not_overwrite(out_path, &[source_path.to_path_buf()])?;
     let mut decoder = AudioDecoder::open(source_path)?;
     let meta = decoder.meta().clone();
     let source_rate = meta.sample_rate;
@@ -385,6 +387,9 @@ pub fn render_merged_timeline(
 ) -> Result<RenderResult> {
     anyhow::ensure!(!sources.is_empty(), "no sources to render");
 
+    let source_paths: Vec<PathBuf> = sources.iter().map(|(path, _)| path.clone()).collect();
+    ensure_output_does_not_overwrite(out_path, &source_paths)?;
+
     let first_meta = AudioDecoder::open(&sources[0].0)?.meta().clone();
     let output_rate = options.sample_rate.unwrap_or(first_meta.sample_rate);
     let channels = first_meta.channels.max(1);
@@ -489,4 +494,116 @@ pub fn prepare_output(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Refuse to write an output over one of the recordings that were read.
+///
+/// The corrected file is named after the recording it comes from, so an export
+/// into a directory that already holds a recording of that name lands on the
+/// recording itself. The originals are read-only and the reference is never
+/// altered at all, so this is refused rather than carried out.
+pub fn ensure_output_does_not_overwrite(output: &Path, inputs: &[PathBuf]) -> Result<()> {
+    let Some(target) = comparable_path(output) else {
+        return Ok(());
+    };
+    for input in inputs {
+        let Some(source) = comparable_path(input) else {
+            continue;
+        };
+        if same_path(&target, &source) {
+            anyhow::bail!(
+                "refusing to write {}: it would overwrite the recording {}",
+                output.display(),
+                input.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A path in a form that can be compared with another path.
+///
+/// The output usually does not exist yet, so its parent directory is resolved
+/// and the file name is appended to it. Both sides then carry the same
+/// directory prefix, which is what makes the comparison reliable.
+fn comparable_path(path: &Path) -> Option<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let parent = absolute.parent()?;
+    let name = absolute.file_name()?;
+    let parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    Some(parent.join(name))
+}
+
+/// Whether two paths name the same file.
+///
+/// Windows paths are compared without regard to case, because the file system
+/// does not treat `Soundboard.WAV` and `soundboard.wav` as two files.
+#[cfg(windows)]
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+}
+
+/// A file name without extension, safe to use as an output name.
+///
+/// The path separators are removed, because the name is joined to a directory
+/// and a separator in it would send the file somewhere else, and whitespace
+/// becomes an underscore so that the name can be typed on a command line.
+pub fn safe_stem(name: &str) -> String {
+    let base = Path::new(name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| name.to_string());
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c.is_whitespace() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    // A name made only of dots would still point at a directory rather than
+    // at a file, so it is replaced outright.
+    if cleaned.trim().is_empty() || cleaned.chars().all(|c| c == '.') {
+        "source".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// The files an export writes for the given layout.
+///
+/// The names are worked out before anything is written, so that an export
+/// which would land on one of the recordings can be refused before the first
+/// file is touched.
+pub fn planned_outputs(
+    out: &Path,
+    report: &crate::matching::AlignmentReport,
+    layout: Layout,
+) -> Vec<PathBuf> {
+    match layout {
+        Layout::SourceAligned => report
+            .sources
+            .iter()
+            .map(|a| out.join(format!("{}_corrected.wav", safe_stem(&a.source.file_name))))
+            .collect(),
+        Layout::ReferenceTimelinePerSource => report
+            .sources
+            .iter()
+            .map(|a| out.join(format!("{}_timeline.wav", safe_stem(&a.source.file_name))))
+            .collect(),
+        Layout::ReferenceTimelineMerged => vec![out.join("timeline_merged.wav")],
+    }
 }

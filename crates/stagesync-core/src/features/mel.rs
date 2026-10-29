@@ -176,7 +176,7 @@ impl LogMelExtractor {
             self.samples_seen += 1;
 
             if self.samples_seen >= self.frame_len as u64
-                && (self.samples_seen as usize - self.frame_len) % self.hop_len == 0
+                && (self.samples_seen as usize - self.frame_len).is_multiple_of(self.hop_len)
             {
                 let frame: Vec<f32> = self
                     .ring
@@ -317,7 +317,11 @@ fn build_filterbank(
     let mut filterbank = Vec::with_capacity(n_bands);
     for b in 0..n_bands {
         let (lo, mid, hi) = (edges[b], edges[b + 1], edges[b + 2]);
-        let lo_bin = ((lo / bin_hz).floor() as isize).max(0) as usize;
+        // The lowest band edge can fall above the highest FFT bin when the
+        // sample rate is low, and dividing by a bin width of zero gives an
+        // infinity. The band is therefore clamped into the range of bins that
+        // exist, so that the band always has somewhere to read from.
+        let lo_bin = (((lo / bin_hz).floor() as isize).max(0) as usize).min(bins - 1);
         let hi_bin = (((hi / bin_hz).ceil() as isize).max(0) as usize).min(bins - 1);
         let mut weights = Vec::new();
         let mut start = lo_bin;

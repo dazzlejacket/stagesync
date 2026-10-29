@@ -49,6 +49,11 @@ pub struct TargetMetrics {
     pub offset_secs: Option<f64>,
     /// Drift of the source clock, in parts per million.
     pub drift_ppm: Option<f64>,
+    /// The standard error of the drift, in parts per million.
+    ///
+    /// A drift without it is a number rather than a measurement, so it is
+    /// carried alongside the drift wherever the drift is shown.
+    pub drift_se_ppm: Option<f64>,
     /// Drift accumulated over the whole source, in milliseconds.
     pub accumulated_drift_ms: Option<f64>,
     /// Fraction of the reference covered by this source.
@@ -64,9 +69,18 @@ pub fn metrics_for(report: &AlignmentReport, index: usize) -> TargetMetrics {
         return TargetMetrics::default();
     };
     let model = alignment.model();
+    let (drift_ppm, drift_se_ppm) = match &alignment.drift {
+        // Only an established drift carries an uncertainty; an offset-only
+        // source has no drift to give an uncertainty for.
+        Some(assessment) if assessment.status == DriftStatus::Established => {
+            (Some(assessment.drift_ppm), Some(assessment.slope_se_ppm))
+        }
+        _ => (None, None),
+    };
     TargetMetrics {
         offset_secs: model.map(|m| m.offset),
-        drift_ppm: model.map(|m| m.drift_ppm()),
+        drift_ppm: drift_ppm.or_else(|| model.map(|m| m.drift_ppm())),
+        drift_se_ppm,
         accumulated_drift_ms: model
             .map(|m| m.accumulated_drift_ms(0.0, alignment.source.duration_secs)),
         coverage: Some(alignment.coverage.fraction),

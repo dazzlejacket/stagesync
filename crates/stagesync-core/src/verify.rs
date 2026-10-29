@@ -556,7 +556,7 @@ fn rms_envelope(samples: &[f32], sample_rate: u32) -> Vec<f32> {
         if i >= frame {
             sum_sq -= (samples[i - frame] as f64) * (samples[i - frame] as f64);
         }
-        if i + 1 >= frame && (i + 1 - frame) % hop == 0 {
+        if i + 1 >= frame && (i + 1 - frame).is_multiple_of(hop) {
             let rms = (sum_sq / frame as f64).max(0.0).sqrt();
             out.push(20.0 * rms.max(1e-9).log10() as f32);
         }

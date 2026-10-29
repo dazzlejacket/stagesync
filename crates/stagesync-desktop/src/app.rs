@@ -53,7 +53,6 @@ struct SourceFacts {
     name: String,
     duration: f64,
     offset_secs: Option<f64>,
-    drift_ppm: Option<f64>,
     accumulated_ms: Option<f64>,
     coverage: f64,
     covered_secs: f64,
@@ -80,7 +79,12 @@ pub struct StageSyncApp {
     notice: Option<String>,
     log: Vec<String>,
     export_outcome: Option<ExportOutcome>,
-    anchor: AnchorFields,
+    /// The manual anchor of each target recording, indexed the same way as `targets`.
+    ///
+    /// An anchor belongs to one recording. A recording set usually holds several
+    /// files, and a single global anchor would drag every one of them onto the
+    /// same correspondence, which is the very thing the anchor is for.
+    anchors: Vec<AnchorFields>,
     settings: ExportSettings,
     /// Whether the independent log-mel cross-check is run during the analysis.
     use_spectral_check: bool,
@@ -92,6 +96,12 @@ pub struct StageSyncApp {
     window_width: f32,
     /// The height of the window, as it is now.
     window_height: f32,
+    /// The width the centre of the window was given by the last layout.
+    ///
+    /// The timeline, the anchor controls and the results all live in the
+    /// centre, so the width it is given decides whether they can be read at
+    /// all. It is kept so that a test can check the layout without a window.
+    central_width: f32,
     /// Whether the settings have already been written for this close.
     closing_saved: bool,
     zoom: f64,
@@ -101,8 +111,17 @@ pub struct StageSyncApp {
 
 impl Default for StageSyncApp {
     fn default() -> Self {
+        Self::with_settings(AppSettings::load())
+    }
+}
+
+impl StageSyncApp {
+    /// An application that takes its preferences from the given settings.
+    ///
+    /// This is separate from [`Default`] so that a test can build the
+    /// application without reading the settings of whoever is running it.
+    fn with_settings(stored: AppSettings) -> Self {
         let (tx, rx) = mpsc::channel();
-        let stored = AppSettings::load();
         let mut app = Self {
             reference: None,
             targets: Vec::new(),
@@ -115,7 +134,7 @@ impl Default for StageSyncApp {
             notice: None,
             log: Vec::new(),
             export_outcome: None,
-            anchor: AnchorFields::default(),
+            anchors: Vec::new(),
             settings: ExportSettings {
                 dir: String::new(),
                 layout: Layout::SourceAligned,
@@ -127,6 +146,7 @@ impl Default for StageSyncApp {
             force_offset_only: false,
             window_width: stored.window_width,
             window_height: stored.window_height,
+            central_width: 0.0,
             closing_saved: false,
             zoom: 4.0,
             tx,
@@ -235,6 +255,23 @@ impl StageSyncApp {
                 JobEvent::AnalysisFinished(report) => {
                     self.running = None;
                     self.progress = None;
+                    // The report describes the recordings that were in the list
+                    // when the analysis started. If the list has changed since,
+                    // its indices no longer line up with the file list, and
+                    // showing it would put one recording's figures next to
+                    // another recording's name.
+                    if report.sources.len() != self.targets.len() {
+                        self.report = None;
+                        self.last_error = Some(
+                            "The file list changed while the analysis was running, so its result \
+                             was discarded. Run the analysis again."
+                                .to_string(),
+                        );
+                        self.push_log(
+                            "analysis result discarded: the file list changed".to_string(),
+                        );
+                        continue;
+                    }
                     self.report = Some(*report);
                     self.last_error = None;
                     self.notice = Some("Analysis finished.".to_string());
@@ -338,14 +375,15 @@ impl StageSyncApp {
         }
     }
 
-    /// The manual anchor, when it is in effect.
-    fn anchor_value(&self) -> Option<ManualAnchor> {
-        if !self.anchor.active {
+    /// The manual anchor of the target at `index`, when it is in effect.
+    fn anchor_value(&self, index: usize) -> Option<ManualAnchor> {
+        let anchor = self.anchors.get(index)?;
+        if !anchor.active {
             return None;
         }
         Some(ManualAnchor {
-            source_time: self.anchor.source_time,
-            reference_time: self.anchor.reference_time,
+            source_time: anchor.source_time,
+            reference_time: anchor.reference_time,
         })
     }
 
@@ -383,6 +421,7 @@ impl StageSyncApp {
                 self.set_default_export_dir(&path);
             } else {
                 self.targets.push(FileEntry::new(path.clone()));
+                self.anchors.push(AnchorFields::default());
             }
             jobs::spawn_probe(self.tx.clone(), path);
         }
@@ -446,6 +485,9 @@ impl StageSyncApp {
         }
         let name = self.targets[index].name();
         self.targets.remove(index);
+        if index < self.anchors.len() {
+            self.anchors.remove(index);
+        }
         self.report = None;
         self.export_outcome = None;
         self.selection = None;
@@ -456,6 +498,14 @@ impl StageSyncApp {
 
     /// Start the analysis of the reference against the targets.
     fn start_analysis(&mut self) {
+        if self.running.is_some() {
+            // Starting a second job would orphan the first one's cancel flag,
+            // so the user would no longer be able to stop it.
+            self.last_error = Some(
+                "A job is already running. Wait for it to finish, or cancel it first.".to_string(),
+            );
+            return;
+        }
         let Some(reference) = self.reference.as_ref().map(|entry| entry.path.clone()) else {
             self.last_error = Some("Choose a reference recording first.".to_string());
             return;
@@ -474,10 +524,20 @@ impl StageSyncApp {
             compute_log_mel: self.use_spectral_check,
             measure_waveform_drift: self.measure_waveform_drift,
             force_offset_only: self.force_offset_only,
-            manual_anchor: self.anchor_value(),
             ..AnalysisConfig::default()
         };
-        if config.manual_anchor.is_some() {
+        // Each anchor belongs to the recording it was set for, so one recording
+        // can be pinned without dragging the others onto the same point.
+        config.manual_anchors = self
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let anchor = self.anchor_value(index)?;
+                Some((entry.name(), anchor))
+            })
+            .collect();
+        if !config.manual_anchors.is_empty() {
             // The automatic lock is not to be trusted, so widen the fine search.
             config.fine.search_secs = 10.0;
         }
@@ -496,6 +556,12 @@ impl StageSyncApp {
 
     /// Start the export of the corrected audio and the artefacts.
     fn start_export(&mut self) {
+        if self.running.is_some() {
+            self.last_error = Some(
+                "A job is already running. Wait for it to finish, or cancel it first.".to_string(),
+            );
+            return;
+        }
         let Some(report) = self.report.clone() else {
             self.last_error = Some("Run the analysis before exporting.".to_string());
             return;
@@ -570,7 +636,7 @@ impl StageSyncApp {
 
     /// The toolbar with the run controls and the progress display.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        let busy = self.running.is_some();
+        let busy = self.running.is_some() || self.verifying;
         let can_analyze = self.reference.is_some() && !self.targets.is_empty() && !busy;
         let mut start = false;
         let mut cancel = false;
@@ -580,12 +646,14 @@ impl StageSyncApp {
             start = ui
                 .add_enabled(can_analyze, egui::Button::new("Analyze"))
                 .clicked();
-            if busy {
+            if self.running.is_some() {
                 let label = match self.running.as_ref().map(|job| job.kind) {
-                    Some(JobKind::Export) => "Cancel (after this file)",
+                    Some(JobKind::Export) => "Cancel (the file being written cannot be stopped)",
                     _ => "Cancel",
                 };
                 cancel = ui.button(label).clicked();
+            } else if self.verifying {
+                ui.label("Verifying…");
             }
             ui.separator();
             changed |= ui
@@ -645,14 +713,17 @@ impl StageSyncApp {
     /// The file list.
     fn file_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Files");
-        ui.label("Drop audio files or a folder onto the window, or use Add files…");
+        wrapped(
+            ui,
+            "Drop audio files or a folder onto the window, or use Add files\u{2026}",
+        );
         ui.horizontal(|ui| {
             if ui.button("Add files…").clicked() {
                 self.browse_for_files();
             }
             if ui
                 .add_enabled(
-                    self.reference.is_some(),
+                    self.reference.is_some() && self.running.is_none(),
                     egui::Button::new("Clear reference"),
                 )
                 .clicked()
@@ -668,7 +739,7 @@ impl StageSyncApp {
             if ui.selectable_label(selected, entry.name()).clicked() {
                 self.selection = Some(Selection::Reference);
             }
-            ui.monospace(platform::display_path(&entry.path));
+            ui.monospace(platform::elide_path(&entry.path, PATH_CHARS));
             match &entry.meta {
                 Some(meta) => {
                     ui.label(format!(
@@ -686,10 +757,7 @@ impl StageSyncApp {
                 }
             }
             if let Some(error) = &entry.error {
-                ui.colored_label(
-                    Color32::from_rgb(235, 120, 110),
-                    format!("cannot read: {error}"),
-                );
+                ui.colored_label(ui.visuals().error_fg_color, format!("cannot read: {error}"));
             }
         } else {
             ui.label("none — the first file you add becomes the reference");
@@ -714,11 +782,14 @@ impl StageSyncApp {
                 if ui.selectable_label(selected, entry.name()).clicked() {
                     select = Some(Selection::Target(index));
                 }
-                if ui.small_button("✖").clicked() {
+                if ui
+                    .add_enabled(self.running.is_none(), egui::Button::new("✖"))
+                    .clicked()
+                {
                     remove = Some(index);
                 }
             });
-            ui.monospace(platform::display_path(&entry.path));
+            ui.monospace(platform::elide_path(&entry.path, PATH_CHARS));
             match &entry.meta {
                 Some(meta) => {
                     ui.label(format!(
@@ -735,13 +806,10 @@ impl StageSyncApp {
                 }
             }
             if let Some(error) = &entry.error {
-                ui.colored_label(
-                    Color32::from_rgb(235, 120, 110),
-                    format!("cannot read: {error}"),
-                );
+                ui.colored_label(ui.visuals().error_fg_color, format!("cannot read: {error}"));
             }
             if let Some(metrics) = metrics {
-                ui.label(metrics_line(&metrics));
+                wrapped(ui, metrics_line(&metrics));
             }
             ui.separator();
         }
@@ -761,8 +829,13 @@ impl StageSyncApp {
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.label("Folder");
+            // The field fills the space the panel has left, rather than asking
+            // for an infinite width: a text box that grows with the window
+            // would push the panel wider than its cap.
+            let width = (ui.available_width() - ui.spacing().item_spacing.x - 70.0).max(80.0);
             changed |= ui
-                .add(
+                .add_sized(
+                    [width, ui.spacing().interact_size.y],
                     egui::TextEdit::singleline(&mut self.settings.dir)
                         .desired_width(f32::INFINITY)
                         .hint_text("choose a folder"),
@@ -796,7 +869,7 @@ impl StageSyncApp {
                         .changed();
                 }
             });
-        ui.label(match self.settings.layout {
+        wrapped(ui, match self.settings.layout {
             Layout::SourceAligned => {
                 "One corrected file per source, keeping its own length and sample rate."
             }
@@ -843,8 +916,10 @@ impl StageSyncApp {
             });
 
         ui.add_space(6.0);
-        let can_export =
-            self.report.is_some() && !self.settings.dir.trim().is_empty() && self.running.is_none();
+        let can_export = self.report.is_some()
+            && !self.settings.dir.trim().is_empty()
+            && self.running.is_none()
+            && !self.verifying;
         if ui
             .add_enabled(can_export, egui::Button::new("Export"))
             .clicked()
@@ -859,7 +934,7 @@ impl StageSyncApp {
                 .id_salt("written_files")
                 .show(ui, |ui| {
                     for path in &outcome.files {
-                        ui.monospace(platform::display_path(path));
+                        ui.monospace(platform::elide_path(path, PATH_CHARS));
                     }
                 });
         }
@@ -874,7 +949,7 @@ impl StageSyncApp {
         ui.horizontal(|ui| {
             ui.strong("Messages");
             ui.separator();
-            ui.colored_label(Color32::from_gray(140), platform::describe_platform());
+            ui.colored_label(weak_text(ui), platform::describe_platform());
         });
         egui::ScrollArea::vertical()
             .id_salt("log")
@@ -888,23 +963,28 @@ impl StageSyncApp {
 
     /// The main area: the timeline, the anchor controls and the source details.
     fn central(&mut self, ui: &mut egui::Ui) {
+        self.central_width = ui.available_width();
         if let Some(error) = self.last_error.clone() {
+            // The colours come from the theme, so the message is legible both
+            // on a light desktop and on a dark one.
+            let foreground = ui.visuals().error_fg_color;
             egui::Frame::new()
-                .fill(Color32::from_rgb(64, 22, 22))
+                .fill(foreground.gamma_multiply(0.18))
                 .corner_radius(4.0)
                 .inner_margin(8.0)
                 .show(ui, |ui| {
-                    ui.colored_label(Color32::from_rgb(245, 140, 130), error);
+                    ui.colored_label(foreground, error);
                 });
             ui.add_space(6.0);
         }
         if let Some(notice) = self.notice.clone() {
+            let foreground = ui.visuals().text_color();
             egui::Frame::new()
-                .fill(Color32::from_rgb(30, 48, 66))
+                .fill(foreground.gamma_multiply(0.18))
                 .corner_radius(4.0)
                 .inner_margin(8.0)
                 .show(ui, |ui| {
-                    ui.colored_label(Color32::from_rgb(150, 205, 240), notice);
+                    ui.colored_label(foreground, notice);
                 });
             ui.add_space(6.0);
         }
@@ -920,28 +1000,29 @@ impl StageSyncApp {
     fn timeline_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Reference timeline");
 
-        let mut fit = false;
-        egui::Grid::new("timeline_controls")
-            .num_columns(3)
-            .show(ui, |ui| {
-                ui.label("Zoom");
-                ui.add(
-                    egui::Slider::new(&mut self.zoom, 0.2..=500.0)
-                        .suffix(" px/s")
-                        .logarithmic(true),
-                );
-                if ui.button("Fit").clicked() {
-                    fit = true;
-                }
-                ui.end_row();
-            });
-
         let Some(report) = self.report.as_ref() else {
-            ui.label(
+            wrapped(
+                ui,
                 "No analysis yet: add a reference and at least one target, then press Analyze.",
             );
             return;
         };
+
+        let mut fit = false;
+        // The row is laid out so that it may wrap: a row that is wider than
+        // the panel sets the panel's minimum width, and everything drawn after
+        // it is then laid out too wide and cut off at the panel's edge.
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Zoom");
+            ui.add(
+                egui::Slider::new(&mut self.zoom, 0.2..=500.0)
+                    .suffix(" px/s")
+                    .logarithmic(true),
+            );
+            if ui.button("Fit").clicked() {
+                fit = true;
+            }
+        });
 
         let duration = report.timeline_duration.max(1.0);
         if fit {
@@ -967,59 +1048,110 @@ impl StageSyncApp {
     }
 
     /// The manual anchor controls.
+    ///
+    /// The anchor belongs to the selected target recording. It is a hard
+    /// constraint on that recording alone: the model of the anchored recording
+    /// is forced through the point that is given, and the other recordings keep
+    /// whatever the automatic match found for them.
     fn anchor_section(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Manual anchor")
             .default_open(true)
             .show(ui, |ui| {
-                ui.label(
-                    "Use this when the automatic match fails. The anchor is a hard constraint: \
-                     it is applied to every source, and the final model of each source is \
-                     forced through it.",
+                let Some(index) = self.selected_target_index() else {
+                    wrapped(
+                        ui,
+                        "Use this when the automatic match fails. Select a target recording \
+                         in the file list to anchor it: the anchor is a hard constraint on that \
+                         recording alone, and the other recordings keep the alignment the \
+                         automatic match found for them.",
+                    );
+                    return;
+                };
+                let name = self.targets[index].name();
+                let can_run =
+                    self.reference.is_some() && !self.targets.is_empty() && self.running.is_none();
+                wrapped(
+                    ui,
+                    format!(
+                        "Use this when the automatic match fails. The anchor is a hard constraint \
+                         on {name}: the model of that recording is forced through the point you \
+                         give, and the other recordings are left alone."
+                    ),
                 );
-                ui.horizontal(|ui| {
+
+                // The anchor is copied out before the controls are drawn: the
+                // buttons below start a new analysis, and that needs the whole
+                // application, not just this one field.
+                let Some(anchor) = self.anchors.get(index) else {
+                    return;
+                };
+                let mut active = anchor.active;
+                let mut source_time = anchor.source_time;
+                let mut reference_time = anchor.reference_time;
+
+                ui.checkbox(&mut active, "Use this anchor for this recording");
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Source time");
                     ui.add(
-                        egui::DragValue::new(&mut self.anchor.source_time)
+                        egui::DragValue::new(&mut source_time)
                             .speed(0.05)
                             .range(0.0..=1_000_000.0),
                     );
                     ui.label("s");
                     ui.label("Reference time");
                     ui.add(
-                        egui::DragValue::new(&mut self.anchor.reference_time)
+                        egui::DragValue::new(&mut reference_time)
                             .speed(0.05)
                             .range(0.0..=1_000_000.0),
                     );
                     ui.label("s");
                 });
 
-                let can_run = self.reference.is_some() && !self.targets.is_empty();
+                let mut apply = false;
+                let mut clear = false;
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(can_run, egui::Button::new("Apply anchor"))
                         .clicked()
                     {
-                        self.anchor.active = true;
-                        self.start_analysis();
+                        apply = true;
                     }
                     if ui
-                        .add_enabled(self.anchor.active, egui::Button::new("Clear anchor"))
+                        .add_enabled(active, egui::Button::new("Clear anchor"))
                         .clicked()
                     {
-                        self.anchor.active = false;
-                        self.start_analysis();
+                        clear = true;
                     }
-                    if self.anchor.active {
+                    if active {
                         ui.label("the anchor is in effect");
                     }
                 });
+
+                if let Some(anchor) = self.anchors.get_mut(index) {
+                    anchor.source_time = source_time;
+                    anchor.reference_time = reference_time;
+                    if clear {
+                        anchor.active = false;
+                    }
+                }
+                if apply {
+                    if let Some(anchor) = self.anchors.get_mut(index) {
+                        anchor.active = true;
+                    }
+                    self.start_analysis();
+                } else if clear {
+                    self.start_analysis();
+                }
             });
     }
 
     /// The details of the selected target, and the drift charts.
     fn detail_section(&mut self, ui: &mut egui::Ui) {
         let Some(index) = self.selected_target_index() else {
-            ui.label("Select a target recording in the file list to see how it was aligned.");
+            wrapped(
+                ui,
+                "Select a target recording in the file list to see how it was aligned.",
+            );
             return;
         };
 
@@ -1052,8 +1184,20 @@ impl StageSyncApp {
                 ui.end_row();
 
                 ui.label("Drift");
-                ui.label(match facts.drift_ppm {
-                    Some(ppm) => format!("{ppm:+.3} ppm"),
+                // The drift is shown with the uncertainty that produced it, or
+                // it is not shown at all: a rate without its precision is a
+                // number, not a measurement. A source whose drift was not
+                // established says so, rather than showing a figure of zero.
+                ui.label(match &facts.drift {
+                    Some(assessment) => match assessment.status {
+                        stagesync_core::matching::drift::DriftStatus::Established => format!(
+                            "{:+.3} ± {:.3} ppm",
+                            assessment.drift_ppm, assessment.slope_se_ppm
+                        ),
+                        stagesync_core::matching::drift::DriftStatus::OffsetOnly => {
+                            "not applied — only the offset was corrected".to_string()
+                        }
+                    },
                     None => "no alignment".to_string(),
                 });
                 ui.end_row();
@@ -1137,7 +1281,7 @@ impl StageSyncApp {
                 }
 
                 for note in &verdict.notes {
-                    ui.colored_label(Color32::from_gray(150), note.as_str());
+                    ui.colored_label(weak_text(ui), note.as_str());
                 }
             }
             None => {
@@ -1151,7 +1295,7 @@ impl StageSyncApp {
         if !facts.warnings.is_empty() {
             ui.label("Warnings");
             for warning in &facts.warnings {
-                ui.colored_label(Color32::from_rgb(235, 190, 120), warning.as_str());
+                ui.colored_label(ui.visuals().warn_fg_color, warning.as_str());
             }
         }
 
@@ -1172,9 +1316,18 @@ impl StageSyncApp {
                     ui.label("Pitch change");
                     ui.label(format!("{:+.4} cents", holdout.pitch_cents));
                     ui.end_row();
+                    if let Some(drift_error) = holdout.drift_error_ppm {
+                        let uncertainty = holdout
+                            .drift_error_se_ppm
+                            .map(|se| format!(" ± {se:.3} ppm"))
+                            .unwrap_or_default();
+                        ui.label("How wrong the applied drift is");
+                        ui.label(format!("{drift_error:+.3} ppm{uncertainty}"));
+                        ui.end_row();
+                    }
                 });
             for note in &holdout.notes {
-                ui.colored_label(Color32::from_rgb(235, 190, 120), note.as_str());
+                ui.colored_label(ui.visuals().warn_fg_color, note.as_str());
             }
         }
 
@@ -1214,6 +1367,34 @@ impl StageSyncApp {
     }
 }
 
+/// How many characters of a path are shown before the middle is elided.
+///
+/// The monospace font of the file list is about seven pixels wide, and the
+/// file panel is at most 420 pixels across, so this keeps a path on one line
+/// without letting it push the panel wider than its cap.
+const PATH_CHARS: usize = 48;
+
+/// The colour of secondary text, which follows the theme.
+fn weak_text(ui: &egui::Ui) -> Color32 {
+    ui.visuals()
+        .weak_text_color
+        .unwrap_or_else(|| ui.visuals().text_color())
+}
+
+/// A label that wraps at the edge of its panel instead of running past it.
+///
+/// A plain `ui.label` never wraps, and egui sizes a panel to its content, so
+/// an unwrapped sentence makes the panel as wide as the sentence. The wrap is
+/// made a little narrower than the panel, because the panel's own frame puts
+/// its text a few pixels inside its edge and a word that ran over that edge
+/// was cut in half.
+fn wrapped(ui: &mut egui::Ui, text: impl Into<String>) {
+    let panel_width = ui.max_rect().width();
+    ui.set_max_width((panel_width - 12.0).max(40.0));
+    ui.add(egui::Label::new(text.into()).wrap());
+    ui.set_max_width(panel_width);
+}
+
 /// Read the figures of one source out of its alignment.
 fn facts_for(alignment: &SourceAlignment) -> SourceFacts {
     let model = alignment.model();
@@ -1226,7 +1407,6 @@ fn facts_for(alignment: &SourceAlignment) -> SourceFacts {
         name: alignment.source.file_name.clone(),
         duration: alignment.source.duration_secs,
         offset_secs: model.map(|model| model.offset),
-        drift_ppm: model.map(|model| model.drift_ppm()),
         accumulated_ms: model
             .map(|model| model.accumulated_drift_ms(0.0, alignment.source.duration_secs)),
         coverage: alignment.coverage.fraction,
@@ -1243,9 +1423,20 @@ fn facts_for(alignment: &SourceAlignment) -> SourceFacts {
 
 /// The measured figures of one target, as one line of text.
 fn metrics_line(metrics: &crate::state::TargetMetrics) -> String {
-    match (metrics.offset_secs, metrics.drift_ppm, metrics.accumulated_drift_ms) {
-        (Some(offset), Some(ppm), Some(accumulated)) => format!(
-            "offset {offset:+.3} s · drift {ppm:+.2} ppm · accumulated {accumulated:+.1} ms · coverage {:.1}%",
+    match (
+        metrics.offset_secs,
+        metrics.drift_ppm,
+        metrics.drift_se_ppm,
+        metrics.accumulated_drift_ms,
+    ) {
+        (Some(offset), Some(ppm), Some(se), Some(accumulated)) => format!(
+            "offset {offset:+.3} s · drift {ppm:+.2} ± {se:.2} ppm · accumulated {accumulated:+.1} ms · coverage {:.1}%",
+            metrics.coverage.unwrap_or(0.0) * 100.0
+        ),
+        // A drift without an uncertainty is not shown: it would be a number
+        // with nothing behind it.
+        (Some(offset), None, _, Some(accumulated)) => format!(
+            "offset {offset:+.3} s · drift not applied · accumulated {accumulated:+.1} ms · coverage {:.1}%",
             metrics.coverage.unwrap_or(0.0) * 100.0
         ),
         _ => "no alignment yet".to_string(),
@@ -1254,6 +1445,18 @@ fn metrics_line(metrics: &crate::state::TargetMetrics) -> String {
 
 impl eframe::App for StageSyncApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.layout(ui);
+    }
+}
+
+impl StageSyncApp {
+    /// Draw the whole window.
+    ///
+    /// The panels are laid out from the root UI that eframe hands over, so the
+    /// file list, the centre and the export controls divide the window between
+    /// them. This is separate from [`eframe::App::ui`] so that the layout can
+    /// be laid out head-lessly, at any window size, in a test.
+    fn layout(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
 
         // Files dropped onto the window are the primary way to add recordings. A
@@ -1292,6 +1495,15 @@ impl eframe::App for StageSyncApp {
             self.persist_settings();
         }
 
+        // egui sizes a panel to its content and gives it no upper bound of its
+        // own, so a long file name or a wide text box would otherwise squeeze
+        // the centre — the timeline, the anchor controls and the results — out
+        // of existence. The side panels are capped so that the centre always
+        // keeps a usable share of the window, at any window size.
+        let window = ui.available_width();
+        let files_max = (window * 0.34).clamp(220.0, 420.0);
+        let export_max = (window * 0.30).clamp(220.0, 360.0);
+
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("messages")
             .resizable(true)
@@ -1299,17 +1511,68 @@ impl eframe::App for StageSyncApp {
             .show(ui, |ui| self.log_panel(ui));
         egui::Panel::left("files")
             .resizable(true)
-            .default_size(400.0)
+            .default_size(400.0_f32.min(files_max))
+            .max_size(files_max)
             .show(ui, |ui| self.file_panel(ui));
         egui::Panel::right("export")
             .resizable(true)
-            .default_size(340.0)
+            .default_size(340.0_f32.min(export_max))
+            .max_size(export_max)
             .show(ui, |ui| self.export_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
 
         if self.running.is_some() {
             // Keep the progress display moving while a job is running.
             ui.ctx().request_repaint();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lay the window out at a given size and report the width the centre got.
+    ///
+    /// The window is laid out without a real one: egui is handed a screen the
+    /// size of the window and the layout runs over it, so the result is the
+    /// layout the user would see.
+    fn central_width_at(width: f32, height: f32) -> f32 {
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, height),
+            )),
+            ..Default::default()
+        };
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        let output = context.run_ui(input, |ui| app.layout(ui));
+        // There is no renderer here to hand the textures to.
+        output.drop_without_applying_deltas();
+        app.central_width
+    }
+
+    /// The centre of the window holds the timeline, the anchor and the results.
+    ///
+    /// egui gives a panel no upper bound of its own, so the export panel once
+    /// grew to the width of the sentence that describes the layout and the
+    /// centre — the timeline, the anchor controls and the results — was left
+    /// with a fifth of the window, with the heading wrapping one letter to a
+    /// line. The centre must keep a real share of the window at every size the
+    /// application allows.
+    #[test]
+    fn the_centre_keeps_a_usable_share_of_the_window() {
+        for (width, height) in [
+            (960.0, 640.0),   // the smallest window the application allows
+            (1400.0, 900.0),  // the default
+            (2560.0, 1440.0), // a large display
+        ] {
+            let central = central_width_at(width, height);
+            assert!(
+                central >= width * 0.28,
+                "at {width}x{height} the centre was only {central:.0} px wide"
+            );
         }
     }
 }

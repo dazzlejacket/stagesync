@@ -287,6 +287,19 @@ pub fn export_report(
         Layout::ReferenceTimelineMerged => 1,
     };
 
+    // The corrected files are named after the recordings they come from, so an
+    // export into a directory that already holds a recording of that name
+    // would land on the recording itself. The originals are read-only and the
+    // reference is never altered, so this is refused before anything is
+    // written.
+    let inputs: Vec<PathBuf> = std::iter::once(report.reference.path.clone())
+        .chain(report.sources.iter().map(|a| a.source.path.clone()))
+        .collect();
+    for output in planned_outputs(&out, report, options.layout) {
+        render::ensure_output_does_not_overwrite(&output, &inputs)
+            .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+    }
+
     match options.layout {
         Layout::SourceAligned => {
             for (index, alignment) in report.sources.iter().enumerate() {
@@ -395,6 +408,14 @@ pub fn export_report(
         }
     }
 
+    // The cancel flag is read once more here, after the last file has been
+    // written. A render that is already under way cannot be stopped, so the
+    // user is told that the export was cancelled rather than being shown a
+    // finished export that they asked to stop.
+    if cancel.load(Ordering::Relaxed) {
+        return Err(JobFailure::Cancelled);
+    }
+
     let mut artefacts: Vec<Artifact> = Vec::new();
 
     let syncmap = out.join("syncmap.csv");
@@ -434,6 +455,13 @@ pub fn export_report(
     export::write_report_json(&report_path, report, artefacts.clone())
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
     artefacts.push(artifact("report", &report_path));
+
+    // The artefacts are written, and the cancel flag is read once more: a
+    // cancel that arrived while the artefacts were being written still means
+    // the user asked for the export to stop.
+    if cancel.load(Ordering::Relaxed) {
+        return Err(JobFailure::Cancelled);
+    }
 
     let files = artefacts.iter().map(|a| absolute(&a.path)).collect();
 
@@ -494,5 +522,26 @@ fn panic_text(payload: &(dyn Any + Send)) -> String {
         text.clone()
     } else {
         "unknown cause".to_string()
+    }
+}
+
+/// The files an export would write for the given layout.
+///
+/// The names are worked out before anything is written, so that an export
+/// which would land on one of the recordings can be refused before the first
+/// file is touched.
+fn planned_outputs(out: &Path, report: &AlignmentReport, layout: Layout) -> Vec<PathBuf> {
+    match layout {
+        Layout::SourceAligned => report
+            .sources
+            .iter()
+            .map(|a| out.join(format!("{}_corrected.wav", stem(&a.source.file_name))))
+            .collect(),
+        Layout::ReferenceTimelinePerSource => report
+            .sources
+            .iter()
+            .map(|a| out.join(format!("{}_timeline.wav", stem(&a.source.file_name))))
+            .collect(),
+        Layout::ReferenceTimelineMerged => vec![out.join("timeline_merged.wav")],
     }
 }
