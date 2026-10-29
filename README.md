@@ -490,12 +490,18 @@ tools/make_fixtures.py      deterministic synthetic fixtures with exact ground t
 tools/verify_exports.py     an independent numpy/scipy verifier (not part of the app)
 tools/svg_to_png.py         rasterise the exported drift graph to PNG (Pillow only)
 cleanroom/                  the clean-room specification and provenance documents
+work/, out/, testdata/      scratch and generated output - never committed
 audio/                      source recordings — READ ONLY, never committed
 ```
 
 `AGENTS.md` is the working contract for the repository: the invariants, the clean-room
 boundary, and the list of mistakes that have already been made and must not be
 repeated.
+
+`PRE_RELEASE_REPORT.md` is the account of the release-preparation pass, and
+`CODEX_HANDOFF.md` is the state of the work for whoever picks it up next.
+`CHANGELOG.md` records what changed, `CONTRIBUTING.md` says what a change has to
+satisfy, and `SECURITY.md` says how to report a problem privately.
 
 ---
 
