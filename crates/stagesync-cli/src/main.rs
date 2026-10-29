@@ -51,6 +51,18 @@ enum Command {
         /// Skip the independent log-mel cross-check (faster, less evidence).
         #[arg(long)]
         no_log_mel: bool,
+        /// Skip the raw-waveform drift measurement.
+        ///
+        /// The waveform measurement is an independent second opinion on the drift,
+        /// taken at positions the fit did not use. Turning it off makes the drift rest
+        /// on the envelope measurement alone.
+        #[arg(long)]
+        no_waveform_drift: bool,
+        /// Correct the position but leave the rate alone.
+        ///
+        /// Nothing is resampled. The report still records what the drift evidence was.
+        #[arg(long)]
+        offset_only: bool,
         /// Manual anchor: source time in seconds.
         #[arg(long, value_name = "SEC", requires = "anchor_reference")]
         anchor_source: Option<f64>,
@@ -81,6 +93,12 @@ enum Command {
         /// Skip the independent log-mel cross-check.
         #[arg(long)]
         no_log_mel: bool,
+        /// Skip the raw-waveform drift measurement.
+        #[arg(long)]
+        no_waveform_drift: bool,
+        /// Correct the position but leave the rate alone.
+        #[arg(long)]
+        offset_only: bool,
         /// Skip the hold-out verification of the rendered audio.
         #[arg(long)]
         no_verify: bool,
@@ -111,6 +129,25 @@ enum Command {
         /// The file to inspect.
         #[arg(value_name = "FILE")]
         file: PathBuf,
+    },
+    /// Print the level profile of an audio file over a span.
+    ///
+    /// This is the tool for checking whether a reported gap is really a gap: it shows
+    /// the level of the recording itself, so a hole in the coverage can be confirmed
+    /// against the audio rather than taken on trust.
+    Level {
+        /// The file to inspect.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Start of the span, in seconds (default: the start of the file).
+        #[arg(long, value_name = "SEC")]
+        from: Option<f64>,
+        /// End of the span, in seconds (default: the end of the file).
+        #[arg(long, value_name = "SEC")]
+        to: Option<f64>,
+        /// Length of each block in the profile, in milliseconds.
+        #[arg(long, value_name = "MS", default_value_t = 250.0)]
+        block_ms: f64,
     },
 }
 
@@ -161,6 +198,8 @@ fn main() -> Result<()> {
             source,
             out,
             no_log_mel,
+            no_waveform_drift,
+            offset_only,
             anchor_source,
             anchor_reference,
         } => {
@@ -171,7 +210,14 @@ fn main() -> Result<()> {
                 }),
                 _ => None,
             };
-            let report = run_analysis(&reference, &source, no_log_mel, anchor)?;
+            let report = run_analysis(
+                &reference,
+                &source,
+                no_log_mel,
+                no_waveform_drift,
+                offset_only,
+                anchor,
+            )?;
             let artefacts = write_artefacts(&out, &report, &[], &[])?;
             println!("{}", summarise(&report));
             for a in &artefacts {
@@ -187,9 +233,18 @@ fn main() -> Result<()> {
             sample_rate,
             format,
             no_log_mel,
+            no_waveform_drift,
+            offset_only,
             no_verify,
         } => {
-            let mut report = run_analysis(&reference, &source, no_log_mel, None)?;
+            let mut report = run_analysis(
+                &reference,
+                &source,
+                no_log_mel,
+                no_waveform_drift,
+                offset_only,
+                None,
+            )?;
             let mut options = RenderOptions {
                 layout: layout.into(),
                 sample_rate,
@@ -208,8 +263,7 @@ fn main() -> Result<()> {
             match options.layout {
                 Layout::SourceAligned => {
                     for (index, alignment) in report.sources.iter().enumerate() {
-                        let Some(model) = alignment.calibrated_model.or(alignment.direct_model)
-                        else {
+                        let Some(model) = alignment.model() else {
                             eprintln!(
                                 "skipping {}: no reliable alignment was established",
                                 alignment.source.file_name
@@ -293,8 +347,7 @@ fn main() -> Result<()> {
                 }
                 Layout::ReferenceTimelinePerSource => {
                     for alignment in report.sources.iter() {
-                        let Some(model) = alignment.calibrated_model.or(alignment.direct_model)
-                        else {
+                        let Some(model) = alignment.model() else {
                             continue;
                         };
                         let path = out.join(format!(
@@ -324,11 +377,7 @@ fn main() -> Result<()> {
                     let sources: Vec<(PathBuf, stagesync_core::matching::LinearModel)> = report
                         .sources
                         .iter()
-                        .filter_map(|a| {
-                            a.calibrated_model
-                                .or(a.direct_model)
-                                .map(|m| (a.source.path.clone(), m))
-                        })
+                        .filter_map(|a| a.model().map(|m| (a.source.path.clone(), m)))
                         .collect();
                     if sources.is_empty() {
                         anyhow::bail!("no source could be aligned, so no timeline was rendered");
@@ -395,6 +444,15 @@ fn main() -> Result<()> {
                 result.raw_p50_ms, result.raw_p95_ms, result.raw_max_ms, result.raw_counted
             );
             println!("  pitch change     : {:+.4} cents", result.pitch_cents);
+            match (result.drift_error_ppm, result.drift_error_se_ppm) {
+                (Some(error), Some(error_se)) => println!(
+                    "  drift error      : {:+.3} ppm ± {:.3} ppm (from the slope of the hold-out residuals)",
+                    error, error_se
+                ),
+                _ => println!(
+                    "  drift error      : not established (too few mutually corroborated positions)"
+                ),
+            }
             println!(
                 "  envelope p50/p95/max: {:+.3} / {:+.3} / {:.3} ms ({} points, {} outliers discarded)",
                 result.envelope_p50_ms,
@@ -437,6 +495,115 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Command::Level {
+            file,
+            from,
+            to,
+            block_ms,
+        } => {
+            print_level_profile(&file, from, to, block_ms)?;
+            Ok(())
+        }
+    }
+}
+
+/// Print the level profile of a file over a span.
+///
+/// The blocks are printed with their level relative to the loudest block, so a hole
+/// in a recording is visible as a run of blocks that sit at the noise floor rather
+/// than at the programme level.
+fn print_level_profile(
+    file: &Path,
+    from: Option<f64>,
+    to: Option<f64>,
+    block_ms: f64,
+) -> Result<()> {
+    let block_ms = block_ms.max(1.0);
+    let mut decoder = AudioDecoder::open(file)?;
+    let meta = decoder.meta().clone();
+    let start = from.unwrap_or(0.0).max(0.0);
+    let end = to.unwrap_or(meta.duration_secs).min(meta.duration_secs);
+    anyhow::ensure!(
+        end > start,
+        "the requested span is empty: {start:.3} s to {end:.3} s"
+    );
+
+    let block_frames = ((meta.sample_rate as f64) * block_ms / 1000.0).round() as usize;
+    anyhow::ensure!(block_frames > 0, "the block length is too short to measure");
+
+    let mut levels: Vec<(f64, f64)> = Vec::new();
+    let mut position = 0.0f64;
+    let mut block: Vec<f32> = Vec::with_capacity(block_frames);
+    decoder.for_each_block(block_frames.max(1024), |decoded| {
+        for sample in decoded.mono() {
+            block.push(sample);
+            if block.len() >= block_frames {
+                let sum: f64 = block.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+                let rms = (sum / block.len() as f64).sqrt();
+                levels.push((position, rms));
+                position += block_ms / 1000.0;
+                block.clear();
+            }
+        }
+        Ok(())
+    })?;
+    if !block.is_empty() {
+        let sum: f64 = block.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+        let rms = (sum / block.len() as f64).sqrt();
+        levels.push((position, rms));
+    }
+
+    let peak = levels.iter().map(|(_, r)| *r).fold(0.0f64, f64::max);
+    let mean = if levels.is_empty() {
+        0.0
+    } else {
+        levels.iter().map(|(_, r)| *r).sum::<f64>() / levels.len() as f64
+    };
+    // A low percentile, not the tenth: music has no silence, so a low percentile lands
+    // on the recorder's own noise floor rather than on a quiet passage.
+    let mut sorted: Vec<f64> = levels.iter().map(|(_, r)| *r).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let floor = if sorted.is_empty() {
+        0.0
+    } else {
+        sorted[(sorted.len() as f64 * 0.02) as usize % sorted.len().max(1)]
+    };
+
+    println!(
+        "file    : {} ({:.3} s, {} Hz, {} ch)",
+        meta.file_name, meta.duration_secs, meta.sample_rate, meta.channels
+    );
+    println!("span    : {start:.3} s to {end:.3} s");
+    println!("block   : {block_ms:.0} ms, {} blocks", levels.len());
+    println!(
+        "level   : peak {:.1} dBFS, mean {:.1} dBFS, noise floor (2nd percentile) {:.1} dBFS",
+        to_db(peak),
+        to_db(mean),
+        to_db(floor)
+    );
+    println!("profile :");
+    for (time, rms) in &levels {
+        if *time < start || *time > end {
+            continue;
+        }
+        let db = to_db(*rms);
+        let width = ((db + 60.0).max(0.0) / 60.0 * 60.0).round() as usize;
+        println!(
+            "  {:>10.3} s  {:>7.1} dBFS  |{:<60}|",
+            time,
+            db,
+            "#".repeat(width)
+        );
+    }
+    Ok(())
+}
+
+/// A level in decibels relative to full scale.
+fn to_db(amplitude: f64) -> f64 {
+    if amplitude <= 0.0 {
+        -120.0
+    } else {
+        20.0 * amplitude.log10()
     }
 }
 
@@ -445,10 +612,14 @@ fn run_analysis(
     reference: &Path,
     sources: &[PathBuf],
     no_log_mel: bool,
+    no_waveform_drift: bool,
+    offset_only: bool,
     anchor: Option<ManualAnchor>,
 ) -> Result<AlignmentReport> {
     let mut config = AnalysisConfig {
         compute_log_mel: !no_log_mel,
+        measure_waveform_drift: !no_waveform_drift,
+        force_offset_only: offset_only,
         manual_anchor: anchor,
         ..AnalysisConfig::default()
     };
@@ -544,7 +715,7 @@ fn summarise(report: &AlignmentReport) -> String {
         report.reference.channels
     ));
     for source in &report.sources {
-        let model = source.calibrated_model.or(source.direct_model);
+        let model = source.model();
         match model {
             Some(m) => text.push_str(&format!(
                 "{}: offset {:+.3} s, drift {:+.3} ppm, {:.1}% covered, {} points ({} skipped), {} warnings\n",
@@ -579,6 +750,9 @@ fn summarise(report: &AlignmentReport) -> String {
             source.fine_skip_reasons.no_region,
             source.fine_skip_reasons.no_peak
         ));
+        if let Some(assessment) = &source.drift {
+            text.push_str(&drift_verdict(assessment));
+        }
         if let Some(lock) = &source.coarse {
             for c in lock.candidates.iter().take(5) {
                 text.push_str(&format!(
@@ -607,6 +781,56 @@ fn summarise(report: &AlignmentReport) -> String {
         "timeline: {:.2} s total, {:.2} s with no recorder coverage\n",
         report.timeline_duration, uncovered
     ));
+    text
+}
+
+/// Describe the drift verdict in plain language.
+///
+/// The verdict is the part of the report that says whether the drift was *measured* or
+/// only guessed, so it is spelled out rather than reduced to a number.
+fn drift_verdict(assessment: &stagesync_core::matching::DriftAssessment) -> String {
+    use stagesync_core::matching::{DriftMethod, DriftStatus};
+
+    let mut text = String::new();
+    match assessment.status {
+        DriftStatus::OffsetOnly => {
+            text.push_str(
+                "    drift: NOT established — only the offset was corrected (no rate change)\n",
+            );
+        }
+        DriftStatus::Established => {
+            text.push_str(&format!(
+                "    drift: established by the {} method, {:+.3} ppm ± {:.3} ppm, \
+                 applied over {} measurement(s)\n",
+                assessment.method.label(),
+                assessment.drift_ppm,
+                assessment.slope_se_ppm,
+                assessment.points_used
+            ));
+        }
+    }
+
+    for (label, figures) in [
+        ("envelope", assessment.envelope.as_ref()),
+        ("waveform", assessment.waveform.as_ref()),
+    ] {
+        let Some(f) = figures else { continue };
+        let correlation = match f.mean_correlation {
+            Some(c) => format!(", mean waveform correlation {c:.2}"),
+            None => String::new(),
+        };
+        text.push_str(&format!(
+            "      {label} estimate: {:+.3} ppm ± {:.3} ppm, residual {:.2} ms, {} measurement(s){correlation}\n",
+            f.drift_ppm, f.slope_se_ppm, f.residual_rms_ms, f.points_used
+        ));
+    }
+
+    if assessment.method == DriftMethod::OffsetOnly {
+        text.push_str("      the drift evidence was not precise enough to apply a rate change\n");
+    }
+    for note in &assessment.notes {
+        text.push_str(&format!("      note: {note}\n"));
+    }
     text
 }
 
