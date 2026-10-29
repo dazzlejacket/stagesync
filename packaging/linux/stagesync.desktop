@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=StageSync
+Comment=Drift-aware multi-recorder audio synchronisation
+Exec=stagesync-desktop
+Icon=stagesync
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupWMClass=stagesync-desktop

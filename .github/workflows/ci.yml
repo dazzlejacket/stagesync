@@ -1,0 +1,141 @@
+# Continuous integration for StageSync.
+#
+# Every job runs on a *native* runner for the platform it builds. There is no
+# cross-compilation anywhere in this repository, so a green macOS job is a
+# statement about macOS and a green Linux job is a statement about Linux - and
+# a failure on one platform says nothing about the others.
+#
+# The four gates are the four the project contract requires (see AGENTS.md,
+# "Build, test and lint"):
+#
+#   cargo fmt --all -- --check               formatting
+#   cargo clippy --workspace --all-targets   lints; warnings are errors
+#   cargo test --workspace                    the test suite
+#   cargo build --release --workspace         the release binaries
+#
+# `fail-fast: false` keeps a Linux-only failure from hiding the state of the
+# macOS and Windows jobs. It does not make any step optional.
+#
+# Runner label note: `macos-13` is the Intel (x86_64) macOS runner. GitHub
+# retires runner images from time to time; if `macos-13` disappears from the
+# runner list, replace it with the current Intel label (`macos-15-intel`).
+# Nothing else in the job changes.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            desktop_bin: stagesync-desktop
+            cli_bin: stagesync
+            artifact: stagesync-linux-x86_64
+          - name: macos-arm64
+            os: macos-latest
+            desktop_bin: stagesync-desktop
+            cli_bin: stagesync
+            artifact: stagesync-macos-arm64
+          - name: macos-x86_64
+            os: macos-13
+            desktop_bin: stagesync-desktop
+            cli_bin: stagesync
+            artifact: stagesync-macos-x86_64
+          - name: windows-x86_64
+            os: windows-latest
+            desktop_bin: stagesync-desktop.exe
+            cli_bin: stagesync.exe
+            artifact: stagesync-windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          # eframe 0.37 (winit + wgpu) links against the system GL, X11, XCB,
+          # XKB and Wayland client libraries, so their development headers have
+          # to be present before `cargo build` runs. The rest of the workspace
+          # has no system dependencies at all: symphonia decodes in pure Rust.
+          #
+          # This is the well-known set for eframe/winit on Ubuntu 22.04 and
+          # later. It cannot be verified from a Windows development machine -
+          # it is exercised for the first time when this workflow runs.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-randr0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache the cargo registry and the git checkouts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-home-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-home-${{ runner.os }}-${{ matrix.name }}-
+
+      - name: Cache the build directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: target-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            target-${{ runner.os }}-${{ matrix.name }}-
+
+      - name: Check the formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run the test suite
+        run: cargo test --workspace
+
+      - name: Build the release binaries
+        run: cargo build --release --workspace
+
+      - name: Upload the release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/release/${{ matrix.desktop_bin }}
+            target/release/${{ matrix.cli_bin }}
+          if-no-files-found: error

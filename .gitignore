@@ -26,6 +26,7 @@ audio/
 /work/
 /artifacts/
 /testdata/
+/dist/
 *.corrected.wav
 syncmap.csv
 segments.csv

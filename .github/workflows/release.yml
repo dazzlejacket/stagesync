@@ -1,0 +1,305 @@
+# Release packaging for StageSync.
+#
+# Triggered by pushing a `v*` tag, or manually through `workflow_dispatch`.
+# Every artefact is built on a *native* runner for its platform - there is no
+# cross-compilation - so the artefact really is the binary for that platform.
+#
+# The artefacts are:
+#
+#   Windows   a portable ZIP and an NSIS installer (.exe)
+#   macOS     a .app bundle in a .tar.gz, and a .dmg
+#   Linux     an AppImage, a .deb and a tarball of the AppDir
+#
+# The macOS artefacts are **unsigned and not notarised**: they are produced
+# from an unsigned build and are not signed with a Developer ID certificate,
+# so macOS Gatekeeper will quarantine them on first launch. The release notes
+# say so explicitly rather than leaving the user to discover it.
+#
+# Nothing in this workflow is allowed to fail quietly: no `continue-on-error`,
+# no `|| true` around a packaging step. If a tool is missing, the packaging
+# script says so in its own output and the missing artefact shows up as a
+# missing file in the release.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'The git ref to build (a tag such as v0.1.0, or a branch)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-windows:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref || github.ref }}
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the cargo registry and the git checkouts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-home-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-home-${{ runner.os }}-
+
+      - name: Cache the build directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            target-${{ runner.os }}-
+
+      - name: Install NSIS
+        run: choco install nsis --no-progress --yes
+
+      - name: Verify that makensis is on PATH
+        shell: pwsh
+        run: |
+          $makensis = Get-Command makensis -ErrorAction SilentlyContinue
+          if (-not $makensis) {
+            $candidate = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+            if (Test-Path $candidate) { $makensis = $candidate }
+          }
+          if (-not $makensis) {
+            throw 'makensis was not found after NSIS was installed.'
+          }
+          & $makensis /VERSION
+
+      - name: Build the portable ZIP and the installer
+        shell: pwsh
+        run: |
+          ./packaging/windows/build.ps1 -Profile release -OutputDir dist/windows
+
+      - name: Upload the Windows artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stagesync-windows-x86_64
+          path: dist/windows
+          if-no-files-found: error
+
+  build-macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+            artifact: stagesync-macos-arm64
+          - os: macos-13
+            arch: x64
+            artifact: stagesync-macos-x86_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref || github.ref }}
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the cargo registry and the git checkouts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-home-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-home-${{ runner.os }}-${{ matrix.arch }}-
+
+      - name: Cache the build directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: target-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            target-${{ runner.os }}-${{ matrix.arch }}-
+
+      - name: Build the application bundle and the disk image
+        run: bash packaging/macos/build.sh
+
+      - name: Upload the macOS artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/macos
+          if-no-files-found: error
+
+  build-linux:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref || github.ref }}
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the cargo registry and the git checkouts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-home-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-home-${{ runner.os }}-
+
+      - name: Cache the build directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            target-${{ runner.os }}-
+
+      - name: Install the Linux build dependencies
+        run: |
+          # The eframe/winit development headers, plus the two tools the Linux
+          # packaging step needs: `mksquashfs` (called by appimagetool) and
+          # `desktop-file-validate` (called by appimagetool as well).
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-randr0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libssl-dev \
+            pkg-config \
+            squashfs-tools \
+            desktop-file-utils \
+            file
+
+      - name: Install appimagetool
+        run: |
+          # appimagetool is distributed as an AppImage, and the GitHub runner has
+          # no FUSE, so the AppImage cannot be mounted. It is extracted instead
+          # and its own AppRun is put on PATH under the name `appimagetool`.
+          set -euo pipefail
+          mkdir -p "$HOME/appimagetool" "$HOME/.local/bin"
+          cd "$HOME/appimagetool"
+          curl -fsSL -o appimagetool.AppImage \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool.AppImage
+          ./appimagetool.AppImage --appimage-extract
+          printf '#!/bin/sh\nexec "%s/squashfs-root/AppRun" "$@"\n' "$HOME/appimagetool" \
+            > "$HOME/.local/bin/appimagetool"
+          chmod +x "$HOME/.local/bin/appimagetool"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build the AppImage, the deb and the AppDir tarball
+        run: bash packaging/linux/build.sh
+
+      - name: Upload the Linux artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stagesync-linux-x86_64
+          path: dist/linux
+          if-no-files-found: error
+
+  publish:
+    name: Attach the artefacts to the release
+    needs:
+      - build-windows
+      - build-macos
+      - build-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download every artefact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List the downloaded artefacts
+        run: |
+          ls -l artifacts
+          test -n "$(ls -A artifacts)" || { echo 'no artefacts were downloaded' >&2; exit 1; }
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || inputs.ref || github.ref_name }}
+          name: StageSync ${{ github.event_name == 'push' && github.ref_name || inputs.ref || github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+            artifacts/*.AppImage
+            artifacts/*.deb
+            artifacts/*.exe
+            artifacts/*.dmg
+          body: |
+            StageSync ${{ github.event_name == 'push' && github.ref_name || inputs.ref || github.ref_name }}
+
+            Drift-aware multi-recorder audio synchronisation: StageSync aligns
+            several recordings of the same concert or play against one
+            reference recording, measures the clock drift of each recorder, and
+            renders drift-corrected audio.
+
+            ### Artefacts
+
+            | Platform | File |
+            | --- | --- |
+            | Windows x64 | `stagesync-<version>-windows-x64-setup.exe` (installer) |
+            | Windows x64 | `stagesync-<version>-windows-x64-portable.zip` |
+            | macOS arm64 | `stagesync-<version>-macos-arm64.app.tar.gz`, `stagesync-<version>-macos-arm64.dmg` |
+            | macOS x64 | `stagesync-<version>-macos-x86_64.app.tar.gz`, `stagesync-<version>-macos-x86_64.dmg` |
+            | Linux x86_64 | `stagesync-<version>-linux-x86_64.AppImage`, `stagesync-<version>-linux-x86_64.deb`, `stagesync-<version>-linux-x86_64.tar.gz` |
+
+            ### The macOS builds are unsigned and not notarised
+
+            The macOS artefacts are built from an unsigned binary. They are
+            **not** signed with a Developer ID certificate and they are **not**
+            notarised, so macOS Gatekeeper will refuse to open them on first
+            launch until the user allows the application explicitly
+            (Finder: right-click, *Open*; or
+            `xattr -dr com.apple.quarantine /Applications/StageSync.app`).
+            This is stated here rather than discovered at first launch.
+
+            ### The Windows build needs the Microsoft Visual C++ runtime
+
+            The Windows binary is built with the MSVC toolchain and links the
+            C runtime dynamically, so the machine needs the
+            *Microsoft Visual C++ Redistributable* installed. The installer
+            does not bundle it; the README inside the portable ZIP explains how
+            to get it.
