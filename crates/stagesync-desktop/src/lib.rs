@@ -8,5 +8,7 @@
 pub mod app;
 pub mod chart;
 pub mod jobs;
+pub mod platform;
+pub mod settings;
 pub mod state;
 pub mod timeline;

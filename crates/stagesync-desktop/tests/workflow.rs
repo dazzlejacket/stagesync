@@ -87,6 +87,10 @@ fn analyse_pair(reference: &Path, source: &Path) -> AlignmentReport {
 ///
 /// The report is edited through its serialised form so that the test does not depend
 /// on the exact set of fields the core's data model carries.
+///
+/// The drift verdict has the final say on the model that is applied, so the model is
+/// put there as well: a verdict that still carried the old model would be applied
+/// instead of the one the test asks for.
 fn with_model(report: &AlignmentReport, model: LinearModel) -> AlignmentReport {
     let mut value = serde_json::to_value(report).expect("the report serialises");
     {
@@ -98,6 +102,18 @@ fn with_model(report: &AlignmentReport, model: LinearModel) -> AlignmentReport {
         for source in sources {
             source["calibrated_model"] = serialised.clone();
             source["direct_model"] = serialised.clone();
+            if let Some(drift) = source
+                .get_mut("drift")
+                .and_then(|drift| drift.as_object_mut())
+            {
+                drift.insert("model".to_string(), serialised.clone());
+                drift.insert(
+                    "drift_ppm".to_string(),
+                    serde_json::json!(model.drift_ppm()),
+                );
+                drift.insert("status".to_string(), serde_json::json!("established"));
+                drift.insert("method".to_string(), serde_json::json!("envelope"));
+            }
         }
     }
     serde_json::from_value(value).expect("the report deserialises")

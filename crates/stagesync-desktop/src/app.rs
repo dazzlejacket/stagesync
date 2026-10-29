@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32};
 use stagesync_core::audio::SourceMeta;
+use stagesync_core::matching::drift::DriftAssessment;
 use stagesync_core::matching::{AlignmentReport, SourceAlignment};
 use stagesync_core::pipeline::{AnalysisConfig, ManualAnchor};
 use stagesync_core::render::Layout;
@@ -14,9 +15,11 @@ use stagesync_core::verify::{residual_stats, HoldoutResult};
 
 use crate::chart;
 use crate::jobs::{self, ExportOutcome, JobEvent};
+use crate::platform;
+use crate::settings::{self, AppSettings};
 use crate::state::{
-    format_duration, format_label, is_wav, layout_label, metrics_for, AnchorFields, ExportSettings,
-    FileEntry, TaskProgress,
+    drift_verdict, expand_dropped_paths, format_duration, format_label, is_wav, layout_label,
+    metrics_for, AnchorFields, ExportSettings, FileEntry, TaskProgress,
 };
 use crate::timeline;
 
@@ -60,6 +63,8 @@ struct SourceFacts {
     point_count: usize,
     warnings: Vec<String>,
     holdout: Option<HoldoutResult>,
+    /// The verdict on the drift, when the analysis reached one.
+    drift: Option<DriftAssessment>,
 }
 
 /// The StageSync application.
@@ -79,6 +84,16 @@ pub struct StageSyncApp {
     settings: ExportSettings,
     /// Whether the independent log-mel cross-check is run during the analysis.
     use_spectral_check: bool,
+    /// Whether the drift is measured on the raw waveform as well.
+    measure_waveform_drift: bool,
+    /// Whether the correction is offset-only, whatever the evidence says.
+    force_offset_only: bool,
+    /// The width of the window, as it is now.
+    window_width: f32,
+    /// The height of the window, as it is now.
+    window_height: f32,
+    /// Whether the settings have already been written for this close.
+    closing_saved: bool,
     zoom: f64,
     tx: Sender<JobEvent>,
     rx: Receiver<JobEvent>,
@@ -87,7 +102,8 @@ pub struct StageSyncApp {
 impl Default for StageSyncApp {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self {
+        let stored = AppSettings::load();
+        let mut app = Self {
             reference: None,
             targets: Vec::new(),
             selection: None,
@@ -107,10 +123,17 @@ impl Default for StageSyncApp {
                 format: stagesync_core::audio::WavFormat::Float32,
             },
             use_spectral_check: true,
+            measure_waveform_drift: true,
+            force_offset_only: false,
+            window_width: stored.window_width,
+            window_height: stored.window_height,
+            closing_saved: false,
             zoom: 4.0,
             tx,
             rx,
-        }
+        };
+        app.apply_settings(&stored);
+        app
     }
 }
 
@@ -118,6 +141,89 @@ impl StageSyncApp {
     /// A new, empty application.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Take the stored settings into the window.
+    ///
+    /// The files of the last session are put back on the list when they are still
+    /// there: a file that has since been moved or deleted is skipped, and the message
+    /// panel says so.
+    fn apply_settings(&mut self, stored: &AppSettings) {
+        if !stored.export_dir.trim().is_empty() {
+            self.settings.dir = stored.export_dir.clone();
+        }
+        self.settings.layout = settings::layout_from_name(&stored.layout);
+        self.settings.sample_rate = stored.sample_rate;
+        self.settings.format = settings::format_from_name(&stored.format);
+        self.use_spectral_check = stored.use_spectral_check;
+        self.measure_waveform_drift = stored.measure_waveform_drift;
+        self.force_offset_only = stored.force_offset_only;
+        self.window_width = stored.window_width;
+        self.window_height = stored.window_height;
+        self.restore_files(stored);
+    }
+
+    /// Put the files of the last session back on the list.
+    fn restore_files(&mut self, stored: &AppSettings) {
+        let mut wanted: Vec<PathBuf> = Vec::new();
+        if !stored.last_reference.trim().is_empty() {
+            wanted.push(PathBuf::from(stored.last_reference.trim()));
+        }
+        for source in &stored.last_sources {
+            if !source.trim().is_empty() {
+                wanted.push(PathBuf::from(source.trim()));
+            }
+        }
+        let present: Vec<PathBuf> = wanted
+            .iter()
+            .filter(|path| path.is_file())
+            .cloned()
+            .collect();
+        let missing = wanted.len() - present.len();
+        if present.is_empty() {
+            return;
+        }
+        self.add_paths(present, false);
+        self.push_log(format!(
+            "restored {} file(s) from the last session",
+            self.reference.is_some() as usize + self.targets.len()
+        ));
+        if missing > 0 {
+            self.push_log(format!(
+                "{missing} file(s) of the last session are no longer there"
+            ));
+        }
+    }
+
+    /// Write the current choices to the settings file.
+    ///
+    /// The settings are written when something changes and when a job finishes, not
+    /// on every frame: the file is read back at the start of the next run.
+    fn persist_settings(&mut self) {
+        let stored = AppSettings {
+            export_dir: self.settings.dir.clone(),
+            layout: settings::layout_name(self.settings.layout).to_string(),
+            sample_rate: self.settings.sample_rate,
+            format: settings::format_name(self.settings.format).to_string(),
+            use_spectral_check: self.use_spectral_check,
+            measure_waveform_drift: self.measure_waveform_drift,
+            force_offset_only: self.force_offset_only,
+            last_reference: self
+                .reference
+                .as_ref()
+                .map(|entry| entry.path.display().to_string())
+                .unwrap_or_default(),
+            last_sources: self
+                .targets
+                .iter()
+                .map(|entry| entry.path.display().to_string())
+                .collect(),
+            window_width: self.window_width,
+            window_height: self.window_height,
+        };
+        if let Err(error) = stored.save() {
+            log::warn!("could not write the settings: {error}");
+        }
     }
 
     /// Apply everything the background workers have reported since the last frame.
@@ -133,6 +239,7 @@ impl StageSyncApp {
                     self.last_error = None;
                     self.notice = Some("Analysis finished.".to_string());
                     self.push_log("analysis finished".to_string());
+                    self.persist_settings();
                 }
                 JobEvent::AnalysisFailed(message) => {
                     self.running = None;
@@ -156,6 +263,7 @@ impl StageSyncApp {
                     self.last_error = None;
                     self.notice = Some("Export finished.".to_string());
                     self.push_log("export finished".to_string());
+                    self.persist_settings();
                 }
                 JobEvent::ExportFailed(message) => {
                     self.running = None;
@@ -249,6 +357,14 @@ impl StageSyncApp {
     /// becomes a target. Changing the list invalidates the analysis, so the old report
     /// is dropped rather than left to describe files that are no longer there.
     fn import_paths(&mut self, paths: Vec<PathBuf>) {
+        self.add_paths(paths, true);
+    }
+
+    /// Add files to the list, and say so when the list changed.
+    ///
+    /// `announce` is false while the files of the last session are put back, because
+    /// the user did not do anything then.
+    fn add_paths(&mut self, paths: Vec<PathBuf>, announce: bool) {
         let mut changed = false;
         for path in paths {
             if self
@@ -270,7 +386,7 @@ impl StageSyncApp {
             }
             jobs::spawn_probe(self.tx.clone(), path);
         }
-        if changed {
+        if changed && announce {
             self.report = None;
             self.export_outcome = None;
             self.last_error = None;
@@ -356,6 +472,8 @@ impl StageSyncApp {
 
         let mut config = AnalysisConfig {
             compute_log_mel: self.use_spectral_check,
+            measure_waveform_drift: self.measure_waveform_drift,
+            force_offset_only: self.force_offset_only,
             manual_anchor: self.anchor_value(),
             ..AnalysisConfig::default()
         };
@@ -402,7 +520,7 @@ impl StageSyncApp {
     fn start_verification(&mut self, index: usize) {
         let model_and_duration = self.report.as_ref().and_then(|report| {
             let alignment = report.sources.get(index)?;
-            let model = alignment.calibrated_model.or(alignment.direct_model)?;
+            let model = alignment.model()?;
             Some((model, alignment.source.duration_secs))
         });
         let Some((model, duration)) = model_and_duration else {
@@ -456,6 +574,7 @@ impl StageSyncApp {
         let can_analyze = self.reference.is_some() && !self.targets.is_empty() && !busy;
         let mut start = false;
         let mut cancel = false;
+        let mut changed = false;
 
         ui.horizontal(|ui| {
             start = ui
@@ -469,11 +588,28 @@ impl StageSyncApp {
                 cancel = ui.button(label).clicked();
             }
             ui.separator();
-            ui.checkbox(&mut self.use_spectral_check, "Spectral cross-check")
+            changed |= ui
+                .checkbox(&mut self.use_spectral_check, "Spectral cross-check")
                 .on_hover_text(
                     "Run the independent log-mel cross-check while analysing. It is slower and \
                      gives a second opinion on every match; turn it off if it is not usable.",
-                );
+                )
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.measure_waveform_drift, "Waveform drift check")
+                .on_hover_text(
+                    "Measure the drift on the raw waveform as an independent second opinion, at \
+                     positions the fit did not use. It costs an extra pass over the audio and it \
+                     is the only way to tell a measured drift from a guessed one.",
+                )
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.force_offset_only, "Offset only")
+                .on_hover_text(
+                    "Correct the position but leave the rate alone. Use this when the recordings \
+                     must not be resampled.",
+                )
+                .changed();
             ui.separator();
             match &self.progress {
                 Some(progress) => {
@@ -491,6 +627,10 @@ impl StageSyncApp {
             }
         });
 
+        if changed {
+            self.persist_settings();
+        }
+
         if start {
             self.start_analysis();
         }
@@ -505,7 +645,7 @@ impl StageSyncApp {
     /// The file list.
     fn file_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Files");
-        ui.label("Drop audio files onto the window, or use Add files…");
+        ui.label("Drop audio files or a folder onto the window, or use Add files…");
         ui.horizontal(|ui| {
             if ui.button("Add files…").clicked() {
                 self.browse_for_files();
@@ -528,7 +668,7 @@ impl StageSyncApp {
             if ui.selectable_label(selected, entry.name()).clicked() {
                 self.selection = Some(Selection::Reference);
             }
-            ui.monospace(entry.path.display().to_string());
+            ui.monospace(platform::display_path(&entry.path));
             match &entry.meta {
                 Some(meta) => {
                     ui.label(format!(
@@ -578,7 +718,7 @@ impl StageSyncApp {
                     remove = Some(index);
                 }
             });
-            ui.monospace(entry.path.display().to_string());
+            ui.monospace(platform::display_path(&entry.path));
             match &entry.meta {
                 Some(meta) => {
                     ui.label(format!(
@@ -618,19 +758,23 @@ impl StageSyncApp {
     fn export_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Export");
         let mut browse = false;
+        let mut changed = false;
         ui.horizontal(|ui| {
             ui.label("Folder");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.settings.dir)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("choose a folder"),
-            );
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.settings.dir)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("choose a folder"),
+                )
+                .changed();
             if ui.button("Browse…").clicked() {
                 browse = true;
             }
         });
         if browse {
             self.browse_for_folder();
+            changed = true;
         }
 
         egui::ComboBox::from_label("Layout")
@@ -647,7 +791,9 @@ impl StageSyncApp {
                         Layout::ReferenceTimelineMerged,
                     ),
                 ] {
-                    ui.selectable_value(&mut self.settings.layout, layout, label);
+                    changed |= ui
+                        .selectable_value(&mut self.settings.layout, layout, label)
+                        .changed();
                 }
             });
         ui.label(match self.settings.layout {
@@ -669,13 +815,16 @@ impl StageSyncApp {
                 .changed()
             {
                 self.settings.sample_rate = if override_rate { Some(48_000) } else { None };
+                changed = true;
             }
             if let Some(rate) = self.settings.sample_rate.as_mut() {
-                ui.add(
-                    egui::DragValue::new(rate)
-                        .speed(100.0)
-                        .range(8_000..=192_000),
-                );
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(rate)
+                            .speed(100.0)
+                            .range(8_000..=192_000),
+                    )
+                    .changed();
                 ui.label("Hz");
             }
         });
@@ -687,7 +836,9 @@ impl StageSyncApp {
                     stagesync_core::audio::WavFormat::Float32,
                     stagesync_core::audio::WavFormat::Int16,
                 ] {
-                    ui.selectable_value(&mut self.settings.format, format, format_label(format));
+                    changed |= ui
+                        .selectable_value(&mut self.settings.format, format, format_label(format))
+                        .changed();
                 }
             });
 
@@ -708,15 +859,23 @@ impl StageSyncApp {
                 .id_salt("written_files")
                 .show(ui, |ui| {
                     for path in &outcome.files {
-                        ui.monospace(path.display().to_string());
+                        ui.monospace(platform::display_path(path));
                     }
                 });
+        }
+
+        if changed {
+            self.persist_settings();
         }
     }
 
     /// The message log.
     fn log_panel(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Messages");
+        ui.horizontal(|ui| {
+            ui.strong("Messages");
+            ui.separator();
+            ui.colored_label(Color32::from_gray(140), platform::describe_platform());
+        });
         egui::ScrollArea::vertical()
             .id_salt("log")
             .stick_to_bottom(true)
@@ -876,7 +1035,7 @@ impl StageSyncApp {
             (
                 facts_for(alignment),
                 alignment.points.clone(),
-                alignment.calibrated_model.or(alignment.direct_model),
+                alignment.model(),
             )
         };
 
@@ -923,6 +1082,71 @@ impl StageSyncApp {
                 ));
                 ui.end_row();
             });
+
+        ui.add_space(4.0);
+        ui.strong("Drift verdict");
+        match drift_verdict(facts.drift.as_ref()) {
+            Some(verdict) => {
+                egui::Grid::new("drift_verdict")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Status");
+                        ui.label(verdict.status.clone());
+                        ui.end_row();
+
+                        ui.label("Measured by");
+                        ui.label(verdict.method.clone());
+                        ui.end_row();
+
+                        ui.label("Applied drift");
+                        ui.label(verdict.applied.clone());
+                        ui.end_row();
+                    });
+
+                if verdict.envelope.is_some() || verdict.waveform.is_some() {
+                    egui::Grid::new("drift_methods")
+                        .num_columns(4)
+                        .show(ui, |ui| {
+                            ui.strong("Estimator");
+                            ui.strong("Drift");
+                            ui.strong("Residual RMS");
+                            ui.strong("Measurements");
+                            ui.end_row();
+                            if let Some(envelope) = &verdict.envelope {
+                                ui.label("envelope");
+                                ui.label(envelope.drift.clone());
+                                ui.label(format!("{:.2} ms", envelope.residual_rms_ms));
+                                ui.label(envelope.points_used.to_string());
+                                ui.end_row();
+                            }
+                            if let Some(waveform) = &verdict.waveform {
+                                ui.label("waveform (gcc_phat)");
+                                ui.label(waveform.drift.clone());
+                                ui.label(format!("{:.2} ms", waveform.residual_rms_ms));
+                                ui.label(waveform.points_used.to_string());
+                                ui.end_row();
+                            }
+                        });
+                    if let Some(correlation) = verdict
+                        .waveform
+                        .as_ref()
+                        .and_then(|waveform| waveform.mean_correlation)
+                    {
+                        ui.label(format!("mean raw-waveform correlation: {correlation:.3}"));
+                    }
+                }
+
+                for note in &verdict.notes {
+                    ui.colored_label(Color32::from_gray(150), note.as_str());
+                }
+            }
+            None => {
+                ui.label(
+                    "No drift verdict: the analysis found no correspondence between this \
+                     recording and the reference, so there is nothing to report.",
+                );
+            }
+        }
 
         if !facts.warnings.is_empty() {
             ui.label("Warnings");
@@ -986,12 +1210,13 @@ impl StageSyncApp {
         ui.add_space(6.0);
         chart::paint_lag_plot(ui, &points, model, facts.duration);
         chart::paint_residual_plot(ui, &points, facts.duration);
+        chart::paint_drift_plot(ui, &points, model, facts.duration);
     }
 }
 
 /// Read the figures of one source out of its alignment.
 fn facts_for(alignment: &SourceAlignment) -> SourceFacts {
-    let model = alignment.calibrated_model.or(alignment.direct_model);
+    let model = alignment.model();
     let residuals: Vec<f64> = alignment
         .points
         .iter()
@@ -1012,6 +1237,7 @@ fn facts_for(alignment: &SourceAlignment) -> SourceFacts {
         point_count: alignment.points.len(),
         warnings: alignment.warnings.clone(),
         holdout: alignment.holdout.clone(),
+        drift: alignment.drift.clone(),
     }
 }
 
@@ -1030,7 +1256,8 @@ impl eframe::App for StageSyncApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
 
-        // Files dropped onto the window are the primary way to add recordings.
+        // Files dropped onto the window are the primary way to add recordings. A
+        // dropped folder is opened and the recordings inside it are taken.
         let dropped: Vec<PathBuf> = ui.ctx().input(|input| {
             input
                 .raw
@@ -1040,7 +1267,29 @@ impl eframe::App for StageSyncApp {
                 .collect()
         });
         if !dropped.is_empty() {
-            self.import_paths(dropped);
+            let expanded = expand_dropped_paths(&dropped);
+            if expanded.is_empty() {
+                self.last_error = Some("There are no recordings in what was dropped.".to_string());
+            } else {
+                self.import_paths(expanded);
+            }
+        }
+
+        // The size of the window is remembered for the next run.
+        let size = ui
+            .ctx()
+            .input(|input| input.viewport().inner_rect.map(|rect| rect.size()));
+        if let Some(size) = size {
+            if size.x > 0.0 && size.y > 0.0 {
+                self.window_width = size.x;
+                self.window_height = size.y;
+            }
+        }
+        if ui.ctx().input(|input| input.viewport().close_requested()) && !self.closing_saved {
+            // The window is about to close: the settings are written once, so the
+            // file is not rewritten on every frame of the closing.
+            self.closing_saved = true;
+            self.persist_settings();
         }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));

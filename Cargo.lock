@@ -3507,6 +3507,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stagesync-core",
+ "tempfile",
 ]
 
 [[package]]

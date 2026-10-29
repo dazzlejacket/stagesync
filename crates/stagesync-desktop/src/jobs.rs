@@ -293,7 +293,7 @@ pub fn export_report(
                 if cancel.load(Ordering::Relaxed) {
                     return Err(JobFailure::Cancelled);
                 }
-                let Some(model) = alignment.calibrated_model.or(alignment.direct_model) else {
+                let Some(model) = alignment.model() else {
                     continue;
                 };
                 step += 1;
@@ -326,7 +326,7 @@ pub fn export_report(
                 if cancel.load(Ordering::Relaxed) {
                     return Err(JobFailure::Cancelled);
                 }
-                let Some(model) = alignment.calibrated_model.or(alignment.direct_model) else {
+                let Some(model) = alignment.model() else {
                     continue;
                 };
                 step += 1;
@@ -364,8 +364,7 @@ pub fn export_report(
                 .iter()
                 .filter_map(|alignment| {
                     alignment
-                        .calibrated_model
-                        .or(alignment.direct_model)
+                        .model()
                         .map(|model| (alignment.source.path.clone(), model))
                 })
                 .collect();
@@ -484,11 +483,7 @@ fn artifact(kind: &str, path: &Path) -> Artifact {
 fn absolute(path: &Path) -> PathBuf {
     let resolved = std::fs::canonicalize(path)
         .unwrap_or_else(|_| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
-    let text = resolved.to_string_lossy();
-    match text.strip_prefix("\\\\?\\") {
-        Some(stripped) => PathBuf::from(stripped),
-        None => resolved,
-    }
+    crate::platform::strip_verbatim_prefix(&resolved)
 }
 
 /// The message carried by a panic payload.

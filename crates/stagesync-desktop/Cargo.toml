@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Native Windows desktop application for StageSync."
+description = "Native desktop application for StageSync (Windows, macOS and Linux)."
 
 [[bin]]
 name = "stagesync-desktop"
@@ -21,3 +21,6 @@ serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
