@@ -9,7 +9,12 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+# The floor is set by the dependencies, not chosen: `eframe` and `egui` 0.37
+# declare `rust-version = 1.95`, `wgpu` 30 needs 1.87 and `symphonia` 0.6 and
+# `clap` 4.6 need 1.85. A lower number here would be a claim the build cannot
+# keep, and Cargo would refuse the build with a confusing message rather than
+# with the real reason.
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/stagesync/stagesync"
 authors = ["StageSync contributors"]

@@ -19,7 +19,9 @@ was not cloned. See [`PROVENANCE.md`](PROVENANCE.md) and
 > application, the exports and the test suite all work on **Windows, macOS and Linux**
 > from one Rust/egui codebase. Camera/video retiming and NLE multicam export are Phase 2
 > and are not implemented. See [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for the exact
-> state of every part, including which platforms have actually been built and tested.
+> state of every part, including which platforms have actually been built and tested,
+> and [`PRE_RELEASE_REPORT.md`](PRE_RELEASE_REPORT.md) for the state of the release
+> preparation.
 
 ---
 
@@ -42,8 +44,10 @@ audibility, but the number is reported rather than rounded away.
 
 ## Build
 
-Requires a stable Rust toolchain (the workspace declares `rust-version = 1.82`; it has
-been built and tested on 1.99.1).
+Requires a stable Rust toolchain (the workspace declares `rust-version = 1.95`; it has
+been built and tested on 1.99.1). The floor is set by the dependencies rather than chosen:
+`eframe` and `egui` 0.37 declare `rust-version = 1.95`, `wgpu` 30 needs 1.87, and
+`symphonia` 0.6 and `clap` 4.6 need 1.85.
 
 ```powershell
 cargo build --release
@@ -73,13 +77,16 @@ cargo build --release
 On Linux the desktop crate needs the usual X11/Wayland development packages; see
 [`BUILDING.md`](BUILDING.md) for the exact list and for the packaging steps.
 
-The test suite is **121 tests**, all passing: 13 core unit tests, 12 alignment
-scenarios, 6 drift-verdict scenarios, 18 DSP tests, 12 render tests, 10 robustness
-tests, and 50 desktop tests.
+The test suite is **129 tests**, all passing: 13 core unit tests, 12 alignment
+scenarios, 6 drift-verdict scenarios, 18 DSP tests, 17 render tests, 12 robustness
+tests, and 51 desktop tests. It is **hermetic**: it generates its own fixtures, uses a
+temporary directory, and depends on nothing outside the test - no Python, no network,
+no checked-in media.
 
 **What is verified, and what is not.** The Windows x64 build and the whole test suite
-were run on a Windows 11 x64 development machine. The macOS and Linux builds and the
-packaging steps are **configured but unverified** — this repository has no GitHub
+were run on a Windows 11 x64 development machine, and the desktop window was launched
+and inspected there. The macOS and Linux builds and the packaging steps are
+**configured but unverified** — this repository has no GitHub
 remote, so the CI workflows that would build them have never run. That is stated in
 [`BUILDING.md`](BUILDING.md) rather than glossed over.
 
@@ -224,9 +231,14 @@ so the rest of the application is written once.
 * Two toggles: **Waveform drift check** (on by default) turns the raw-waveform second
   opinion on and off; **Offset only** corrects the position and leaves the rate alone,
   so nothing is resampled.
-* **Manual anchor** sets a correspondence by hand when the automatic lock fails. It is
-  a hard constraint: the final model is forced through it.
-* **Export** writes the real files and tells you their real absolute paths.
+* **Manual anchor** sets a correspondence by hand when the automatic lock fails. It
+  belongs to the recording you have selected: the model of that recording is forced
+  through it, and the other recordings keep the alignment the automatic match found
+  for them. A single global anchor would drag every recording onto one correspondence,
+  which is the thing the anchor is meant to fix.
+* **Export** writes the real files and tells you their real absolute paths. An export
+  that would land on one of the recordings it read is refused, with a message that says
+  which file would have been overwritten.
 * Your settings are remembered between runs, in the platform's own configuration
   folder (`%APPDATA%\StageSync` on Windows, `~/Library/Application Support/StageSync`
   on macOS, `$XDG_CONFIG_HOME/StageSync` on Linux).

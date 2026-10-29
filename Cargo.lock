@@ -3492,7 +3492,6 @@ dependencies = [
  "sha2",
  "symphonia",
  "tempfile",
- "thiserror 2.0.21",
 ]
 
 [[package]]

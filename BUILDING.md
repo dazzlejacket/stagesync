@@ -18,8 +18,13 @@ Both binaries declare an explicit `[[bin]]` name and path, so
 
 ### The Rust toolchain
 
-The workspace asks for **Rust 1.82** (`rust-version` in the root
+The workspace asks for **Rust 1.95** (`rust-version` in the root
 `Cargo.toml`). Any newer stable toolchain works; `stable` is what CI uses.
+The floor is set by the dependencies rather than chosen: `eframe` and `egui`
+0.37 declare `rust-version = 1.95`, `wgpu` 30 needs 1.87, and `symphonia` 0.6
+and `clap` 4.6 need 1.85. A manifest that claimed a lower floor would produce a
+confusing refusal from Cargo rather than the real reason.
+
 The two components the gates need are `rustfmt` and `clippy`:
 
 ```bash

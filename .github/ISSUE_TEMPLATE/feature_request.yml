@@ -1,0 +1,43 @@
+name: Feature request
+description: Something StageSync should be able to do
+title: ""
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that StageSync cannot do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like to happen
+      description: What should the window or the command line do?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of StageSync
+      options:
+        - The command line
+        - The desktop window
+        - The alignment or the drift measurement
+        - The export
+        - The documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: |
+        StageSync is a clean-room implementation and it refuses to invent material that
+        was never recorded. If your request involves changing what StageSync reports, or
+        how it decides that a match is good enough, please say so here — those decisions
+        are deliberate and a change to them needs a reason, not just a want.

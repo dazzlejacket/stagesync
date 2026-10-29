@@ -92,10 +92,10 @@ try {
 
     Write-Host "==> building the stagesync-desktop binary (profile: $Profile)"
     if ($Profile -eq 'release') {
-        & cargo build --release --bin stagesync-desktop
+        & cargo build --release --locked --bin stagesync-desktop
     }
     else {
-        & cargo build --profile $Profile --bin stagesync-desktop
+        & cargo build --profile $Profile --locked --bin stagesync-desktop
     }
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build failed with exit code $LASTEXITCODE"

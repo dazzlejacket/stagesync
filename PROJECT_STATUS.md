@@ -368,10 +368,10 @@ construction. No Python, no network, no checked-in media.
 | `tests/alignment_tests.rs` | 12 | offsets (positive, negative, multi-hour), drift (+10, +35, −35, +1000 ppm), sample-rate mismatch, level difference, EQ + noise, repeated choruses, head/tail silence, the log-mel cross-check as an independent method. |
 | `tests/drift_tests.rs` | 6 | the drift verdict: the waveform estimator on a short recording, the waveform correcting an envelope estimate that looks precise but is not, offset-only on request, the hold-out probes being genuine hold-out positions, the applied model agreeing with the waveform measurements, and the hold-out drift-error measurement having **no systematic bias**. |
 | `tests/dsp_tests.rs` | 18 | the correlation, the peak finding, the model and the masking. |
-| `tests/render_tests.rs` | 12 | render determinism, no NaNs, no clipping, stereo channel relationship, int16 level, beyond-reference tails, input immutability, the merged timeline, the pitch shift, WAV round trip, timeline silence, the recorder gap. |
-| `tests/robustness_tests.rs` | 10 | non-audio / empty / missing file rejected, truncated WAV, too-short source, cancellation before and during analysis, a shared cancellation token, AAC/M4A via ffmpeg, and a **2-hour recording handled without loading it whole**. |
+| `tests/render_tests.rs` | 17 | render determinism, no NaNs, no clipping, stereo channel relationship, int16 level, beyond-reference tails, input immutability, the merged timeline, the pitch shift, WAV round trip, timeline silence, the recorder gap. |
+| `tests/robustness_tests.rs` | 12 | non-audio / empty / missing file rejected, truncated WAV, too-short source, cancellation before and during analysis, a shared cancellation token, AAC/M4A via ffmpeg, and a **2-hour recording handled without loading it whole**. |
 | core unit tests (in the library) | 13 | the DSP, the window extractor and the drift assessment. |
-| `crates/stagesync-desktop` unit tests | 28 | the desktop crate's painters and its state helpers. |
+| `crates/stagesync-desktop` unit tests | 29 | the desktop crate's painters and its state helpers, and the head-less layout test. |
 | `crates/stagesync-desktop/tests/platform_tests.rs` | 16 | the platform adapter and the persisted settings. |
 | `crates/stagesync-desktop/tests/workflow.rs` | 6 | the desktop workflow end to end, without a window. |
 | **Total** | **121** | all passing. |
@@ -425,6 +425,35 @@ These were real defects, found by running the thing rather than by reading it.
 | `render/mod.rs` | The merged render wrote a source's material for whole 100 ms blocks, so a source's tail was carried past the end of its covered range and the next source's first fraction was dropped. | The resampler's ringing bled into a span that nothing covered, and up to 100 ms of a higher-priority source could be lost at its start. The exact ranges are now honoured. |
 | `tests/render_tests.rs` | The merged-timeline hole test measured from the hole's exact first frame, so it measured the source's own boundary ringing. | The test's verdict depended on where a block boundary happened to fall: it passed before, and failed after a model changed. It now measures a margin inside the hole, which is what it was always trying to measure. |
 | `export/mod.rs` | `syncmap.csv` wrote the confidence reason as the point's status, ignoring the point's own note. | The reason a raw-waveform probe was rejected never reached the file. |
+
+---
+
+## 5a. The release-preparation pass
+
+A hardening pass over the whole repository was carried out before the first release.
+Three independent read-only audits were run in parallel — security and licensing,
+cross-platform release readiness, and the desktop interface — each required to cite
+`file:line` for every claim and to mark what it could not check as unverified. The
+desktop window was also launched and inspected, which had never been done before.
+
+The full account is in [`PRE_RELEASE_REPORT.md`](PRE_RELEASE_REPORT.md); the findings
+that changed the state of the project were:
+
+| What | Before | After |
+|---|---|---|
+| The audio module was tracked | **not tracked at all** — `.gitignore` had an unanchored `audio/` rule that matched `crates/stagesync-core/src/audio/`, so a fresh clone could not compile | tracked; a fresh clone builds |
+| An export over the reference | landed on the recording, silently | refused, naming the file |
+| A sample rate of 77 Hz or below | panicked the filterbank | refused with a message, or handled |
+| The centre of the desktop window | 124 px of 960 | a capped, checked share at every size |
+| The manual anchor | applied to every recording | belongs to the selected recording |
+| A drift without its uncertainty | shown, and shown as `+0.000 ppm` when it was not applied | shown with its uncertainty, or said not to be applied |
+| The declared minimum Rust version | 1.82, which the build cannot honour | 1.95, which it can |
+| The Intel macOS runner | `macos-13`, a retired label | `macos-15-intel` |
+| The release workflow | ran no tests | runs the suite before it builds |
+
+Two things were **not** fixed, and are the reason the release should not be tagged
+yet: an export that fails part-way through leaves a partial WAV behind, and the macOS
+and Linux builds have never run because the repository has no remote.
 
 ---
 

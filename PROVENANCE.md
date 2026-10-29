@@ -175,7 +175,6 @@ These are the dependencies declared in `Cargo.toml` and the three crate manifest
 | Crate | Version | Licence | Kind | What StageSync uses it for |
 |---|---|---|---|---|
 | `anyhow` | 1.0.104 | MIT OR Apache-2.0 | runtime | Error type for application-level failures (context chaining) in all three crates. |
-| `thiserror` | 2.0.21 | MIT OR Apache-2.0 | runtime | Derive-based error types for the library's own error enums. |
 | `serde` | 1.0.229 | MIT OR Apache-2.0 | runtime | Serialisation framework for the JSON report, the sync map and the CLI's parameter files. |
 | `serde_json` | 1.0.154 | MIT OR Apache-2.0 | runtime | JSON encoding and decoding for those artefacts. |
 | `rayon` | 1.12.0 | MIT OR Apache-2.0 | runtime | Data-parallel execution across CPU cores during analysis and rendering. |
@@ -603,7 +602,7 @@ compiled for a Windows x64 target.
 | `tempfile` | `3.27.0` | `MIT OR Apache-2.0` | test-only (direct) | A library for managing temporary files and directories. |
 | `termcolor` | `1.4.1` | `Unlicense OR MIT` | other platform | A simple cross platform library for writing colored text to a terminal. |
 | `thiserror` | `1.0.69` | `MIT OR Apache-2.0` | other platform | derive(Error) |
-| `thiserror` | `2.0.21` | `MIT OR Apache-2.0` | runtime (direct) | derive(Error) |
+| `thiserror` | `2.0.21` | `MIT OR Apache-2.0` | runtime (transitive) | derive(Error); reached through egui, not depended on directly |
 | `thiserror-impl` | `1.0.69` | `MIT OR Apache-2.0` | other platform | Implementation detail of the `thiserror` crate |
 | `thiserror-impl` | `2.0.21` | `MIT OR Apache-2.0` | proc-macro | Implementation detail of the `thiserror` crate |
 | `tiff` | `0.11.3` | `MIT` | other platform | TIFF decoding and encoding library in pure Rust |

@@ -114,7 +114,12 @@ test is genuinely wrong — and then say so explicitly.
 
 ## Coding conventions
 
-* Rust 2021 edition, `rust-version = 1.82` in the workspace manifest. Do not raise it.
+* Rust 2021 edition, `rust-version` in the workspace manifest. The floor is set by the
+  dependencies rather than chosen: `eframe` and `egui` 0.37 declare `rust-version = 1.95`,
+  `wgpu` 30 needs 1.87, and `symphonia` 0.6 and `clap` 4.6 need 1.85. Do not raise it above
+  what the dependencies need, and do not let the manifest claim a floor the build cannot
+  keep — a number that is too low produces a confusing refusal from Cargo rather than the
+  real reason.
 * `anyhow` at the edges, `thiserror` for typed errors in library internals.
 * Public items are documented with `///` comments that explain **why**, not what.
 * Prefer a clear, deterministic algorithm over a clever one. Every stage must be

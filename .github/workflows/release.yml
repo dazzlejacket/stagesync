@@ -30,8 +30,8 @@ on:
     inputs:
       ref:
         description: 'The git ref to build (a tag such as v0.1.0, or a branch)'
-        required: false
-        default: ''
+        required: true
+        default: 'master'
         type: string
 
 permissions:
@@ -42,10 +42,57 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref || github.ref }}
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the cargo registry and the git checkouts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-home-${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-home-${{ runner.os }}-release-
+
+      # A release must not be cut from a commit whose tests do not pass. The
+      # desktop application needs the same system libraries on Linux that the
+      # continuous integration job installs.
+      - name: Install the Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-randr0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Run the test suite
+        run: cargo test --workspace --locked
+
   build-windows:
     name: Windows x64
     runs-on: windows-latest
     timeout-minutes: 45
+    needs: test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,6 +152,7 @@ jobs:
     name: macOS ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -112,7 +160,7 @@ jobs:
           - os: macos-latest
             arch: arm64
             artifact: stagesync-macos-arm64
-          - os: macos-13
+          - os: macos-15-intel
             arch: x64
             artifact: stagesync-macos-x86_64
     steps:
@@ -143,6 +191,11 @@ jobs:
             target-${{ runner.os }}-${{ matrix.arch }}-
 
       - name: Build the application bundle and the disk image
+        env:
+          # The bundle says it runs on macOS 11 and later, so the binary has to
+          # be built for that floor as well. Without this the deployment
+          # target comes from the SDK, which is newer than the claim.
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
         run: bash packaging/macos/build.sh
 
       - name: Upload the macOS artefacts
@@ -156,6 +209,7 @@ jobs:
     name: Linux x86_64
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: test
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -1,0 +1,61 @@
+name: Bug report
+description: Something StageSync did not do, or did wrongly
+title: ""
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting this. A report that includes the `report.json` from the
+        run is worth a great deal more than one that does not — please replace the
+        absolute paths in it with the file names alone before attaching it.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did StageSync do, and what did you expect it to do?
+      placeholder: The export wrote silence over the second half of the file.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce it
+      description: The command, or the steps in the window.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: StageSync version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: report.json
+      description: The report written next to the export, if there was one. Please remove the absolute paths.
+      render: json
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: Warnings or notes in the output that you think are relevant.
