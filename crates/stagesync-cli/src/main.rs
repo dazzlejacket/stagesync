@@ -218,7 +218,17 @@ fn main() -> Result<()> {
                 offset_only,
                 anchor,
             )?;
-            let artefacts = write_artefacts(&out, &report, &[], &[])?;
+            // An analysis-only export writes no audio at all — but it does write
+            // the sidecars, and those are files too. A recording called
+            // `syncmap.csv` would be destroyed by the CSV sidecar, so the whole
+            // manifest is checked against the recordings before anything is
+            // written.
+            let inputs = input_paths(&report);
+            let planned = render::complete_outputs(&out, &[]);
+            render::ensure_outputs_avoid_inputs(&planned, &inputs)?;
+            let staged = export::StagedExport::begin(&out)?;
+            let artefacts = write_artefacts(&staged, &report, &[])?;
+            staged.commit()?;
             println!("{}", summarise(&report));
             for a in &artefacts {
                 println!("wrote {}", a.path.display());
@@ -263,19 +273,35 @@ fn main() -> Result<()> {
             // recording of that name would land on the recording itself. The
             // originals are read-only and the reference is never altered, so
             // this is refused before anything is written.
-            let inputs: Vec<PathBuf> = std::iter::once(reference.clone())
-                .chain(report.sources.iter().map(|a| a.source.path.clone()))
-                .collect();
-            let planned = render::planned_outputs(&out, &report, options.layout);
+            let inputs = input_paths(&report);
+            let planned = render::complete_outputs(
+                &out,
+                &render::planned_outputs(&out, &report, options.layout),
+            );
             // Two recordings that share a file name are given the same output
             // name, and the second write would silently replace the first.
             render::ensure_outputs_are_distinct(&planned)?;
-            for output in planned {
-                render::ensure_output_does_not_overwrite(&output, &inputs)?;
-            }
+            // Every file the export writes is checked against the recordings,
+            // the sidecars included: the export directory is often the
+            // directory the recordings are in.
+            render::ensure_outputs_avoid_inputs(&planned, &inputs)?;
 
             let mut results: Vec<RenderResult> = Vec::new();
             let mut holdouts: Vec<(usize, HoldoutResult)> = Vec::new();
+            // The export is written into a staging directory and moved into place in
+            // one step at the end. A failure therefore leaves the output directory
+            // exactly as it was, rather than half an export next to the recordings.
+            let staged = export::StagedExport::begin(&out)?;
+            // The files are written into the staging directory and moved into place
+            // at the end, so the paths that are reported are the final ones.
+            let final_path = |written: &Path| -> PathBuf {
+                out.join(
+                    written
+                        .file_name()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| written.to_path_buf()),
+                )
+            };
             match options.layout {
                 Layout::SourceAligned => {
                     for (index, alignment) in report.sources.iter().enumerate() {
@@ -286,7 +312,7 @@ fn main() -> Result<()> {
                             );
                             continue;
                         };
-                        let path = out.join(format!(
+                        let path = staged.path(&format!(
                             "{}_corrected.wav",
                             stem(&alignment.source.file_name)
                         ));
@@ -301,7 +327,7 @@ fn main() -> Result<()> {
                         println!(
                             "rendered {} -> {} ({:.2} s, drift {:+.3} ppm, pitch {:+.4} cents)",
                             alignment.source.file_name,
-                            path.display(),
+                            final_path(&path).display(),
                             result.frames as f64 / result.sample_rate as f64,
                             model.drift_ppm(),
                             result.pitch_shift_cents
@@ -366,7 +392,7 @@ fn main() -> Result<()> {
                         let Some(model) = alignment.model() else {
                             continue;
                         };
-                        let path = out.join(format!(
+                        let path = staged.path(&format!(
                             "{}_timeline.wav",
                             stem(&alignment.source.file_name)
                         ));
@@ -382,7 +408,7 @@ fn main() -> Result<()> {
                         println!(
                             "rendered timeline {} -> {} ({:.1} s of audio, {:.1} s of silence placeholder)",
                             alignment.source.file_name,
-                            path.display(),
+                            final_path(&path).display(),
                             result.source_frames as f64 / result.sample_rate as f64,
                             result.silence_frames as f64 / result.sample_rate as f64
                         );
@@ -390,25 +416,17 @@ fn main() -> Result<()> {
                     }
                 }
                 Layout::ReferenceTimelineMerged => {
-                    let sources: Vec<(PathBuf, stagesync_core::matching::LinearModel)> = report
-                        .sources
-                        .iter()
-                        .filter_map(|a| a.model().map(|m| (a.source.path.clone(), m)))
-                        .collect();
-                    if sources.is_empty() {
+                    if !report.sources.iter().any(|a| a.model().is_some()) {
                         anyhow::bail!("no source could be aligned, so no timeline was rendered");
                     }
-                    let path = out.join("timeline_merged.wav");
+                    let path = staged.path("timeline_merged.wav");
                     render::prepare_output(&path)?;
-                    let result = render::render_merged_timeline(
-                        &sources,
-                        report.timeline_duration,
-                        &path,
-                        &options,
-                    )?;
+                    // The merged timeline is rendered from the report's own ownership
+                    // plan, so the audio and the picture of it cannot disagree.
+                    let result = render::render_merged_timeline(&report, &path, &options)?;
                     println!(
                         "rendered merged timeline -> {} ({:.1} s of audio, {:.1} s of silence placeholder)",
-                        path.display(),
+                        final_path(&path).display(),
                         result.source_frames as f64 / result.sample_rate as f64,
                         result.silence_frames as f64 / result.sample_rate as f64
                     );
@@ -424,9 +442,17 @@ fn main() -> Result<()> {
                 }
             }
 
-            let artefacts = write_artefacts(&out, &report, &results, &[])?;
+            let artefacts = write_artefacts(&staged, &report, &results)?;
+            // Everything is written: move the export into place in one step.
+            staged.commit()?;
             for a in &artefacts {
-                println!("wrote {}", a.path.display());
+                println!(
+                    "wrote {}",
+                    a.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| a.path.display().to_string())
+                );
             }
             Ok(())
         }
@@ -661,47 +687,87 @@ fn run_analysis(
     Ok(report)
 }
 
+/// Every recording that was read, so that nothing the export writes can land
+/// on one of them.
+///
+/// The reference is included as well as the sources: the reference is never
+/// altered at all, not even when the export writes no file with its name.
+fn input_paths(report: &AlignmentReport) -> Vec<PathBuf> {
+    let mut inputs = vec![report.reference.path.clone()];
+    inputs.extend(report.sources.iter().map(|a| a.source.path.clone()));
+    inputs
+}
+
 /// Write every machine-readable artefact.
+///
+/// The artefacts are written into the staging directory, and the report is
+/// written **last**, so that the list of artefacts it carries is complete: the
+/// corrected audio and the verification results are in it, with their hashes.
+///
+/// The manifest is written after the report and lists every file of the export
+/// by its hash, which is what makes "the export is byte-identical" a statement
+/// that can be checked from the export itself.
 fn write_artefacts(
-    out: &Path,
+    staged: &export::StagedExport,
     report: &AlignmentReport,
     renders: &[RenderResult],
-    extra: &[Artifact],
 ) -> Result<Vec<Artifact>> {
-    std::fs::create_dir_all(out)
-        .with_context(|| format!("failed to create output directory: {}", out.display()))?;
-
     let mut artefacts: Vec<Artifact> = Vec::new();
+    let mut kinds: Vec<(String, String)> = Vec::new();
 
-    let syncmap = out.join("syncmap.csv");
+    let syncmap = staged.path("syncmap.csv");
     export::write_syncmap_csv(&syncmap, report)?;
     artefacts.push(artifact("syncmap", &syncmap)?);
+    kinds.push(("syncmap.csv".into(), "syncmap".into()));
 
-    let segments = out.join("segments.csv");
+    let segments = staged.path("segments.csv");
     export::write_segments_csv(&segments, report)?;
     artefacts.push(artifact("segments", &segments)?);
+    kinds.push(("segments.csv".into(), "segments".into()));
 
-    let graph = out.join("drift_graph.svg");
+    let graph = staged.path("drift_graph.svg");
     export::write_drift_graph(&graph, report)?;
     artefacts.push(artifact("drift_graph", &graph)?);
+    kinds.push(("drift_graph.svg".into(), "drift_graph".into()));
 
-    let summary = out.join("timeline.txt");
+    let summary = staged.path("timeline.txt");
     export::write_timeline_summary(&summary, report)?;
     artefacts.push(artifact("timeline_summary", &summary)?);
+    kinds.push(("timeline.txt".into(), "timeline_summary".into()));
 
-    let plan = out.join("plan.json");
+    let plan = staged.path("plan.json");
     let plan_json = serde_json::to_string_pretty(report)?;
     std::fs::write(&plan, plan_json)?;
     artefacts.push(artifact("plan", &plan)?);
+    kinds.push(("plan.json".into(), "plan".into()));
 
-    let report_path = out.join("report.json");
+    // The corrected audio, and the verification that was run on it.
+    for r in renders {
+        let name = r
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        artefacts.push(artifact("corrected_audio", &r.path)?);
+        kinds.push((name, "corrected_audio".into()));
+    }
+
+    // The report is written after everything else, so that its list of
+    // artefacts is the whole list.
+    let report_path = staged.path("report.json");
     export::write_report_json(&report_path, report, artefacts.clone())?;
     artefacts.push(artifact("report", &report_path)?);
+    kinds.push(("report.json".into(), "report".into()));
 
-    for r in renders {
-        artefacts.push(artifact("corrected_audio", &r.path)?);
-    }
-    artefacts.extend(extra.iter().cloned());
+    // And the manifest is written after the report, so that it can list it.
+    let manifest_path = staged.path("manifest.json");
+    let staging_dir = manifest_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("the staging directory has no parent"))?;
+    export::write_manifest_json(&manifest_path, staging_dir, &kinds)?;
+    kinds.push(("manifest.json".into(), "manifest".into()));
+    artefacts.push(artifact("manifest", &manifest_path)?);
+
     Ok(artefacts)
 }
 

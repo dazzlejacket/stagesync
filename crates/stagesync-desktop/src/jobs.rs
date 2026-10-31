@@ -295,15 +295,22 @@ pub fn export_report(
     let inputs: Vec<PathBuf> = std::iter::once(report.reference.path.clone())
         .chain(report.sources.iter().map(|a| a.source.path.clone()))
         .collect();
-    let planned = planned_outputs(&out, report, options.layout);
+    let planned = render::complete_outputs(&out, &planned_outputs(&out, report, options.layout));
     // Two recordings that share a file name are given the same output name, and
     // the second write would silently replace the first.
     render::ensure_outputs_are_distinct(&planned)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
-    for output in planned {
-        render::ensure_output_does_not_overwrite(&output, &inputs)
-            .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
-    }
+    // Every file the export writes is checked against the recordings, the
+    // sidecars included: the export directory is often the directory the
+    // recordings are in.
+    render::ensure_outputs_avoid_inputs(&planned, &inputs)
+        .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+
+    // The export is written into a staging directory and moved into place in one
+    // step at the end, so a failure leaves the output directory exactly as it was
+    // rather than half an export next to the recordings.
+    let staged = export::StagedExport::begin(&out)
+        .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
 
     match options.layout {
         Layout::SourceAligned => {
@@ -321,7 +328,7 @@ pub fn export_report(
                     expected,
                     format!("rendering {}", alignment.source.file_name),
                 );
-                let path = out.join(format!(
+                let path = staged.path(&format!(
                     "{}_corrected.wav",
                     stem(&alignment.source.file_name)
                 ));
@@ -335,7 +342,16 @@ pub fn export_report(
                                 path.display()
                             ))
                         })?;
-                corrected.push((index, absolute(&result.path)));
+                // The file is written into the staging directory and moved into place at the
+                // end, so the path handed back is the final one.
+                let final_path = out.join(
+                    result
+                        .path
+                        .file_name()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| result.path.clone()),
+                );
+                corrected.push((index, absolute(&final_path)));
                 renders.push(result);
             }
         }
@@ -354,7 +370,7 @@ pub fn export_report(
                     expected,
                     format!("placing {}", alignment.source.file_name),
                 );
-                let path = out.join(format!(
+                let path = staged.path(&format!(
                     "{}_timeline.wav",
                     stem(&alignment.source.file_name)
                 ));
@@ -377,16 +393,11 @@ pub fn export_report(
             if cancel.load(Ordering::Relaxed) {
                 return Err(JobFailure::Cancelled);
             }
-            let sources: Vec<(PathBuf, LinearModel)> = report
+            if !report
                 .sources
                 .iter()
-                .filter_map(|alignment| {
-                    alignment
-                        .model()
-                        .map(|model| (alignment.source.path.clone(), model))
-                })
-                .collect();
-            if sources.is_empty() {
+                .any(|alignment| alignment.model().is_some())
+            {
                 return Err(JobFailure::Failed(
                     "no source could be aligned, so no timeline was rendered".to_string(),
                 ));
@@ -398,17 +409,15 @@ pub fn export_report(
                 expected,
                 "merging the timeline".to_string(),
             );
-            let path = out.join("timeline_merged.wav");
+            let path = staged.path("timeline_merged.wav");
             render::prepare_output(&path)
                 .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+            // The merged timeline is rendered from the report's own ownership plan, so
+            // the audio and the picture of it cannot disagree.
             let result =
-                render::render_merged_timeline(&sources, report.timeline_duration, &path, &options)
-                    .map_err(|error| {
-                        JobFailure::Failed(format!(
-                            "failed to render {}: {error:#}",
-                            path.display()
-                        ))
-                    })?;
+                render::render_merged_timeline(report, &path, &options).map_err(|error| {
+                    JobFailure::Failed(format!("failed to render {}: {error:#}", path.display()))
+                })?;
             renders.push(result);
         }
     }
@@ -423,27 +432,27 @@ pub fn export_report(
 
     let mut artefacts: Vec<Artifact> = Vec::new();
 
-    let syncmap = out.join("syncmap.csv");
+    let syncmap = staged.path("syncmap.csv");
     export::write_syncmap_csv(&syncmap, report)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
     artefacts.push(artifact("syncmap", &syncmap));
 
-    let segments = out.join("segments.csv");
+    let segments = staged.path("segments.csv");
     export::write_segments_csv(&segments, report)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
     artefacts.push(artifact("segments", &segments));
 
-    let graph = out.join("drift_graph.svg");
+    let graph = staged.path("drift_graph.svg");
     export::write_drift_graph(&graph, report)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
     artefacts.push(artifact("drift_graph", &graph));
 
-    let summary = out.join("timeline.txt");
+    let summary = staged.path("timeline.txt");
     export::write_timeline_summary(&summary, report)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
     artefacts.push(artifact("timeline_summary", &summary));
 
-    let plan = out.join("plan.json");
+    let plan = staged.path("plan.json");
     let plan_json = serde_json::to_string_pretty(report).map_err(|error| {
         JobFailure::Failed(format!("failed to serialise the analysis: {error}"))
     })?;
@@ -456,10 +465,34 @@ pub fn export_report(
         artefacts.push(artifact("corrected_audio", &result.path));
     }
 
-    let report_path = out.join("report.json");
+    let report_path = staged.path("report.json");
     export::write_report_json(&report_path, report, artefacts.clone())
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
     artefacts.push(artifact("report", &report_path));
+
+    // The manifest is written after the report, so that it can list it. It
+    // lists every file of the export with its hash, which is what makes "the
+    // export is byte-identical" a statement that can be checked from the export.
+    let manifest_path = staged.path("manifest.json");
+    let staging_dir = manifest_path
+        .parent()
+        .ok_or_else(|| JobFailure::Failed("the staging directory has no parent".to_string()))?;
+    let mut kinds: Vec<(String, String)> = vec![
+        ("syncmap.csv".into(), "syncmap".into()),
+        ("segments.csv".into(), "segments".into()),
+        ("drift_graph.svg".into(), "drift_graph".into()),
+        ("timeline.txt".into(), "timeline_summary".into()),
+        ("plan.json".into(), "plan".into()),
+        ("report.json".into(), "report".into()),
+    ];
+    for result in &renders {
+        if let Some(name) = result.path.file_name() {
+            kinds.push((name.to_string_lossy().to_string(), "corrected_audio".into()));
+        }
+    }
+    export::write_manifest_json(&manifest_path, staging_dir, &kinds)
+        .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+    artefacts.push(artifact("manifest", &manifest_path));
 
     // The artefacts are written, and the cancel flag is read once more: a
     // cancel that arrived while the artefacts were being written still means
@@ -468,7 +501,22 @@ pub fn export_report(
         return Err(JobFailure::Cancelled);
     }
 
-    let files = artefacts.iter().map(|a| absolute(&a.path)).collect();
+    // Everything is written: move the export into place in one step.
+    staged
+        .commit()
+        .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+
+    let files = artefacts
+        .iter()
+        .map(|a| {
+            let name = a
+                .path
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| a.path.clone());
+            absolute(&out.join(name))
+        })
+        .collect();
 
     on_progress(TaskProgress {
         label: "Exporting".to_string(),

@@ -160,6 +160,7 @@ fn export_writes_every_artefact_and_reports_real_paths() {
         "timeline.txt",
         "plan.json",
         "report.json",
+        "manifest.json",
         "source_corrected.wav",
     ] {
         let path = out.join(name);
@@ -169,8 +170,46 @@ fn export_writes_every_artefact_and_reports_real_paths() {
         assert!(size > 0, "{name} is empty");
     }
 
+    // The manifest must list every file of the export, with its hash. The
+    // manifest cannot list itself, so it lists one file fewer than the export
+    // holds.
+    let manifest =
+        std::fs::read_to_string(out.join("manifest.json")).expect("the manifest can be read");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest).expect("the manifest is JSON");
+    let listed: Vec<String> = manifest["files"]
+        .as_array()
+        .expect("the manifest has a list of files")
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    for name in [
+        "syncmap.csv",
+        "segments.csv",
+        "drift_graph.svg",
+        "timeline.txt",
+        "plan.json",
+        "report.json",
+        "source_corrected.wav",
+    ] {
+        assert!(
+            listed.iter().any(|listed| listed == name),
+            "{name} is not in the manifest: {listed:?}"
+        );
+    }
+    for entry in manifest["files"].as_array().expect("the file list") {
+        let name = entry["name"].as_str().expect("a file name");
+        assert!(
+            entry["sha256"]
+                .as_str()
+                .map(|h| h.len() == 64)
+                .unwrap_or(false),
+            "{name} has no hash in the manifest"
+        );
+    }
+
     // The reported paths must be absolute, so the user can open them.
-    assert_eq!(outcome.files.len(), 7);
+    assert_eq!(outcome.files.len(), 8);
     for path in &outcome.files {
         assert!(path.is_absolute(), "{} is not absolute", path.display());
         assert!(path.exists(), "{} does not exist", path.display());

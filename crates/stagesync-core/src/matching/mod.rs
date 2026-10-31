@@ -206,6 +206,28 @@ impl Segment {
     }
 }
 
+/// A manual override that was applied to a source's automatic model.
+///
+/// The override is recorded rather than applied silently, because the user has
+/// to be able to see that the placement they were shown came from their own
+/// input and not from the match, and by how much it moved.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OverrideState {
+    /// The position in the source that the user pinned, in seconds.
+    pub anchor_source_time: f64,
+    /// The position in the reference that the user pinned it to, in seconds.
+    pub anchor_reference_time: f64,
+    /// The offset the automatic model would have used, in seconds.
+    pub automatic_offset: f64,
+    /// The offset that was actually applied, in seconds.
+    pub applied_offset: f64,
+    /// How far the override moved the placement, in milliseconds.
+    ///
+    /// A large value is not an error: it says that the automatic match and the
+    /// user's own judgement disagree, which the user is entitled to know.
+    pub shift_ms: f64,
+}
+
 /// The alignment result for one source against the reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceAlignment {
@@ -241,6 +263,12 @@ pub struct SourceAlignment {
     pub coverage: Coverage,
     /// Independent holdout verification of the rendered correction.
     pub holdout: Option<crate::verify::HoldoutResult>,
+    /// The manual override applied to this source, when one was.
+    ///
+    /// The override is applied to whichever model the drift assessment settled
+    /// on, so that a waveform measurement cannot quietly discard it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_state: Option<OverrideState>,
     /// Warnings raised while analysing this source.
     pub warnings: Vec<String>,
 }

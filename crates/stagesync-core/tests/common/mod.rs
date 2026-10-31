@@ -17,7 +17,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use stagesync_core::audio::{WavFormat, WavWriter};
 use stagesync_core::matching::AlignmentReport;
@@ -360,17 +361,52 @@ fn cache() -> &'static FixtureCache {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Take the fixture cache lock, ignoring a poisoned lock.
+///
+/// A panic in one test must not make every later test fail with "called
+/// `Result::unwrap()` on an `Err` value" — that would hide the real failure
+/// behind a cascade of unrelated ones.
+fn cache_lock() -> MutexGuard<'static, HashMap<CacheKey, PathBuf>> {
+    cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// The directory the cached fixtures live in.
+///
+/// The directory is **per process**. Two test binaries run at the same time
+/// would otherwise generate the same fixture file into the same place, and
+/// one of them would read a file the other was still writing. The old shared
+/// directory was the reason a cold parallel run failed: the generation was not
+/// owned by anybody, so two tests could write the same file at once.
+///
+/// The directory also carries the clock reading, so a stale directory left
+/// behind by a killed process is never reused.
 fn cache_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join("stagesync-test-fixtures");
-    std::fs::create_dir_all(&dir).expect("create the fixture cache directory");
-    dir
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let pid = std::process::id();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "stagesync-test-fixtures-v{FIXTURE_VERSION}-{pid}-{nanos}"
+        ));
+        std::fs::create_dir_all(&dir).expect("create the fixture cache directory");
+        dir
+    })
+    .clone()
 }
 
 /// A reference WAV file for the given parameters, generated once and reused.
 pub fn reference_file(rate: u32, duration_secs: f64, seed: u64) -> PathBuf {
     let key = (rate, (duration_secs * 1000.0) as u64, seed, FIXTURE_VERSION);
-    if let Some(path) = cache().lock().unwrap().get(&key) {
+    // The lock is held across the generation, not only around the lookup. A
+    // lookup that released it before generating left two threads free to
+    // generate the same file at the same time.
+    let mut cache = cache_lock();
+    if let Some(path) = cache.get(&key) {
         return path.clone();
     }
     let path = cache_dir().join(format!(
@@ -381,7 +417,7 @@ pub fn reference_file(rate: u32, duration_secs: f64, seed: u64) -> PathBuf {
         let signal = performance(duration_secs, rate, seed);
         write_wav(&path, &signal, rate, WavFormat::Float32);
     }
-    cache().lock().unwrap().insert(key, path.clone());
+    cache.insert(key, path.clone());
     path
 }
 

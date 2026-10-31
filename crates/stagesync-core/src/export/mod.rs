@@ -2,6 +2,12 @@
 //!
 //! All artefacts are deterministic: the same inputs and configuration produce
 //! byte-identical files, which is what makes the pipeline testable end to end.
+//!
+//! An export is written into a **staging directory** and moved into place at
+//! the end, so a failure leaves nothing behind but the staging directory, which
+//! is removed. The last file written is the manifest, which lists every file
+//! the export produced together with its SHA-256: "the export is byte-identical"
+//! is then a statement that can be checked from the export itself.
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +18,214 @@ pub mod graph;
 
 use crate::matching::model::LinearModel;
 use crate::matching::{AlignmentReport, SegmentKind, SourceAlignment};
+
+/// The names of the sidecar files every export writes.
+///
+/// They are checked against the recordings that were read, because the export
+/// directory is often the directory the recordings are in, and a recording
+/// called `syncmap.csv` would be overwritten by the sidecar of the same name.
+///
+/// The list lives here, rather than being spelled out at each write site, so
+/// that the *complete* set of files an export produces is known in one place.
+pub const SIDECAR_FILES: &[&str] = &[
+    "syncmap.csv",
+    "segments.csv",
+    "drift_graph.svg",
+    "timeline.txt",
+    "plan.json",
+    "report.json",
+    "manifest.json",
+];
+
+/// The paths the sidecar files of an export would be written to.
+///
+/// These are the files an *analysis-only* export writes — no corrected audio at
+/// all — and they are checked against the recordings just as the audio is.
+pub fn sidecar_outputs(out: &Path) -> Vec<PathBuf> {
+    SIDECAR_FILES.iter().map(|name| out.join(name)).collect()
+}
+
+/// One file of the export manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    /// The file name, relative to the export directory.
+    pub name: String,
+    /// What the file is.
+    pub kind: String,
+    /// Size in bytes.
+    pub bytes: u64,
+    /// SHA-256 of the file.
+    pub sha256: String,
+}
+
+/// The complete inventory of an export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportManifest {
+    /// Tool name.
+    pub tool: String,
+    /// Tool version.
+    pub version: String,
+    /// The coordinate convention.
+    pub coordinate_system: String,
+    /// Every file the export produced.
+    pub files: Vec<ManifestEntry>,
+    /// A note about the manifest itself.
+    pub note: String,
+}
+
+/// Write the export manifest.
+///
+/// The inventory is taken from the export directory itself rather than from a
+/// list maintained by hand, so a file that was written and not remembered is
+/// still listed. The manifest cannot contain its own hash, and says so.
+pub fn write_manifest_json(path: &Path, out_dir: &Path, kinds: &[(String, String)]) -> Result<()> {
+    let mut files: Vec<ManifestEntry> = Vec::new();
+    for entry in std::fs::read_dir(out_dir)
+        .with_context(|| format!("failed to read the export directory: {}", out_dir.display()))?
+    {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if Path::new(&name) == path.file_name().unwrap_or_default() {
+            continue;
+        }
+        let kind = kinds
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, kind)| kind.clone())
+            .unwrap_or_else(|| "file".to_string());
+        files.push(ManifestEntry {
+            name,
+            kind,
+            bytes: metadata.len(),
+            sha256: crate::audio::hash::sha256_file(&entry.path())?,
+        });
+    }
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    let manifest = ExportManifest {
+        tool: crate::APP_NAME.to_string(),
+        version: crate::VERSION.to_string(),
+        coordinate_system: COORDINATE_SYSTEM.to_string(),
+        files,
+        note: "The manifest cannot contain its own hash; every other file of the export is \
+               listed above with its SHA-256."
+            .to_string(),
+    };
+    let json = serde_json::to_string_pretty(&manifest)?;
+    std::fs::write(path, json)
+        .with_context(|| format!("failed to write the export manifest: {}", path.display()))?;
+    Ok(())
+}
+
+/// An export that is written in a staging directory and moved into place.
+///
+/// The corrected files are named after the recordings they come from, so an
+/// export that fails half way through would otherwise leave a partial file in
+/// the output directory — next to the recordings, when the output directory is
+/// the one the recordings are in. Staging the whole export and moving it in one
+/// step means a failure leaves the output directory as it was.
+pub struct StagedExport {
+    staging: PathBuf,
+    target: PathBuf,
+    committed: bool,
+}
+
+impl StagedExport {
+    /// Create the staging directory.
+    ///
+    /// The staging directory is a sibling of the output directory, so that
+    /// moving the files into place is a rename within one directory rather than
+    /// a copy across two.
+    pub fn begin(target: &Path) -> Result<Self> {
+        let target = if target.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            target.to_path_buf()
+        };
+        let parent = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        std::fs::create_dir_all(&parent).with_context(|| {
+            format!(
+                "failed to create the output directory: {}",
+                parent.display()
+            )
+        })?;
+        std::fs::create_dir_all(&target).with_context(|| {
+            format!(
+                "failed to create the output directory: {}",
+                target.display()
+            )
+        })?;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let staging = parent.join(format!(
+            ".stagesync-export-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&staging).with_context(|| {
+            format!(
+                "failed to create the staging directory: {}",
+                staging.display()
+            )
+        })?;
+        Ok(Self {
+            staging,
+            target,
+            committed: false,
+        })
+    }
+
+    /// The path a file of the export should be written to.
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.staging.join(name)
+    }
+
+    /// The directory the export will end up in.
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+
+    /// Move every staged file into the output directory.
+    pub fn commit(mut self) -> Result<()> {
+        for entry in std::fs::read_dir(&self.staging).with_context(|| {
+            format!(
+                "failed to read the staging directory: {}",
+                self.staging.display()
+            )
+        })? {
+            let entry = entry?;
+            let destination = self.target.join(entry.file_name());
+            std::fs::rename(entry.path(), &destination).with_context(|| {
+                format!(
+                    "failed to move {} into the output directory",
+                    entry.file_name().to_string_lossy()
+                )
+            })?;
+        }
+        let _ = std::fs::remove_dir_all(&self.staging);
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedExport {
+    fn drop(&mut self) {
+        if !self.committed {
+            // The export did not finish: nothing of it is left behind.
+            let _ = std::fs::remove_dir_all(&self.staging);
+        }
+    }
+}
 
 /// The coordinate convention used by every artefact.
 pub const COORDINATE_SYSTEM: &str =

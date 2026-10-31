@@ -474,13 +474,7 @@ fn the_merged_timeline_combines_two_sources_without_losing_either() {
         ..RenderOptions::default()
     };
     let out = dir.path().join("merged.wav");
-    let result = render_merged_timeline(
-        &[(first.clone(), model_first), (second.clone(), model_second)],
-        MERGED_DURATION,
-        &out,
-        &options,
-    )
-    .expect("render");
+    let result = render_merged_timeline(&report, &out, &options).expect("render");
 
     assert!(result.frames > 0, "the merged render is empty");
     let (samples, _, _) = read_mono(&out);

@@ -40,6 +40,81 @@ impl WindowRequest {
     }
 }
 
+/// The state of one window-extraction pass.
+struct Extraction<'a> {
+    /// The requests, sorted by position.
+    plan: &'a [(usize, i64, i64)],
+    /// The produced samples that have not been trimmed away.
+    buffer: Vec<f32>,
+    /// Index, in analysis-rate samples, of `buffer[0]`.
+    buffer_start: i64,
+    /// The next request in the plan that has not been resolved yet.
+    next: usize,
+    /// The result, one entry per request.
+    out: Vec<Option<Vec<f32>>>,
+}
+
+impl Extraction<'_> {
+    /// Whether every request has been resolved.
+    fn done(&self) -> bool {
+        self.next >= self.plan.len()
+    }
+
+    /// Take in newly produced samples and resolve the windows they complete.
+    fn consume(&mut self, samples: &[f32]) {
+        self.buffer.extend_from_slice(samples);
+        while self.next < self.plan.len() {
+            let (index, start, end) = self.plan[self.next];
+            if start < 0 {
+                // The window begins before the file does; there is nothing to take.
+                self.out[index] = None;
+                self.next += 1;
+                continue;
+            }
+            if self.buffer_start + (self.buffer.len() as i64) < end {
+                break;
+            }
+            if start < self.buffer_start {
+                // The window's start has already been trimmed away.
+                self.out[index] = None;
+                self.next += 1;
+                continue;
+            }
+            let lo = (start - self.buffer_start) as usize;
+            let hi = ((end - self.buffer_start) as usize).min(self.buffer.len());
+            if hi > lo {
+                self.out[index] = Some(self.buffer[lo..hi].to_vec());
+            }
+            self.next += 1;
+        }
+        // Drop the samples that no pending window can need any more. When every
+        // request has been resolved, that is all of them: the rest of the
+        // recording is of no interest to this pass and must not be held.
+        if self.done() {
+            self.buffer.clear();
+            self.buffer_start += self.buffer.len() as i64;
+            return;
+        }
+        let keep_from = self.plan[self.next].1.max(0);
+        if keep_from > self.buffer_start {
+            let drop = ((keep_from - self.buffer_start) as usize).min(self.buffer.len());
+            self.buffer.drain(..drop);
+            self.buffer_start += drop as i64;
+        }
+    }
+}
+
+/// What one window-extraction pass cost.
+///
+/// The number of decoded frames is the honest measure of the work done: a pass
+/// that is asked for one window near the beginning of a long recording should
+/// not decode the whole recording to find it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowStats {
+    /// Frames decoded from the file.
+    pub frames_decoded: u64,
+}
+
 /// Extract mono windows at the requested positions, in a single streaming pass.
 ///
 /// The result has one entry per request, in the order the requests were given. An entry
@@ -49,13 +124,34 @@ impl WindowRequest {
 /// The samples are mono (the mean of the channels) and are resampled to `analysis_rate`
 /// with the crate's deterministic polyphase resampler, so the position of every sample
 /// on the timeline is known exactly.
+///
+/// The pass stops as soon as every request has been resolved. A source that is short
+/// and sits near the beginning of a long reference therefore costs only the part of
+/// the reference it actually occupies; the rest of it is never decoded and never held.
 pub fn extract_windows(
     path: &Path,
     requests: &[WindowRequest],
     analysis_rate: u32,
     cancel: Option<&AtomicBool>,
 ) -> Result<Vec<Option<Vec<f32>>>> {
-    let mut out: Vec<Option<Vec<f32>>> = vec![None; requests.len()];
+    extract_windows_with_stats(
+        path,
+        requests,
+        analysis_rate,
+        cancel,
+        &mut WindowStats::default(),
+    )
+}
+
+/// Extract windows, and report what the pass cost.
+pub fn extract_windows_with_stats(
+    path: &Path,
+    requests: &[WindowRequest],
+    analysis_rate: u32,
+    cancel: Option<&AtomicBool>,
+    stats: &mut WindowStats,
+) -> Result<Vec<Option<Vec<f32>>>> {
+    let out: Vec<Option<Vec<f32>>> = vec![None; requests.len()];
     if requests.is_empty() {
         return Ok(out);
     }
@@ -84,75 +180,58 @@ pub fn extract_windows(
         .collect();
     plan.sort_by_key(|(_, start, _)| *start);
 
-    let mut resampler = StreamingResampler::new(alpha, 0.0, DEFAULT_TAPS, DEFAULT_PHASES);
-    let mut buffer: Vec<f32> = Vec::new();
-    // Index, in analysis-rate samples, of `buffer[0]`.
-    let mut buffer_start: i64 = 0;
-    // The next request in the plan that has not been completed yet.
-    let mut next: usize = 0;
-
-    let consume = |samples: &[f32],
-                   buffer: &mut Vec<f32>,
-                   buffer_start: &mut i64,
-                   next: &mut usize,
-                   out: &mut Vec<Option<Vec<f32>>>| {
-        buffer.extend_from_slice(samples);
-        while *next < plan.len() {
-            let (index, start, end) = plan[*next];
-            if start < 0 {
-                // The window begins before the file does; there is nothing to take.
-                out[index] = None;
-                *next += 1;
-                continue;
-            }
-            if *buffer_start + (buffer.len() as i64) < end {
-                break;
-            }
-            if start < *buffer_start {
-                // The window's start has already been trimmed away.
-                out[index] = None;
-                *next += 1;
-                continue;
-            }
-            let lo = (start - *buffer_start) as usize;
-            let hi = ((end - *buffer_start) as usize).min(buffer.len());
-            if hi > lo {
-                out[index] = Some(buffer[lo..hi].to_vec());
-            }
-            *next += 1;
-        }
-        // Drop the samples that no pending window can need any more.
-        if *next < plan.len() {
-            let keep_from = plan[*next].1.max(0);
-            if keep_from > *buffer_start {
-                let drop = ((keep_from - *buffer_start) as usize).min(buffer.len());
-                buffer.drain(..drop);
-                *buffer_start += drop as i64;
-            }
-        }
+    // The file's own length, when the container states one. A window that begins at
+    // or after the end of the file cannot be produced, and saying so from the
+    // container's own figure saves decoding the rest of the recording to find out.
+    let duration_samples = if decoder.meta().duration_secs > 0.0 {
+        (decoder.meta().duration_secs * rate).ceil() as i64
+    } else {
+        i64::MAX
     };
 
-    loop {
+    let mut extraction = Extraction {
+        plan: &plan,
+        buffer: Vec::new(),
+        buffer_start: 0,
+        next: 0,
+        out,
+    };
+
+    // Resolve the requests that cannot be satisfied before anything is decoded.
+    while extraction.next < plan.len() {
+        let (index, start, _) = plan[extraction.next];
+        if start < 0 {
+            extraction.out[index] = None;
+            extraction.next += 1;
+            continue;
+        }
+        if start >= duration_samples {
+            extraction.out[index] = None;
+            extraction.next += 1;
+            continue;
+        }
+        break;
+    }
+
+    let mut resampler = StreamingResampler::new(alpha, 0.0, DEFAULT_TAPS, DEFAULT_PHASES);
+
+    while !extraction.done() {
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             anyhow::bail!("the analysis was cancelled");
         }
         let Some(block) = decoder.read_block(BLOCK_FRAMES)? else {
             break;
         };
+        stats.frames_decoded = decoder.frames_decoded();
         let mono = block.mono();
         let produced = resampler.push(&mono);
-        consume(
-            &produced,
-            &mut buffer,
-            &mut buffer_start,
-            &mut next,
-            &mut out,
-        );
+        extraction.consume(&produced);
     }
+    stats.frames_decoded = decoder.frames_decoded();
     let tail = resampler.flush();
-    consume(&tail, &mut buffer, &mut buffer_start, &mut next, &mut out);
+    extraction.consume(&tail);
 
-    Ok(out)
+    Ok(extraction.out)
 }
 
 #[cfg(test)]
@@ -237,6 +316,60 @@ mod tests {
             window.len(),
             8_000,
             "the window is not at the analysis rate"
+        );
+    }
+
+    #[test]
+    fn the_pass_stops_once_every_window_has_been_produced() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("ramp.wav");
+        // A minute of material, and a window at the very beginning of it.
+        ramp_file(&path, 8_000, 60.0);
+
+        let mut stats = WindowStats::default();
+        let windows = extract_windows_with_stats(
+            &path,
+            &[WindowRequest::centred(0.5, 0.5)],
+            8_000,
+            None,
+            &mut stats,
+        )
+        .expect("the windows can be extracted");
+
+        assert!(
+            windows[0].is_some(),
+            "the window at the start of the file was not produced"
+        );
+        // The whole file is 480,000 frames. The pass must not decode all of it
+        // to produce a window that ends one second in.
+        assert!(
+            stats.frames_decoded < 120_000,
+            "the pass decoded {} frames of a 480,000-frame file to produce one window",
+            stats.frames_decoded
+        );
+    }
+
+    #[test]
+    fn a_window_past_the_end_is_not_decoded_to_find() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("ramp.wav");
+        ramp_file(&path, 8_000, 10.0);
+
+        let mut stats = WindowStats::default();
+        let windows = extract_windows_with_stats(
+            &path,
+            &[WindowRequest::centred(30.0, 1.0)],
+            8_000,
+            None,
+            &mut stats,
+        )
+        .expect("the windows can be extracted");
+
+        assert!(windows[0].is_none(), "a window past the end was invented");
+        assert!(
+            stats.frames_decoded == 0,
+            "the pass decoded {} frames to find a window that is past the end of the file",
+            stats.frames_decoded
         );
     }
 }

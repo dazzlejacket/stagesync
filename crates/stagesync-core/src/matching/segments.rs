@@ -490,6 +490,19 @@ const MERGE_GAP_EPSILON: f64 = 0.010;
 
 /// Merge the per-source segments into one reference timeline.
 ///
+/// The merge is a **boundary sweep**: every start and end of every source-backed
+/// interval is collected, the elementary spans between consecutive boundaries are
+/// examined one at a time, and each is assigned to the highest-priority source that
+/// covers it. Every source's boundaries therefore appear in the result, and a span
+/// that lies inside another source's interval is owned by the higher-priority source
+/// rather than cutting a hole in it.
+///
+/// The previous implementation walked the intervals in order and moved a cursor to
+/// each interval's end. A nested interval — a source covering [2, 3] inside another
+/// source's [0, 10] — moved that cursor *backwards*, and the next interval was
+/// reported as a gap even though the first source covered it throughout. A hole was
+/// invented inside a fully covered range.
+///
 /// Overlapping sources are resolved by source priority (the order the user supplied
 /// them); the losing source's material is not deleted, it simply is not used in the
 /// merged timeline.
@@ -499,45 +512,88 @@ pub fn merge_timeline(per_source: &[Vec<Segment>], reference_duration: f64) -> V
     for (idx, segments) in per_source.iter().enumerate() {
         for s in segments {
             if matches!(s.kind, SegmentKind::Matched | SegmentKind::LowConfidence) {
-                covered.push((
-                    s.reference_start,
-                    s.reference_end,
-                    idx,
-                    s.kind,
-                    s.confidence,
-                ));
+                let start = s.reference_start.max(0.0);
+                let end = s.reference_end.min(reference_duration);
+                if end > start {
+                    covered.push((start, end, idx, s.kind, s.confidence));
+                }
             }
         }
     }
-    covered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    if reference_duration <= 0.0 {
+        return Vec::new();
+    }
+
+    // Every boundary of every interval, plus the ends of the reference.
+    let mut bounds: Vec<f64> = vec![0.0, reference_duration];
+    for (start, end, _, _, _) in &covered {
+        bounds.push(*start);
+        bounds.push(*end);
+    }
+    bounds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Boundaries that are within a whisker of each other describe the same instant, so
+    // they are collapsed. Without this, the rounding differences between two sources'
+    // boundaries would produce slivers of a span.
+    let mut points: Vec<f64> = Vec::with_capacity(bounds.len());
+    for b in bounds {
+        if points
+            .last()
+            .is_none_or(|last| b - last > MERGE_GAP_EPSILON)
+        {
+            points.push(b);
+        }
+    }
 
     let mut spans: Vec<TimelineSpan> = Vec::new();
-    let mut cursor = 0.0f64;
-
-    for (start, end, idx, kind, confidence) in covered {
-        let start = start.max(0.0);
-        let end = end.min(reference_duration);
-        if end <= start {
+    for window in points.windows(2) {
+        let (start, end) = (window[0], window[1]);
+        if end - start <= MERGE_GAP_EPSILON {
             continue;
         }
-        if start > cursor + MERGE_GAP_EPSILON {
-            spans.push(TimelineSpan {
-                reference_start: cursor,
-                reference_end: start,
-                kind: SegmentKind::UncoveredReference,
-                source_index: None,
-                confidence: Confidence::new(0.0, UncertaintyReason::LowEnergy),
-                note: "no recorder covered this span of the reference".into(),
-            });
+
+        // The owner of this elementary span is the lowest-numbered source whose
+        // interval covers it. Because every interval's own endpoints are boundaries,
+        // an interval either covers the whole elementary span or none of it.
+        let mut owner: Option<(usize, SegmentKind, Confidence)> = None;
+        for (s, e, idx, kind, confidence) in &covered {
+            let covers = *s <= start + MERGE_GAP_EPSILON && *e >= end - MERGE_GAP_EPSILON;
+            if !covers {
+                continue;
+            }
+            match owner {
+                None => owner = Some((*idx, *kind, *confidence)),
+                Some((current, _, _)) if *idx < current => owner = Some((*idx, *kind, *confidence)),
+                Some(_) => {}
+            }
         }
-        // Only the highest-priority source contributes at any point.
+
+        let (kind, source_index, confidence, note) = match owner {
+            Some((idx, kind, confidence)) => (
+                kind,
+                Some(idx),
+                confidence,
+                if kind == SegmentKind::LowConfidence {
+                    "covered, but the match here is not fully trusted".to_string()
+                } else {
+                    String::new()
+                },
+            ),
+            None => (
+                SegmentKind::UncoveredReference,
+                None,
+                Confidence::new(0.0, UncertaintyReason::LowEnergy),
+                "no recorder covered this span of the reference".to_string(),
+            ),
+        };
+
+        // Adjacent spans with the same owner and the same kind are one span.
         if let Some(last) = spans.last_mut() {
-            if last.source_index == Some(idx)
+            if last.source_index == source_index
                 && last.kind == kind
-                && (last.reference_end - start).abs() < 1e-6
+                && (last.reference_end - start).abs() <= MERGE_GAP_EPSILON
             {
                 last.reference_end = end;
-                cursor = end;
                 continue;
             }
         }
@@ -545,25 +601,9 @@ pub fn merge_timeline(per_source: &[Vec<Segment>], reference_duration: f64) -> V
             reference_start: start,
             reference_end: end,
             kind,
-            source_index: Some(idx),
+            source_index,
             confidence,
-            note: if kind == SegmentKind::LowConfidence {
-                "covered, but the match here is not fully trusted".into()
-            } else {
-                String::new()
-            },
-        });
-        cursor = end;
-    }
-
-    if cursor < reference_duration - MERGE_GAP_EPSILON {
-        spans.push(TimelineSpan {
-            reference_start: cursor,
-            reference_end: reference_duration,
-            kind: SegmentKind::UncoveredReference,
-            source_index: None,
-            confidence: Confidence::new(0.0, UncertaintyReason::LowEnergy),
-            note: "no recorder covered this span of the reference".into(),
+            note,
         });
     }
 

@@ -119,11 +119,16 @@ pub struct AnalysisConfig {
     ///
     /// This anchor applies to every source that has no source-specific anchor.
     pub manual_anchor: Option<ManualAnchor>,
-    /// Manual anchors for individual sources, keyed by the source's file name.
+    /// Manual anchors for individual sources, keyed by the recording's identity.
     ///
     /// A recording set usually contains several files, and a single global anchor would
     /// drag every one of them onto the same correspondence. These anchors are honoured
-    /// per file and take precedence over [`AnalysisConfig::manual_anchor`].
+    /// per recording and take precedence over [`AnalysisConfig::manual_anchor`].
+    ///
+    /// The key identifies the recording by its **content hash** or by its **full
+    /// path**, never by its file name: two recordings called `song.wav` in different
+    /// folders are two different recordings, and an anchor meant for one of them
+    /// must not be applied to the other.
     pub manual_anchors: Vec<(String, ManualAnchor)>,
     /// A cancellation token. When it is cancelled, [`analyze`] stops at the next
     /// checkpoint and returns an error.
@@ -153,11 +158,17 @@ impl Default for AnalysisConfig {
 }
 
 impl AnalysisConfig {
-    /// The manual anchor that applies to a source with the given file name.
-    pub fn anchor_for(&self, file_name: &str) -> Option<ManualAnchor> {
+    /// The manual anchor that applies to a source.
+    ///
+    /// The anchor is looked up by the recording's identity: its content hash, or
+    /// its full path. A file name is not an identity — two recordings in
+    /// different folders share one — so an anchor keyed by a bare name is not
+    /// honoured, and the source is reported as unanchored rather than being
+    /// moved by somebody else's anchor.
+    pub fn anchor_for(&self, source: &crate::audio::SourceMeta) -> Option<ManualAnchor> {
         self.manual_anchors
             .iter()
-            .find(|(name, _)| name == file_name)
+            .find(|(key, _)| key_identifies(key, source))
             .map(|(_, anchor)| *anchor)
             .or(self.manual_anchor)
     }
@@ -165,6 +176,33 @@ impl AnalysisConfig {
     /// `true` when the analysis has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.cancel.as_ref().is_some_and(|c| c.is_cancelled())
+    }
+}
+
+/// Whether an anchor key identifies this recording.
+///
+/// The key may be the recording's content hash, which identifies it exactly, or
+/// its full path, which identifies the file. A bare file name identifies
+/// neither.
+fn key_identifies(key: &str, source: &crate::audio::SourceMeta) -> bool {
+    if key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return key.eq_ignore_ascii_case(&source.sha256);
+    }
+    let key_path = std::path::Path::new(key);
+    if !key_path.is_absolute() {
+        return false;
+    }
+    if key_path == source.path {
+        return true;
+    }
+    // The same file reached by a different spelling of its path — a symbolic
+    // link, or a path with a different case — is still the same recording.
+    match (
+        std::fs::canonicalize(key_path),
+        std::fs::canonicalize(&source.path),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -294,7 +332,7 @@ pub fn analyze(
 
         // The anchor that applies to *this* source: a source-specific one wins over the
         // global fallback.
-        let anchor = config.anchor_for(&source_meta.file_name);
+        let anchor = config.anchor_for(&source_meta);
 
         let seed_model = match (lock.model, anchor) {
             (Some(m), _) => m,
@@ -318,6 +356,8 @@ pub fn analyze(
                     direct_model: LinearModel::new(1.0, 0.0),
                     calibrated: LinearModel::new(1.0, 0.0),
                     trusted: Vec::new(),
+                    anchor: None,
+                    automatic_offset: 0.0,
                     envelope: source_env,
                 });
                 continue;
@@ -375,8 +415,11 @@ pub fn analyze(
         );
         warnings.extend(calibration.warnings.clone());
 
-        // A manual anchor is a hard constraint: the final model must pass through it.
+        // A manual anchor is an override, not a hint: the model must pass through it.
+        // The offset the automatic model had is kept, so that the report can say
+        // how far the user's own judgement moved the placement.
         let mut calibrated = calibration.calibrated_model;
+        let automatic_offset = calibrated.offset;
         if let Some(anchor) = anchor {
             calibrated.offset = anchor.reference_time - calibrated.scale * anchor.source_time;
         }
@@ -400,6 +443,8 @@ pub fn analyze(
             direct_model,
             calibrated,
             trusted,
+            anchor,
+            automatic_offset,
             envelope: source_env,
         });
     }
@@ -488,6 +533,7 @@ pub fn analyze(
                     fraction: 0.0,
                 },
                 holdout: None,
+                override_state: None,
                 warnings,
             });
             continue;
@@ -565,6 +611,37 @@ pub fn analyze(
             assessment.slope_se_ppm = 0.0;
         }
 
+        // The manual anchor is an override *layer*: it is applied to whichever model the
+        // drift assessment settled on. Before this, the anchor was applied to the
+        // envelope model only, and a waveform measurement — which is usually the
+        // better one — quietly discarded it, so the placement the user asked for
+        // was not the placement that was used.
+        let mut override_state = None;
+        if let Some(anchor) = item.anchor {
+            // The automatic offset is the one the model would have had without the
+            // override: the envelope's own when the envelope model was kept, and
+            // the waveform's when the waveform model was kept.
+            let automatic_offset = match assessment.method {
+                DriftMethod::Envelope => item.automatic_offset,
+                DriftMethod::Waveform | DriftMethod::OffsetOnly => assessment.model.offset,
+            };
+            let applied_offset =
+                anchor.reference_time - assessment.model.scale * anchor.source_time;
+            let shift_ms = (applied_offset - automatic_offset) * 1000.0;
+            assessment.model = LinearModel::new(assessment.model.scale, applied_offset);
+            warnings.push(format!(
+                "a manual anchor was applied: the placement was moved {shift_ms:+.1} ms relative to \
+                 the automatic match"
+            ));
+            override_state = Some(crate::matching::OverrideState {
+                anchor_source_time: anchor.source_time,
+                anchor_reference_time: anchor.reference_time,
+                automatic_offset,
+                applied_offset,
+                shift_ms,
+            });
+        }
+
         let final_model = assessment.model;
         let map =
             crate::matching::model::TimeMap::from_linear(final_model, item.meta.duration_secs);
@@ -614,6 +691,7 @@ pub fn analyze(
             segments,
             coverage,
             holdout: None,
+            override_state,
             warnings,
         });
     }
@@ -651,6 +729,13 @@ struct SourceWork {
     calibrated: LinearModel,
     /// The trusted points the envelope fit rests on.
     trusted: Vec<(f64, f64)>,
+    /// The manual anchor that applies to this source, when there is one.
+    anchor: Option<ManualAnchor>,
+    /// The offset the automatic model had, before any anchor was applied.
+    ///
+    /// It is kept so that the report can say how far the user's own judgement
+    /// moved the placement away from the match.
+    automatic_offset: f64,
     /// The source's loudness envelope, needed for the segmentation.
     envelope: Envelope,
 }

@@ -87,6 +87,122 @@ pub fn metrics_for(report: &AlignmentReport, index: usize) -> TargetMetrics {
     }
 }
 
+/// What has been established about one target.
+///
+/// The status says what is *known*, not what was measured: a figure that only
+/// means something when there is one is not a status, and leading with it hides
+/// the difference between "nothing was found" and "nothing was looked for".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetStatus {
+    /// The target has not been analysed yet.
+    NotAnalysed,
+    /// A reliable correspondence was found and nothing needs looking at.
+    AutoAligned,
+    /// A correspondence was found, but something about it needs looking at.
+    NeedsInspection,
+    /// No reliable correspondence was found for this target.
+    NoReliableMatch,
+    /// The user's own anchor decided the placement.
+    OverrideApplied,
+}
+
+impl TargetStatus {
+    /// The text shown for this status.
+    pub fn label(self) -> &'static str {
+        match self {
+            TargetStatus::NotAnalysed => "Not analysed",
+            TargetStatus::AutoAligned => "Auto aligned",
+            TargetStatus::NeedsInspection => "Needs inspection",
+            TargetStatus::NoReliableMatch => "No reliable match",
+            TargetStatus::OverrideApplied => "Override applied",
+        }
+    }
+
+    /// `true` when the target's placement is settled and needs no attention.
+    pub fn is_settled(self) -> bool {
+        matches!(self, TargetStatus::AutoAligned)
+    }
+}
+
+/// The status of one target, derived from the report.
+pub fn status_for(report: Option<&AlignmentReport>, index: usize) -> TargetStatus {
+    let Some(report) = report else {
+        return TargetStatus::NotAnalysed;
+    };
+    let Some(alignment) = report.sources.get(index) else {
+        return TargetStatus::NotAnalysed;
+    };
+    if alignment.model().is_none() {
+        return TargetStatus::NoReliableMatch;
+    }
+    if alignment.override_state.is_some() {
+        return TargetStatus::OverrideApplied;
+    }
+    // Anything the user should look at: a warning the analysis raised, material
+    // the reference has that this target does not cover, or a drift that could
+    // not be established.
+    let drift_unestablished = alignment
+        .drift
+        .as_ref()
+        .map(|assessment| assessment.status != DriftStatus::Established)
+        .unwrap_or(true);
+    if !alignment.warnings.is_empty() || alignment.coverage.fraction < 0.999 || drift_unestablished
+    {
+        return TargetStatus::NeedsInspection;
+    }
+    TargetStatus::AutoAligned
+}
+
+/// What has been verified about the exported correction of one target.
+///
+/// This is deliberately separate from the analysis status: a target can be
+/// perfectly aligned and still have an export that was never verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportVerification {
+    /// No export has been verified for this target.
+    NotVerified,
+    /// The export was verified at this many positions.
+    Verified {
+        /// How many positions were trusted.
+        positions: usize,
+    },
+    /// The export was checked, but there were not enough trusted positions to
+    /// say anything about it.
+    InsufficientData,
+}
+
+impl ExportVerification {
+    /// The text shown for this verification state.
+    pub fn label(self) -> String {
+        match self {
+            ExportVerification::NotVerified => "Export not verified".to_string(),
+            ExportVerification::Verified { positions } => {
+                format!("Export verified at {positions} sampled positions")
+            }
+            ExportVerification::InsufficientData => {
+                "Insufficient data: too few trusted positions to verify the export".to_string()
+            }
+        }
+    }
+}
+
+/// The verification state of one target.
+pub fn verification_for(report: Option<&AlignmentReport>, index: usize) -> ExportVerification {
+    let Some(holdout) = report
+        .and_then(|report| report.sources.get(index))
+        .and_then(|alignment| alignment.holdout.as_ref())
+    else {
+        return ExportVerification::NotVerified;
+    };
+    // The waveform method and the envelope method are two independent opinions.
+    // Either of them can carry the statement, so either of them counts.
+    let trusted = holdout.counted.max(holdout.envelope_counted);
+    if trusted == 0 {
+        return ExportVerification::InsufficientData;
+    }
+    ExportVerification::Verified { positions: trusted }
+}
+
 /// A progress update shown in the status bar.
 #[derive(Debug, Clone)]
 pub struct TaskProgress {

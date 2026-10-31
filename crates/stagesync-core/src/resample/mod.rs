@@ -244,8 +244,16 @@ impl StreamingResampler {
             (self.alpha * self.next_output as f64 + self.gamma).floor() as i64 - self.half as i64;
         let drop = (next_base - self.buffer_start).max(0) as usize;
         if drop > 0 {
-            self.buffer.drain(..drop.min(self.buffer.len()));
-            self.buffer_start += drop as i64;
+            // The origin may only advance by the samples that were *actually*
+            // removed. Advancing it by the larger, unclamped `drop` mislabels
+            // every later sample: the tap window is indexed relative to the
+            // origin, so samples are read from the wrong place and the ones
+            // before the new origin are silently treated as silence. That
+            // happens whenever the first needed sample lies beyond the first
+            // decoded block — a negative offset, or a cursor that opens late.
+            let removed = drop.min(self.buffer.len());
+            self.buffer.drain(..removed);
+            self.buffer_start += removed as i64;
         }
         out
     }

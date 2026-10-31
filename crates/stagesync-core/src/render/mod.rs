@@ -9,18 +9,31 @@
 //!   reference's timeline. Spans no source covers are **digital silence placeholders**,
 //!   explicitly labelled as such, never invented audio.
 //! * [`Layout::ReferenceTimelineMerged`] — one file covering the whole reference timeline,
-//!   with every source placed and overlaps resolved by user priority.
+//!   with every source placed and overlaps resolved by the *same* ownership plan the
+//!   timeline display and the gap report use.
 //!
 //! Every layout uses the same polyphase resampler and the same exact position map, so the
 //! output is deterministic and does not depend on how the input was chunked.
+//!
+//! Three rules govern what may be written, and they are checked rather than assumed:
+//!
+//! * **Every channel is carried.** The channels of a source are never averaged into one
+//!   and never duplicated. A stereo source whose two channels are in antiphase keeps
+//!   that antiphase; folding it to mono would turn real content into silence.
+//! * **Every source is read at its own rate.** A 16 kHz source placed in an 8 kHz timeline
+//!   is decimated from 16 kHz, not read as if it were 8 kHz material.
+//! * **Every length is exact.** A reference-timeline file has exactly the reference's
+//!   duration; a source-aligned file has exactly the length the rate change implies. The
+//!   filter's tail is never written past the end.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::audio::{AudioDecoder, WavFormat, WavWriter};
+use crate::audio::{ensure_wav_size_fits, AudioDecoder, WavFormat, WavWriter};
 use crate::matching::model::LinearModel;
+use crate::matching::{AlignmentReport, SegmentKind};
 use crate::resample::{StreamingResampler, DEFAULT_PHASES, DEFAULT_TAPS};
 
 /// Output layout.
@@ -53,6 +66,13 @@ pub struct RenderOptions {
     /// Output sample rate. `None` means "the source rate" for source-aligned renders and
     /// "the reference rate" for timeline renders.
     pub sample_rate: Option<u32>,
+    /// Output channel count, for the merged layout only.
+    ///
+    /// `None` means "the largest channel count among the sources". A count *smaller*
+    /// than a source's own channel count is refused rather than honoured by dropping
+    /// channels: losing a channel is losing audio, and silently losing it is worse than
+    /// refusing the export.
+    pub channels: Option<usize>,
     /// Output sample format.
     pub format: WavFormat,
     /// Resampler taps.
@@ -70,6 +90,7 @@ impl Default for RenderOptions {
         Self {
             layout: Layout::SourceAligned,
             sample_rate: None,
+            channels: None,
             format: WavFormat::Float32,
             taps: DEFAULT_TAPS,
             phases: DEFAULT_PHASES,
@@ -98,6 +119,12 @@ pub struct RenderResult {
     pub effective_rate: f64,
     /// Pitch change caused by the resampling, in cents (negative = pitched down).
     pub pitch_shift_cents: f64,
+    /// Whether the material was resampled.
+    ///
+    /// `false` means the output was copied sample for sample, which happens when the
+    /// correction needs no rate change at all. The distinction matters: a resampled
+    /// file has been through a filter, and saying so is part of being honest about it.
+    pub resampled: bool,
 }
 
 /// Source-to-output geometry for one source.
@@ -107,6 +134,16 @@ struct Geometry {
     alpha: f64,
     /// Source frame position of output frame 0.
     gamma: f64,
+}
+
+impl Geometry {
+    /// Whether the map needs no rate change and lands on whole input samples.
+    ///
+    /// Such a map can be honoured by copying samples instead of filtering them, which
+    /// leaves the material untouched.
+    fn is_unity_copy(&self) -> bool {
+        (self.alpha - 1.0).abs() <= 1e-12 && (self.gamma - self.gamma.round()).abs() <= 1e-9
+    }
 }
 
 /// Geometry for a source-aligned render: the source's own material, drift corrected.
@@ -125,30 +162,184 @@ fn geometry_timeline(model: &LinearModel, source_rate: u32, output_rate: u32) ->
     }
 }
 
-/// A bank of resamplers — one per channel — driven by an identical position map.
+/// The number of output frames that carry material from a source of `source_frames`.
+///
+/// Output frame `n` is taken from source position `alpha * n + gamma`, so the frames
+/// that lie inside the source are those with `0 <= alpha * n + gamma < source_frames`.
+/// The count is exact: nothing is written for a position past the end of the source,
+/// and nothing is invented for a position before its start.
+fn output_frames_for(source_frames: u64, geom: Geometry) -> u64 {
+    if source_frames == 0 || geom.alpha <= 0.0 {
+        return 0;
+    }
+    let n = source_frames as f64;
+    let first = (-geom.gamma / geom.alpha).ceil().max(0.0);
+    let last = ((n - geom.gamma) / geom.alpha).ceil().max(0.0);
+    (last - first).max(0.0).round() as u64
+}
+
+/// An exact sample copy: output frame `n` is input frame `n + shift`.
+///
+/// This is used when the map needs no rate change and lands on whole samples. The
+/// samples are copied untouched — no filter, no interpolation, no ringing — which is
+/// what "an offset-only correction performs no resampling" has to mean.
+struct SampleShifter {
+    shift: i64,
+    buffer: VecDeque<f32>,
+    /// Absolute index of the first buffered sample.
+    buffer_start: i64,
+    next_output: i64,
+    produced: u64,
+    output_limit: Option<u64>,
+    input_end: i64,
+}
+
+impl SampleShifter {
+    fn new(shift: i64) -> Self {
+        Self {
+            shift,
+            buffer: VecDeque::new(),
+            buffer_start: 0,
+            next_output: 0,
+            produced: 0,
+            output_limit: None,
+            input_end: 0,
+        }
+    }
+
+    fn set_next_output(&mut self, n: i64) {
+        self.next_output = n;
+    }
+
+    fn set_output_limit(&mut self, n: u64) {
+        self.output_limit = Some(n);
+    }
+
+    fn push(&mut self, samples: &[f32]) -> Vec<f32> {
+        self.buffer.extend(samples.iter().copied());
+        self.input_end += samples.len() as i64;
+        self.drain()
+    }
+
+    fn flush(&mut self) -> Vec<f32> {
+        self.drain()
+    }
+
+    fn drain(&mut self) -> Vec<f32> {
+        let mut out = Vec::new();
+        loop {
+            if let Some(limit) = self.output_limit {
+                if self.produced >= limit {
+                    break;
+                }
+            }
+            let position = self.next_output + self.shift;
+            let index = position - self.buffer_start;
+            if index < 0 {
+                // The input frame lies before the start of the recording: there is
+                // nothing there, and the output frame is silence.
+                out.push(0.0);
+                self.next_output += 1;
+                self.produced += 1;
+                continue;
+            }
+            if (index as usize) >= self.buffer.len() {
+                // The input frame has not arrived yet — or, at the end of the stream,
+                // will never arrive. An exact copy has no filter tail, so there is
+                // nothing more to produce.
+                break;
+            }
+            out.push(self.buffer[index as usize]);
+            self.next_output += 1;
+            self.produced += 1;
+        }
+
+        // Drop the input that can no longer be needed. The origin advances only by the
+        // samples that were actually removed.
+        let needed = self.next_output + self.shift;
+        let drop = (needed - self.buffer_start).max(0) as usize;
+        let removed = drop.min(self.buffer.len());
+        self.buffer.drain(..removed);
+        self.buffer_start += removed as i64;
+        out
+    }
+}
+
+/// One channel's position map: either a resampler or an exact copy.
+enum Processor {
+    /// Interpolated from input position `alpha * n + gamma`.
+    Resample(StreamingResampler),
+    /// Copied from input frame `n + shift`.
+    Copy(SampleShifter),
+}
+
+impl Processor {
+    fn new(geom: Geometry, options: &RenderOptions, start_output: i64, limit: Option<u64>) -> Self {
+        if geom.is_unity_copy() {
+            let mut shifter = SampleShifter::new(geom.gamma.round() as i64);
+            shifter.set_next_output(start_output);
+            if let Some(limit) = limit {
+                shifter.set_output_limit(limit);
+            }
+            Processor::Copy(shifter)
+        } else {
+            let mut resampler =
+                StreamingResampler::new(geom.alpha, geom.gamma, options.taps, options.phases);
+            resampler.set_next_output(start_output);
+            if let Some(limit) = limit {
+                resampler.set_output_limit(limit);
+            }
+            Processor::Resample(resampler)
+        }
+    }
+
+    fn push(&mut self, samples: &[f32]) -> Vec<f32> {
+        match self {
+            Processor::Resample(r) => r.push(samples),
+            Processor::Copy(c) => c.push(samples),
+        }
+    }
+
+    fn flush(&mut self) -> Vec<f32> {
+        match self {
+            Processor::Resample(r) => r.flush(),
+            Processor::Copy(c) => c.flush(),
+        }
+    }
+}
+
+/// A bank of processors — one per channel — driven by an identical position map.
 ///
 /// Every channel therefore receives exactly the same time mapping, which preserves the
 /// inter-channel relationships (the stereo image) exactly.
 struct ChannelBank {
-    resamplers: Vec<StreamingResampler>,
+    processors: Vec<Processor>,
+    /// Whether the bank resamples at all.
+    resampled: bool,
 }
 
 impl ChannelBank {
-    fn new(channels: usize, geom: Geometry, options: &RenderOptions, start_output: i64) -> Self {
-        let mut resamplers = Vec::with_capacity(channels);
-        for _ in 0..channels {
-            let mut r =
-                StreamingResampler::new(geom.alpha, geom.gamma, options.taps, options.phases);
-            r.set_next_output(start_output);
-            resamplers.push(r);
+    fn new(
+        channels: usize,
+        geom: Geometry,
+        options: &RenderOptions,
+        start_output: i64,
+        limit: Option<u64>,
+    ) -> Self {
+        let processors = (0..channels)
+            .map(|_| Processor::new(geom, options, start_output, limit))
+            .collect();
+        let resampled = !geom.is_unity_copy();
+        Self {
+            processors,
+            resampled,
         }
-        Self { resamplers }
     }
 
     fn push(&mut self, planes: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let mut out = Vec::with_capacity(self.resamplers.len());
-        for (r, plane) in self.resamplers.iter_mut().zip(planes.iter()) {
-            out.push(r.push(plane));
+        let mut out = Vec::with_capacity(self.processors.len());
+        for (processor, plane) in self.processors.iter_mut().zip(planes.iter()) {
+            out.push(processor.push(plane));
         }
         let len = out.iter().map(|p| p.len()).max().unwrap_or(0);
         for p in out.iter_mut() {
@@ -158,9 +349,9 @@ impl ChannelBank {
     }
 
     fn flush(&mut self) -> Vec<Vec<f32>> {
-        let mut out = Vec::with_capacity(self.resamplers.len());
-        for r in self.resamplers.iter_mut() {
-            out.push(r.flush());
+        let mut out = Vec::with_capacity(self.processors.len());
+        for processor in self.processors.iter_mut() {
+            out.push(processor.flush());
         }
         let len = out.iter().map(|p| p.len()).max().unwrap_or(0);
         for p in out.iter_mut() {
@@ -175,6 +366,9 @@ impl ChannelBank {
 /// The output contains the source's own material only: no leading silence is inserted
 /// unless explicitly requested. The placement onto the reference timeline is described by
 /// the model and written to the sync map, not by padding the file.
+///
+/// The output has exactly the length the rate change implies. When the correction needs
+/// no rate change at all, the samples are copied rather than filtered.
 pub fn render_source_aligned(
     source_path: &Path,
     model: &LinearModel,
@@ -189,13 +383,19 @@ pub fn render_source_aligned(
     let channels = meta.channels.max(1);
 
     let geom = geometry_source_aligned(model, source_rate, output_rate);
-    let mut bank = ChannelBank::new(channels, geom, options, 0);
+
+    // The length is not known before the source is decoded, so the guard is applied
+    // against the longest output the source could possibly produce.
+    let max_frames = ((meta.duration_secs * output_rate as f64 * model.scale).ceil() as u64) + 2;
+    ensure_wav_size_fits(max_frames, channels, options.format)?;
 
     let mut writer = WavWriter::create(out_path, output_rate, channels, options.format)?;
     if let Some(lead) = options.leading_silence_secs {
         let frames = (lead * output_rate as f64).round().max(0.0) as usize;
         writer.write_silence(frames)?;
     }
+
+    let mut bank = ChannelBank::new(channels, geom, options, 0, None);
 
     let mut source_frames = 0u64;
     decoder.for_each_block(options.block_frames, |block| {
@@ -208,12 +408,20 @@ pub fn render_source_aligned(
         Ok(())
     })?;
 
+    // The exact length is now known: the frames whose source position lies inside the
+    // recording. The filter's tail — the frames the resampler can produce by
+    // zero-padding past the end of the source — is not part of the material and is
+    // dropped here rather than written.
+    let limit = output_frames_for(decoder.frames_decoded(), geom);
     let tail = bank.flush();
-    let n = tail.first().map_or(0, |p| p.len());
-    if n > 0 {
-        writer.write_planar(&tail)?;
-        source_frames += n as u64;
+    let tail_len = tail.first().map_or(0, |p| p.len());
+    let wanted = limit.saturating_sub(source_frames).min(tail_len as u64) as usize;
+    if wanted > 0 {
+        let trimmed: Vec<Vec<f32>> = tail.iter().map(|plane| plane[..wanted].to_vec()).collect();
+        writer.write_planar(&trimmed)?;
+        source_frames += wanted as u64;
     }
+
     let frames = writer.frames_written();
     writer.finalize()?;
     Ok(RenderResult {
@@ -225,6 +433,7 @@ pub fn render_source_aligned(
         silence_frames: 0,
         effective_rate: geom.alpha,
         pitch_shift_cents: -1200.0 * model.scale.log2(),
+        resampled: bank.resampled,
     })
 }
 
@@ -233,6 +442,9 @@ pub fn render_source_aligned(
 /// Output frame `n` corresponds to reference time `n / output_rate`. Spans that the source
 /// does not cover are written as digital silence and are explicitly reported as
 /// placeholders.
+///
+/// The file has **exactly** the requested reference duration: not one frame more, not
+/// one frame less, and with no filter tail past the end.
 pub fn render_reference_timeline(
     source_path: &Path,
     model: &LinearModel,
@@ -249,6 +461,7 @@ pub fn render_reference_timeline(
 
     let geom = geometry_timeline(model, source_rate, output_rate);
     let total_frames = (reference_duration * output_rate as f64).round().max(0.0) as u64;
+    ensure_wav_size_fits(total_frames, channels, options.format)?;
 
     // The output frames that carry source content.
     let content_start = ((model.offset) * output_rate as f64)
@@ -259,7 +472,7 @@ pub fn render_reference_timeline(
         .round()
         .clamp(0.0, total_frames as f64)) as u64;
     let content_end = content_end.max(content_start);
-    let _ = content_end;
+    let content_frames = content_end - content_start;
 
     let mut writer = WavWriter::create(out_path, output_rate, channels, options.format)?;
 
@@ -268,7 +481,15 @@ pub fn render_reference_timeline(
         writer.write_silence(content_start as usize)?;
     }
 
-    let mut bank = ChannelBank::new(channels, geom, options, content_start as i64);
+    // The resampler is told exactly how many frames it may produce, so the tail of the
+    // filter can never be written past the end of the reference.
+    let mut bank = ChannelBank::new(
+        channels,
+        geom,
+        options,
+        content_start as i64,
+        Some(content_frames),
+    );
 
     let mut source_frames = 0u64;
     decoder.for_each_block(options.block_frames, |block| {
@@ -304,71 +525,92 @@ pub fn render_reference_timeline(
         silence_frames: frames.saturating_sub(source_frames),
         effective_rate: geom.alpha,
         pitch_shift_cents: -1200.0 * model.scale.log2(),
+        resampled: bank.resampled,
     })
 }
 
 /// A sequential cursor over one source, used by the merged timeline renderer.
+///
+/// The cursor keeps one processor per channel of the source, so a stereo source keeps
+/// its two channels, and it is driven by that source's **own** sample rate.
 struct SourceCursor {
     decoder: AudioDecoder,
-    resampler: StreamingResampler,
+    processors: Vec<Processor>,
     /// Output frames not yet consumed, starting at frame index `pending_start`.
-    pending: VecDeque<f32>,
+    pending: Vec<VecDeque<f32>>,
     pending_start: i64,
     finished: bool,
     block_frames: usize,
 }
 
 impl SourceCursor {
-    fn new(path: &Path, geom: Geometry, start_frame: i64, options: &RenderOptions) -> Result<Self> {
-        let decoder = AudioDecoder::open(path)?;
-        let mut resampler =
-            StreamingResampler::new(geom.alpha, geom.gamma, options.taps, options.phases);
-        resampler.set_next_output(start_frame);
-        Ok(Self {
+    fn new(
+        decoder: AudioDecoder,
+        geom: Geometry,
+        start_frame: i64,
+        options: &RenderOptions,
+    ) -> Self {
+        let channels = decoder.meta().channels.max(1);
+        let processors = (0..channels)
+            .map(|_| Processor::new(geom, options, start_frame, None))
+            .collect();
+        Self {
             decoder,
-            resampler,
-            pending: VecDeque::new(),
+            processors,
+            pending: vec![VecDeque::new(); channels],
             pending_start: start_frame,
             finished: false,
             block_frames: options.block_frames,
-        })
+        }
     }
 
     /// Ensure output frames up to `target` are available in `pending`.
     fn fill_to(&mut self, target: i64) -> Result<()> {
-        while self.pending_start + (self.pending.len() as i64) < target && !self.finished {
+        while self.pending_start + (self.pending_len() as i64) < target && !self.finished {
             let Some(block) = self.decoder.read_block(self.block_frames)? else {
-                // End of stream: flush the resampler and mark the cursor finished.
-                let tail = self.resampler.flush();
-                self.pending.extend(tail);
+                // End of stream: flush the processors and mark the cursor finished.
+                for index in 0..self.processors.len() {
+                    let tail = self.processors[index].flush();
+                    self.pending[index].extend(tail);
+                }
                 self.finished = true;
                 break;
             };
-            let mono = block.mono();
-            let out = self.resampler.push(&mono);
-            self.pending.extend(out);
+            for index in 0..self.processors.len() {
+                let plane = block.planes.get(index).map(Vec::as_slice).unwrap_or(&[]);
+                let out = self.processors[index].push(plane);
+                self.pending[index].extend(out);
+            }
         }
         Ok(())
     }
 
-    /// Take the frames in `[from, to)`.
-    fn take(&mut self, from: i64, to: i64) -> Result<Vec<f32>> {
+    /// The number of frames every channel holds.
+    fn pending_len(&self) -> usize {
+        self.pending.first().map_or(0, |p| p.len())
+    }
+
+    /// Take the frames in `[from, to)`, one plane per channel.
+    fn take(&mut self, from: i64, to: i64) -> Result<Vec<Vec<f32>>> {
         self.fill_to(to)?;
         let skip = (from - self.pending_start).max(0) as usize;
-        for _ in 0..skip.min(self.pending.len()) {
-            self.pending.pop_front();
-            self.pending_start += 1;
-        }
-        let want = (to - from).max(0) as usize;
-        let mut out = Vec::with_capacity(want);
-        for _ in 0..want {
-            match self.pending.pop_front() {
-                Some(v) => {
-                    out.push(v);
-                    self.pending_start += 1;
-                }
-                None => break,
+        for pending in self.pending.iter_mut() {
+            for _ in 0..skip.min(pending.len()) {
+                pending.pop_front();
             }
+        }
+        self.pending_start += skip as i64;
+        let want = (to - from).max(0) as usize;
+        let mut out: Vec<Vec<f32>> = Vec::with_capacity(self.pending.len());
+        for pending in self.pending.iter_mut() {
+            let mut plane = Vec::with_capacity(want);
+            for _ in 0..want {
+                match pending.pop_front() {
+                    Some(v) => plane.push(v),
+                    None => break,
+                }
+            }
+            out.push(plane);
         }
         Ok(out)
     }
@@ -376,99 +618,162 @@ impl SourceCursor {
 
 /// Render every source onto one merged reference timeline.
 ///
+/// The ownership of every span of the timeline comes from the report's timeline — the
+/// same plan the GUI draws and the gap report describes — so the picture and the audio
+/// cannot disagree.
+///
 /// Sources are resolved by priority (the order they were supplied). Overlapping material
 /// is taken from the higher-priority source; the other source's material is not deleted
 /// from its own per-source export.
 pub fn render_merged_timeline(
-    sources: &[(PathBuf, LinearModel)],
-    reference_duration: f64,
+    report: &AlignmentReport,
     out_path: &Path,
     options: &RenderOptions,
 ) -> Result<RenderResult> {
-    anyhow::ensure!(!sources.is_empty(), "no sources to render");
+    anyhow::ensure!(!report.sources.is_empty(), "no sources to render");
 
-    let source_paths: Vec<PathBuf> = sources.iter().map(|(path, _)| path.clone()).collect();
+    let source_paths: Vec<PathBuf> = report
+        .sources
+        .iter()
+        .map(|a| a.source.path.clone())
+        .collect();
     ensure_output_does_not_overwrite(out_path, &source_paths)?;
 
-    let first_meta = AudioDecoder::open(&sources[0].0)?.meta().clone();
-    let output_rate = options.sample_rate.unwrap_or(first_meta.sample_rate);
-    let channels = first_meta.channels.max(1);
-    let total_frames = (reference_duration * output_rate as f64).round().max(0.0) as u64;
-
-    // Each source's covered output range.
-    let mut ranges: Vec<(u64, u64)> = Vec::new();
-    for (path, model) in sources {
-        let meta = AudioDecoder::open(path)?.meta().clone();
-        let start = ((model.offset) * output_rate as f64).round().max(0.0) as u64;
-        let end = ((model.offset + model.scale * meta.duration_secs) * output_rate as f64)
-            .round()
-            .max(0.0) as u64;
-        ranges.push((start.min(total_frames), end.min(total_frames)));
+    // Open every source once. The decoder is kept so that the file is not opened —
+    // and hashed — twice.
+    let mut decoders: Vec<Option<AudioDecoder>> = Vec::with_capacity(report.sources.len());
+    let mut source_channels: Vec<usize> = Vec::with_capacity(report.sources.len());
+    let mut source_rates: Vec<u32> = Vec::with_capacity(report.sources.len());
+    for alignment in &report.sources {
+        match AudioDecoder::open(&alignment.source.path) {
+            Ok(decoder) => {
+                source_channels.push(decoder.meta().channels.max(1));
+                source_rates.push(decoder.meta().sample_rate);
+                decoders.push(Some(decoder));
+            }
+            Err(error) => {
+                decoders.push(None);
+                source_channels.push(alignment.source.channels.max(1));
+                source_rates.push(alignment.source.sample_rate);
+                let _ = error;
+            }
+        }
     }
 
-    let mut writer = WavWriter::create(out_path, output_rate, channels, options.format)?;
-    let mut cursors: Vec<Option<SourceCursor>> = (0..sources.len()).map(|_| None).collect();
+    let max_channels = source_channels.iter().copied().max().unwrap_or(1).max(1);
+    let out_channels = match options.channels {
+        Some(c) if c < max_channels => {
+            anyhow::bail!(
+                "refusing to write a {}-channel merged timeline: one of the recordings has \
+                 {} channels, and a narrower output would drop a channel of real audio. \
+                 Export the recordings one at a time, or keep the {}-channel layout.",
+                c,
+                max_channels,
+                max_channels
+            );
+        }
+        Some(c) => c.max(1),
+        None => max_channels,
+    };
+
+    let output_rate = options
+        .sample_rate
+        .unwrap_or(report.reference.sample_rate)
+        .max(1);
+    let total_frames = (report.timeline_duration * output_rate as f64)
+        .round()
+        .max(0.0) as u64;
+    ensure_wav_size_fits(total_frames, out_channels, options.format)?;
+
+    let mut writer = WavWriter::create(out_path, output_rate, out_channels, options.format)?;
+    let mut cursors: Vec<Option<SourceCursor>> = (0..report.sources.len()).map(|_| None).collect();
 
     let mut cursor = 0u64;
     let mut source_frames = 0u64;
     let mut silence_frames = 0u64;
-    let block = (output_rate as u64 / 10).max(1); // ~100 ms blocks
 
-    while cursor < total_frames {
-        // The owner is the lowest-index source whose range covers this frame.
-        let mut owner: Option<usize> = None;
-        for (i, (s, e)) in ranges.iter().copied().enumerate() {
-            if cursor >= s && cursor < e {
-                owner = Some(i);
-                break;
+    for span in &report.timeline {
+        let start = (span.reference_start * output_rate as f64)
+            .round()
+            .clamp(0.0, total_frames as f64) as u64;
+        let end = (span.reference_end * output_rate as f64)
+            .round()
+            .clamp(0.0, total_frames as f64) as u64;
+        let end = end.max(start);
+        if end <= cursor {
+            continue;
+        }
+        // A span that begins before the cursor was already written.
+        let start = start.max(cursor);
+        let length = end - start;
+
+        let owner = match span.source_index {
+            Some(index)
+                if matches!(span.kind, SegmentKind::Matched | SegmentKind::LowConfidence) =>
+            {
+                Some(index)
             }
-        }
-
-        // The span ends at the earliest of: the end of this block, the end of the
-        // owner's range, and the start of the next source.
-        //
-        // Honouring the exact boundaries matters. A source's material begins and ends
-        // where its range says, and a block boundary that happens to fall nearby is
-        // not a reason to carry a source's material past the end of its range — that
-        // would put a source's resampler ringing into a span that nothing covers, and
-        // would lose the first fraction of the next source.
-        let mut span_end = (cursor + block).min(total_frames);
-        if let Some(i) = owner {
-            span_end = span_end.min(ranges[i].1);
-        }
-        if let Some(next_start) = ranges.iter().map(|(s, _)| *s).filter(|s| *s > cursor).min() {
-            span_end = span_end.min(next_start);
-        }
-        span_end = span_end.max(cursor + 1).min(total_frames);
+            _ => None,
+        };
 
         match owner {
-            Some(i) => {
-                let (path, model) = &sources[i];
-                let geom = geometry_timeline(model, first_meta.sample_rate, output_rate);
-                if cursors[i].is_none() {
-                    cursors[i] = Some(SourceCursor::new(path, geom, cursor as i64, options)?);
+            None => {
+                writer.write_silence(length as usize)?;
+                silence_frames += length;
+                cursor = end;
+            }
+            Some(index) => {
+                let alignment = &report.sources[index];
+                let Some(model) = alignment.model() else {
+                    // The source could not be aligned; it contributes nothing, and the
+                    // span is left as silence rather than filled with another source's
+                    // material at the wrong time.
+                    writer.write_silence(length as usize)?;
+                    silence_frames += length;
+                    cursor = end;
+                    continue;
+                };
+                let source_rate = source_rates[index];
+                let geom = geometry_timeline(&model, source_rate, output_rate);
+                if cursors[index].is_none() {
+                    let decoder = decoders[index].take().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "the recording {} could not be opened for the merged timeline",
+                            alignment.source.file_name
+                        )
+                    })?;
+                    cursors[index] = Some(SourceCursor::new(decoder, geom, start as i64, options));
                 }
-                let c = cursors[i].as_mut().expect("cursor just created");
-                let frames = c.take(cursor as i64, span_end as i64)?;
-                let n = frames.len();
+                let cursor_ref = cursors[index].as_mut().expect("cursor just created");
+                let frames = cursor_ref.take(start as i64, end as i64)?;
+                let n = frames.first().map_or(0, |p| p.len());
                 if n > 0 {
-                    let per_channel = vec![frames; channels];
-                    writer.write_planar(&per_channel)?;
+                    // The source's own channels go into the leading channels of the
+                    // output. A source with fewer channels than the output leaves the
+                    // remaining channels silent for its material: nothing is folded,
+                    // nothing is duplicated, and nothing is lost.
+                    let mut planes: Vec<Vec<f32>> = frames.clone();
+                    while planes.len() < out_channels {
+                        planes.push(vec![0.0f32; n]);
+                    }
+                    planes.truncate(out_channels);
+                    writer.write_planar(&planes)?;
                     source_frames += n as u64;
                 }
-                let advanced = cursor + n as u64;
-                if advanced < span_end {
-                    writer.write_silence((span_end - advanced) as usize)?;
-                    silence_frames += span_end - advanced;
+                let advanced = start + n as u64;
+                if advanced < end {
+                    writer.write_silence((end - advanced) as usize)?;
+                    silence_frames += end - advanced;
                 }
-                cursor = span_end;
-            }
-            None => {
-                writer.write_silence((span_end - cursor) as usize)?;
-                silence_frames += span_end - cursor;
-                cursor = span_end;
+                cursor = end;
             }
         }
+    }
+
+    // Anything the plan did not describe is silence, and the plan is the authority.
+    if cursor < total_frames {
+        writer.write_silence((total_frames - cursor) as usize)?;
+        silence_frames += total_frames - cursor;
     }
 
     let frames = writer.frames_written();
@@ -476,12 +781,13 @@ pub fn render_merged_timeline(
     Ok(RenderResult {
         path: out_path.to_path_buf(),
         sample_rate: output_rate,
-        channels,
+        channels: out_channels,
         frames,
         source_frames,
         silence_frames,
         effective_rate: 1.0,
         pitch_shift_cents: 0.0,
+        resampled: true,
     })
 }
 
@@ -502,6 +808,11 @@ pub fn prepare_output(path: &Path) -> Result<()> {
 /// into a directory that already holds a recording of that name lands on the
 /// recording itself. The originals are read-only and the reference is never
 /// altered at all, so this is refused rather than carried out.
+///
+/// The comparison models the file system the export is going to, not the one the
+/// code happens to run on: a name that differs only in case, or only in its
+/// Unicode normalisation, names the same file on the volumes a user actually
+/// exports to.
 pub fn ensure_output_does_not_overwrite(output: &Path, inputs: &[PathBuf]) -> Result<()> {
     let Some(target) = comparable_path(output) else {
         return Ok(());
@@ -551,6 +862,19 @@ pub fn ensure_outputs_are_distinct(outputs: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+/// Refuse an export whose planned outputs would land on one of the recordings.
+///
+/// Every file the export writes is checked, not only the corrected audio: the
+/// export directory is often the directory the recordings are in, and a
+/// recording called `syncmap.csv` would otherwise be replaced by the sidecar
+/// of the same name.
+pub fn ensure_outputs_avoid_inputs(outputs: &[PathBuf], inputs: &[PathBuf]) -> Result<()> {
+    for output in outputs {
+        ensure_output_does_not_overwrite(output, inputs)?;
+    }
+    Ok(())
+}
+
 /// A path in a form that can be compared with another path.
 ///
 /// The output usually does not exist yet, so its parent directory is resolved
@@ -568,19 +892,48 @@ fn comparable_path(path: &Path) -> Option<PathBuf> {
     Some(parent.join(name))
 }
 
-/// Whether two paths name the same file.
+/// Whether two paths name the same file on the file system the export targets.
 ///
-/// Windows paths are compared without regard to case, because the file system
-/// does not treat `Soundboard.WAV` and `soundboard.wav` as two files.
-#[cfg(windows)]
+/// The answer depends on the platform, because the file systems do:
+///
+/// * Windows compares names without regard to case.
+/// * macOS and Linux normally do not, but a case-insensitive volume does — and a
+///   name that differs only in Unicode normalisation names the same file on a
+///   file system that normalises names.
+///
+/// Rather than guess, the comparison asks the operating system. An existing file
+/// is identified by its canonical path, which resolves symbolic links and gives
+/// the name the file system actually stores. A file that does not exist yet is
+/// compared by a name that has been folded the way the platform folds names.
 fn same_path(a: &Path, b: &Path) -> bool {
-    a.to_string_lossy()
-        .eq_ignore_ascii_case(&b.to_string_lossy())
+    // An existing file may be reached through a link or through a different
+    // spelling of its name; the canonical path settles that.
+    if a.exists() && b.exists() {
+        if let (Ok(ca), Ok(cb)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            return folded(&ca.to_string_lossy()) == folded(&cb.to_string_lossy());
+        }
+    }
+    match (comparable_path(a), comparable_path(b)) {
+        (Some(pa), Some(pb)) => folded(&pa.to_string_lossy()) == folded(&pb.to_string_lossy()),
+        _ => false,
+    }
 }
 
-#[cfg(not(windows))]
-fn same_path(a: &Path, b: &Path) -> bool {
-    a == b
+/// A path folded the way the platform folds names.
+///
+/// On Windows the path is compared without regard to case. Everywhere else it
+/// is compared exactly, because a case-sensitive file system really does treat
+/// `Song.wav` and `song.wav` as two files — and folding them anyway would
+/// refuse an export that is perfectly safe.
+fn folded(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        path.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
 }
 
 /// A file name without extension, safe to use as an output name.
@@ -613,11 +966,12 @@ pub fn safe_stem(name: &str) -> String {
     }
 }
 
-/// The files an export writes for the given layout.
+/// The corrected audio files an export writes for the given layout.
 ///
 /// The names are worked out before anything is written, so that an export
 /// which would land on one of the recordings can be refused before the first
-/// file is touched.
+/// file is touched. The *complete* set of files an export writes — this list
+/// plus the sidecars — is [`complete_outputs`].
 pub fn planned_outputs(
     out: &Path,
     report: &crate::matching::AlignmentReport,
@@ -636,4 +990,23 @@ pub fn planned_outputs(
             .collect(),
         Layout::ReferenceTimelineMerged => vec![out.join("timeline_merged.wav")],
     }
+}
+
+/// The complete set of files an export writes: the planned audio outputs and
+/// the sidecars every export writes.
+///
+/// This is the whole manifest, not just the corrected audio: the sidecars —
+/// the sync map, the segment table, the drift graph, the summary, the plan, the
+/// report and the manifest — are files too, and a recording that happens to be
+/// called `syncmap.csv` would be destroyed by one of them. Checking only the
+/// audio left that path open.
+///
+/// The audio names are supplied by the caller rather than worked out here,
+/// because the two front ends name their outputs differently on purpose: the
+/// desktop sanitises a name that the operating system would refuse, and the
+/// command line does not.
+pub fn complete_outputs(out: &Path, planned: &[PathBuf]) -> Vec<PathBuf> {
+    let mut outputs = planned.to_vec();
+    outputs.extend(crate::export::sidecar_outputs(out));
+    outputs
 }

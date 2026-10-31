@@ -19,7 +19,8 @@ use crate::platform;
 use crate::settings::{self, AppSettings};
 use crate::state::{
     drift_verdict, expand_dropped_paths, format_duration, format_label, is_wav, layout_label,
-    metrics_for, AnchorFields, ExportSettings, FileEntry, TaskProgress,
+    metrics_for, status_for, verification_for, AnchorFields, ExportSettings, FileEntry,
+    TaskProgress,
 };
 use crate::timeline;
 
@@ -387,6 +388,23 @@ impl StageSyncApp {
         })
     }
 
+    /// The key that identifies a recording for the purposes of an anchor.
+    ///
+    /// The content hash identifies the recording exactly and survives the file
+    /// being moved. The full path is used until the background probe has
+    /// finished and the hash is known.
+    ///
+    /// A file name is deliberately *not* used: two recordings in different
+    /// folders share one, and an anchor meant for one of them must not be
+    /// applied to the other.
+    fn anchor_key(&self, entry: &FileEntry) -> String {
+        entry
+            .meta
+            .as_ref()
+            .map(|meta| meta.sha256.clone())
+            .unwrap_or_else(|| entry.path.to_string_lossy().to_string())
+    }
+
     // --- Import ------------------------------------------------------------
 
     /// Add files to the list.
@@ -494,6 +512,43 @@ impl StageSyncApp {
         self.notice = Some(format!("{name} was removed — run the analysis again."));
     }
 
+    /// Make one of the target recordings the reference.
+    ///
+    /// The first file added becomes the reference by default, which is rarely
+    /// what the user meant when they dropped a folder: the first file in a
+    /// directory listing is whichever one the file system happened to list
+    /// first. This makes the choice explicit and deliberate.
+    ///
+    /// The recording that was the reference becomes a target, so nothing is
+    /// lost, and the results are dropped because they describe the old
+    /// reference.
+    fn make_reference(&mut self, index: usize) {
+        if index >= self.targets.len() {
+            return;
+        }
+        let entry = self.targets.remove(index);
+        // The promoted recording's own anchor goes with it. An anchor belongs to
+        // the recording it was set for, and the reference is not a target: leaving
+        // it behind would move the *old* reference instead.
+        if index < self.anchors.len() {
+            self.anchors.remove(index);
+        }
+        let name = entry.name();
+        let previous = self.reference.take();
+        self.reference = Some(entry);
+        if let Some(previous) = previous {
+            // The old reference becomes a target, with no anchor of its own.
+            self.targets.push(previous);
+            self.anchors.push(AnchorFields::default());
+        }
+        self.report = None;
+        self.export_outcome = None;
+        self.selection = Some(Selection::Reference);
+        self.notice = Some(format!(
+            "{name} is now the reference — run the analysis again."
+        ));
+    }
+
     // --- Jobs --------------------------------------------------------------
 
     /// Start the analysis of the reference against the targets.
@@ -528,13 +583,18 @@ impl StageSyncApp {
         };
         // Each anchor belongs to the recording it was set for, so one recording
         // can be pinned without dragging the others onto the same point.
+        //
+        // The anchor is keyed by the recording's identity — its content hash
+        // when the probe has finished, its full path otherwise — and never by
+        // its file name: two recordings called `song.wav` in different folders
+        // are two different recordings.
         config.manual_anchors = self
             .targets
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
                 let anchor = self.anchor_value(index)?;
-                Some((entry.name(), anchor))
+                Some((self.anchor_key(entry), anchor))
             })
             .collect();
         if !config.manual_anchors.is_empty() {
@@ -771,6 +831,7 @@ impl StageSyncApp {
 
         let mut select: Option<Selection> = None;
         let mut remove: Option<usize> = None;
+        let mut promote: Option<usize> = None;
         for index in 0..self.targets.len() {
             let entry = self.targets[index].clone();
             let metrics = self
@@ -781,6 +842,12 @@ impl StageSyncApp {
                 let selected = self.selection == Some(Selection::Target(index));
                 if ui.selectable_label(selected, entry.name()).clicked() {
                     select = Some(Selection::Target(index));
+                }
+                if ui
+                    .add_enabled(self.running.is_none(), egui::Button::new("Make reference"))
+                    .clicked()
+                {
+                    promote = Some(index);
                 }
                 if ui
                     .add_enabled(self.running.is_none(), egui::Button::new("✖"))
@@ -811,6 +878,16 @@ impl StageSyncApp {
             if let Some(metrics) = metrics {
                 wrapped(ui, metrics_line(&metrics));
             }
+            // The status says what is actually known, and the verification says
+            // what was checked in the exported audio. They are different things,
+            // and the user needs both.
+            let status = status_for(self.report.as_ref(), index);
+            let verification = verification_for(self.report.as_ref(), index);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(status.label());
+                ui.separator();
+                ui.label(verification.label());
+            });
             ui.separator();
         }
 
@@ -819,6 +896,9 @@ impl StageSyncApp {
         }
         if let Some(index) = remove {
             self.remove_target(index);
+        }
+        if let Some(index) = promote {
+            self.make_reference(index);
         }
     }
 
@@ -1073,9 +1153,10 @@ impl StageSyncApp {
                 wrapped(
                     ui,
                     format!(
-                        "Use this when the automatic match fails. The anchor is a hard constraint \
-                         on {name}: the model of that recording is forced through the point you \
-                         give, and the other recordings are left alone."
+                        "Use this when the automatic match fails. The anchor is an override on \
+                         {name}: the model of that recording is forced through the point you give, \
+                         whatever the match found, and the other recordings are left alone. The \
+                         rate the match measured is kept; only the placement moves."
                     ),
                 );
 
@@ -1107,6 +1188,25 @@ impl StageSyncApp {
                     ui.label("s");
                 });
 
+                // What the last analysis actually did with the anchor. The user has
+                // to be able to see whether it was applied, and whether it moved the
+                // placement away from the match.
+                if let Some(state) = self
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.sources.get(index))
+                    .and_then(|alignment| alignment.override_state)
+                {
+                    wrapped(
+                        ui,
+                        format!(
+                            "Applied: the placement was moved {:+.1} ms relative to the automatic \
+                             match (which placed it at {:+.3} s).",
+                            state.shift_ms, state.automatic_offset
+                        ),
+                    );
+                }
+
                 let mut apply = false;
                 let mut clear = false;
                 ui.horizontal(|ui| {
@@ -1117,7 +1217,7 @@ impl StageSyncApp {
                         apply = true;
                     }
                     if ui
-                        .add_enabled(active, egui::Button::new("Clear anchor"))
+                        .add_enabled(active, egui::Button::new("Reset to automatic"))
                         .clicked()
                     {
                         clear = true;
@@ -1574,5 +1674,75 @@ mod tests {
                 "at {width}x{height} the centre was only {central:.0} px wide"
             );
         }
+    }
+
+    /// Promoting a target to the reference must not move anybody's anchor.
+    ///
+    /// The targets and their anchors are two lists that are read by the same
+    /// index, so anything that removes one of them has to remove the other.
+    /// Promoting a target used to push the promoted recording's own anchor onto
+    /// the recording that became a target instead — the anchor of one file
+    /// ended up on another — and it left the two lists different lengths, so
+    /// every later anchor was read against the wrong recording.
+    #[test]
+    fn promoting_a_target_to_the_reference_keeps_the_anchors_with_their_files() {
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        app.reference = Some(FileEntry::new(PathBuf::from("reference.wav")));
+        app.targets = vec![
+            FileEntry::new(PathBuf::from("first.wav")),
+            FileEntry::new(PathBuf::from("second.wav")),
+        ];
+        app.anchors = vec![
+            AnchorFields {
+                source_time: 1.0,
+                reference_time: 11.0,
+                active: true,
+            },
+            AnchorFields {
+                source_time: 2.0,
+                reference_time: 12.0,
+                active: true,
+            },
+        ];
+
+        // Promote the *second* target.
+        app.make_reference(1);
+
+        assert_eq!(
+            app.reference.as_ref().map(|e| e.path.clone()),
+            Some(PathBuf::from("second.wav")),
+            "the wrong recording became the reference"
+        );
+        assert_eq!(app.targets.len(), 2, "the old reference was lost");
+        assert_eq!(
+            app.targets[0].path,
+            PathBuf::from("first.wav"),
+            "the first target moved"
+        );
+        assert_eq!(
+            app.targets[1].path,
+            PathBuf::from("reference.wav"),
+            "the old reference did not become the last target"
+        );
+
+        // The two lists stay the same length, and the anchor that is left
+        // belongs to the recording that is still a target.
+        assert_eq!(
+            app.anchors.len(),
+            app.targets.len(),
+            "the anchors and the targets are different lengths"
+        );
+        let anchor = app
+            .anchor_value(0)
+            .expect("the first target keeps its anchor");
+        assert_eq!((anchor.source_time, anchor.reference_time), (1.0, 11.0));
+
+        // The recording that became the reference had an anchor of its own; it
+        // went with it, rather than landing on the recording that took its
+        // place.
+        assert!(
+            app.anchor_value(1).is_none(),
+            "the promoted recording's anchor was left behind on another file"
+        );
     }
 }

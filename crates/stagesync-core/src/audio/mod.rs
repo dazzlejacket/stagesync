@@ -10,5 +10,5 @@ pub mod windows;
 
 pub use decode::{AudioDecoder, DecodedBlock, SourceMeta};
 pub use hash::sha256_file;
-pub use wav::{WavFormat, WavReader, WavWriter};
+pub use wav::{ensure_wav_size_fits, WavFormat, WavReader, WavWriter, RIFF_MAX_DATA_BYTES};
 pub use windows::{extract_windows, WindowRequest};
