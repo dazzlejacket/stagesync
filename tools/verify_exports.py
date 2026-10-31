@@ -56,6 +56,39 @@ How the measurements are made, and why
   removed, compared against the same distance for the uncorrected source when
   one is given.
 
+The default sampling policy
+---------------------------
+When `--positions` is not given, the tool measures a **predetermined** grid.
+The grid is chosen from the geometry of the two files alone, *before* any
+measurement is made, so that no position can be selected because it happened
+to measure well:
+
+* The grid covers the **interior** of the material the two files share.  A
+  position is on the corrected file's own timeline; the reference material it
+  corresponds to sits at `offset + position`.  Every measurement window has to
+  fit wholly inside both files, so the interior is bounded by `edge`, the
+  half-width the widest of the three windows needs (the waveform window, the
+  envelope comparison's lag search, and the pitch window -- see
+  `measurement_edge`):
+
+      lo = edge + max(0, -offset)
+      hi = min(corrected.duration, reference.duration - offset) - edge
+
+  A position outside that interior would measure silence or nothing at all,
+  which is why the reference bound is reduced by `edge` too and not only the
+  corrected-file bound.
+* The number of positions follows the length of the shared material, so a long
+  recording is sampled more densely than a short one while the cost of a run
+  stays bounded:
+
+      N = clamp(ceil((hi - lo) / 170 s) + 1, 12, 48)
+
+* The positions themselves are `linspace(lo, hi, N)`: uniform, and fixed
+  before any measurement is made.
+
+The count is never smaller than the 12-position floor, so the default grid is
+never sparser than the fixed 8-position grid it replaces.
+
 Usage
 -----
     python tools/verify_exports.py \
@@ -82,7 +115,7 @@ import numpy as np
 from scipy import signal
 
 TOOL_NAME = "verify_exports.py"
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 COORDINATE_SYSTEM = (
     "reference_time_seconds = scale * source_time_seconds + offset_seconds; "
     "drift_ppm = (scale - 1) * 1_000_000"
@@ -91,6 +124,20 @@ POSITION_SEMANTICS = (
     "seconds on the corrected file's own timeline "
     "(== source-clock time for a source-aligned render); the reference time it "
     "should correspond to is offset + position"
+)
+# Machine-readable outcomes.  `insufficient_data` is not an error: the run
+# completed and reported what it could measure, but it did not establish an
+# accuracy figure.  The two are distinguished by this status, not by the exit
+# code, so a caller has to read the status to know which happened.
+STATUS_SUCCESS = "success"
+STATUS_INSUFFICIENT_DATA = "insufficient_data"
+SAMPLING_POLICY = (
+    "predetermined uniform grid over the interior the two files share: "
+    "lo = edge + max(0, -offset), hi = min(corrected.duration, "
+    "reference.duration - offset) - edge, N = clamp(ceil((hi - lo) / "
+    "spacing_seconds) + 1, min_positions, max_positions), positions = "
+    "linspace(lo, hi, N); chosen from the geometry alone, before any "
+    "measurement is made"
 )
 
 
@@ -688,7 +735,15 @@ class Config:
     f0_window_secs: float = 2.0
     min_active_fraction: float = 0.5
     rms_floor: float = 1e-4
-    default_positions: int = 8
+    # ---- the default sampling policy ---------------------------------------
+    # The default grid is predetermined: it is derived from the geometry of the
+    # two files alone, before a single measurement is made, so that no position
+    # can be selected because it happened to measure well.  The count scales
+    # with the length of the shared material and is clamped, so the cost of a
+    # run stays bounded.
+    default_min_positions: int = 12
+    default_max_positions: int = 48
+    default_spacing_secs: float = 170.0
 
 
 @dataclass
@@ -721,19 +776,69 @@ class PositionResult:
         }
 
 
+def measurement_edge(cfg: Config) -> float:
+    """The half-width that every measurement window needs around a position.
+
+    Three windows are read at each position and every one of them has to lie
+    wholly inside the material it measures:
+
+    * the waveform window (the headline measurement) uses
+      `window_secs / 2 + margin_secs`;
+    * the envelope comparison reads the reference over `window_secs / 2` plus
+      its `+-envelope_max_lag_secs` lag search plus a second of slack;
+    * the pitch window uses `f0_window_secs / 2`.
+
+    The largest of the three is the edge the default grid has to keep clear.
+    """
+    wave = cfg.window_secs / 2.0 + cfg.margin_secs
+    envelope = cfg.window_secs / 2.0 + cfg.envelope_max_lag_secs + 1.0
+    pitch = cfg.f0_window_secs / 2.0
+    return max(wave, envelope, pitch)
+
+
+def default_grid_count(span: float, cfg: Config) -> int:
+    """How many positions the default grid puts on `span` seconds of shared material.
+
+    One position per `default_spacing_secs` of shared material, plus one so
+    that both ends of the span are covered, clamped to
+    [default_min_positions, default_max_positions]: a longer recording is
+    sampled more densely, and the cost of a run stays bounded.
+    """
+    if span <= 0.0:
+        return 0
+    count = int(math.ceil(span / cfg.default_spacing_secs)) + 1
+    return max(cfg.default_min_positions, min(cfg.default_max_positions, count))
+
+
 def default_positions(
     corrected: WavFile, reference: WavFile, offset: float, cfg: Config
 ) -> list[float]:
-    """Spread measurement positions over the region where both files have audio."""
-    half = cfg.window_secs / 2.0 + cfg.margin_secs
-    # The corrected file covers reference times [offset, offset + duration].
-    lo = max(0.0, -offset)
-    hi = min(corrected.duration, reference.duration - offset)
-    lo = max(lo, half)
-    hi = min(hi, corrected.duration - half)
+    """The predetermined default measurement grid.
+
+    The grid is chosen from the geometry of the two files alone, before
+    anything is measured, so that no position can be picked because it
+    happened to measure well.  It is a uniform grid over the *interior* of the
+    material the two files share:
+
+        edge = the half-width the widest measurement window needs
+        lo   = edge + max(0, -offset)
+        hi   = min(corrected.duration, reference.duration - offset) - edge
+
+    The reference material for a position sits at `offset + position`, so the
+    reference bound is reduced by `edge` as well: a position whose window
+    reaches past the end of the reference measures silence, and a position
+    whose window lies entirely past it measures nothing at all.
+
+    The number of positions follows the length of the shared material (see
+    `default_grid_count`), so a long recording is sampled more densely than a
+    short one within a bounded cost.
+    """
+    edge = measurement_edge(cfg)
+    lo = edge + max(0.0, -offset)
+    hi = min(corrected.duration, reference.duration - offset) - edge
     if hi <= lo:
         return []
-    count = max(2, cfg.default_positions)
+    count = default_grid_count(hi - lo, cfg)
     return [float(x) for x in np.linspace(lo, hi, count)]
 
 
@@ -1194,6 +1299,19 @@ def summarise(results: list[PositionResult], cfg: Config) -> dict[str, Any]:
     return summary
 
 
+def result_status(summary: dict[str, Any]) -> str:
+    """The machine-readable outcome of a run.
+
+    `insufficient_data` means the run completed but did not establish an
+    accuracy figure (too few positions were measured reliably); it is not an
+    error, and the exit code says so.  The distinction is carried by this
+    status, so a caller can tell the two outcomes apart without parsing prose.
+    """
+    if summary.get("confidence") == "high":
+        return STATUS_SUCCESS
+    return STATUS_INSUFFICIENT_DATA
+
+
 def print_table(results: list[PositionResult], cfg: Config) -> None:
     header = (
         f"{'#':>3}  {'source_t':>9}  {'ref_t':>9}  {'wave_ms':>9}  {'peak':>7}  "
@@ -1299,6 +1417,9 @@ def print_summary(summary: dict[str, Any], cfg: Config) -> None:
             "  RESULT: residual statistics above are the measured alignment error of "
             "this export at the listed positions."
         )
+    # Machine-readable outcome: a caller can tell an established figure from
+    # insufficient data without reading the prose above.
+    print(f"  STATUS: {result_status(summary)}")
 
 
 def markdown_report(
@@ -1307,6 +1428,7 @@ def markdown_report(
     model: dict[str, Any],
     inputs: dict[str, Any],
     cfg: Config,
+    sampling: Optional[dict[str, Any]] = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# StageSync export verification")
@@ -1335,6 +1457,20 @@ def markdown_report(
     lines.append("")
     lines.append("## Positions")
     lines.append("")
+    if sampling is not None:
+        mode = sampling.get("mode", "default_grid")
+        if mode == "explicit":
+            lines.append(
+                f"- positions were given explicitly on the command line "
+                f"({sampling.get('count', len(results))} position(s))"
+            )
+        else:
+            lines.append(
+                f"- positions: the default grid, {sampling.get('count', len(results))} "
+                "position(s) spread uniformly over the interior the two files share"
+            )
+            lines.append(f"- default grid rule: {sampling.get('policy', '')}")
+        lines.append("")
     lines.append(
         "| # | source time (s) | reference time (s) | waveform GCC-PHAT (ms) | peak | z | "
         "ratio | agree | envelope NCC (ms) | env peak | difference (ms) | pitch (cents) | status |"
@@ -1422,6 +1558,7 @@ def markdown_report(
             line += f" (uncorrected source: {spectral['uncorrected_lsd_db_median']:.2f} dB)"
         lines.append(line)
     lines.append(f"- confidence: **{summary['confidence']}**")
+    lines.append(f"- status: **{result_status(summary)}**")
     lines.append("")
     for warning in summary["warnings"]:
         lines.append(f"> **{warning}**")
@@ -1446,7 +1583,17 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Sign convention: a positive residual means the corrected audio is AHEAD "
             "of the reference.  Positions are seconds on the corrected file's own "
-            "timeline; the reference time they correspond to is offset + position."
+            "timeline; the reference time they correspond to is offset + position.\n"
+            "\n"
+            "Default sampling policy (used when --positions is not given): a "
+            "predetermined uniform grid over the interior the two files share, "
+            "chosen from the geometry alone, before any measurement is made.  "
+            "lo = edge + max(0, -offset), hi = min(corrected.duration, "
+            "reference.duration - offset) - edge, where edge is the half-width the "
+            "widest measurement window needs, so every window lies wholly inside "
+            "both files.  The count is N = clamp(ceil((hi - lo) / 170 s) + 1, 12, "
+            "48): a longer recording is sampled more densely, within a bounded "
+            "cost.  The positions are linspace(lo, hi, N)."
         ),
     )
     parser.add_argument("--corrected", required=True, type=Path, help="corrected WAV to verify")
@@ -1466,7 +1613,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         nargs="*",
         default=None,
-        help="measurement positions in seconds on the corrected file's timeline",
+        help=(
+            "measurement positions in seconds on the corrected file's timeline "
+            "(default: the predetermined uniform grid described in the epilog)"
+        ),
     )
     parser.add_argument(
         "--analysis-rate",
@@ -1576,6 +1726,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     positions = args.positions
+    explicit_positions = positions is not None
     if positions is None:
         positions = default_positions(corrected, reference, args.offset, cfg)
         if not positions:
@@ -1614,6 +1765,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "scale": args.scale,
         "offset_seconds": args.offset,
         "drift_ppm": (args.scale - 1.0) * 1_000_000.0,
+    }
+    # How the positions were chosen.  A reader has to be able to tell a
+    # predetermined grid from a hand-picked list of positions.
+    sampling = {
+        "mode": "explicit" if explicit_positions else "default_grid",
+        "policy": SAMPLING_POLICY,
+        "count": len(positions),
+        "edge_seconds": measurement_edge(cfg),
+        "min_positions": cfg.default_min_positions,
+        "max_positions": cfg.default_max_positions,
+        "spacing_seconds": cfg.default_spacing_secs,
     }
     inputs = {
         "files": [
@@ -1666,6 +1828,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
           f"{' + ' if do_waveform and do_envelope else ''}"
           f"{'envelope NCC' if do_envelope else ''}"
           f"{' + pitch' if args.pitch else ''}")
+    if explicit_positions:
+        print(f"  positions : {len(positions)} given explicitly")
+    else:
+        print(
+            f"  positions : {len(positions)} from the default grid (uniform over the "
+            "shared interior; see --help)"
+        )
     print()
     print_table(results, cfg)
     print_summary(summary, cfg)
@@ -1677,6 +1846,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "coordinate_system": COORDINATE_SYSTEM,
             "position_semantics": POSITION_SEMANTICS,
             "sign_convention": "positive residual = the corrected audio is ahead of the reference",
+            "status": result_status(summary),
+            "sampling": sampling,
             "inputs": inputs,
             "model": model,
             "configuration": {
@@ -1717,7 +1888,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"  JSON report written to {args.json}")
 
     if args.markdown:
-        text = markdown_report(results, summary, model, inputs, cfg)
+        text = markdown_report(results, summary, model, inputs, cfg, sampling)
         try:
             args.markdown.parent.mkdir(parents=True, exist_ok=True)
             args.markdown.write_text(text, encoding="utf-8")
