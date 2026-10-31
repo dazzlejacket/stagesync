@@ -16,10 +16,22 @@
 # `fail-fast: false` keeps a Linux-only failure from hiding the state of the
 # macOS and Windows jobs. It does not make any step optional.
 #
-# Runner label note: `macos-15-intel` is the Intel (x86_64) macOS runner.
-# GitHub retires runner images from time to time; if it disappears from the
-# runner list, replace it with the current Intel label (`macos-26-intel`).
-# Nothing else in the job changes.
+# Pinned inputs, so that a green run is a statement about a known set of
+# tools and not about whatever happened to be current that week:
+#
+#   * the actions are pinned to exact release tags, not to a floating major
+#     version;
+#   * the runner images are pinned to explicit labels;
+#   * the Rust toolchain is pinned to the version in
+#     `packaging/rust-toolchain.toml`, the same one the packaging scripts
+#     insist on. Bumping it is a deliberate change, made in one place.
+#
+# Runner label note: `macos-15-intel` is the Intel (x86_64) macOS runner, and
+# `macos-15` is the Apple Silicon one; the two are the same macOS release on
+# different processors. GitHub retires runner images from time to time; if a
+# label disappears from the runner list, replace it with the current
+# equivalent (`macos-26-intel` and `macos-26` respectively) and say so in the
+# commit that does it.
 
 name: CI
 
@@ -35,6 +47,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The Rust toolchain every job builds with. It has to be the version in
+  # packaging/rust-toolchain.toml: the packaging scripts refuse to build a
+  # release with a different compiler.
+  STAGESYNC_RUST_TOOLCHAIN: '1.99.1'
 
 jobs:
   build:
@@ -46,12 +62,12 @@ jobs:
       matrix:
         include:
           - name: linux-x86_64
-            os: ubuntu-latest
+            os: ubuntu-22.04
             desktop_bin: stagesync-desktop
             cli_bin: stagesync
             artifact: stagesync-linux-x86_64
           - name: macos-arm64
-            os: macos-latest
+            os: macos-15
             desktop_bin: stagesync-desktop
             cli_bin: stagesync
             artifact: stagesync-macos-arm64
@@ -61,14 +77,14 @@ jobs:
             cli_bin: stagesync
             artifact: stagesync-macos-x86_64
           - name: windows-x86_64
-            os: windows-latest
+            os: windows-2022
             desktop_bin: stagesync-desktop.exe
             cli_bin: stagesync.exe
             artifact: stagesync-windows-x86_64
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
 
       - name: Install the Linux build dependencies
         if: runner.os == 'Linux'
@@ -97,12 +113,13 @@ jobs:
             pkg-config
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: ${{ env.STAGESYNC_RUST_TOOLCHAIN }}
           components: rustfmt, clippy
 
       - name: Cache the cargo registry and the git checkouts
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -112,7 +129,7 @@ jobs:
             cargo-home-${{ runner.os }}-${{ matrix.name }}-
 
       - name: Cache the build directory
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: target
           key: target-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
@@ -132,7 +149,7 @@ jobs:
         run: cargo build --release --workspace
 
       - name: Upload the release binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: ${{ matrix.artifact }}
           path: |

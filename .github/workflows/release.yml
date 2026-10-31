@@ -10,6 +10,10 @@
 #   macOS     a .app bundle in a .tar.gz, and a .dmg
 #   Linux     an AppImage, a .deb and a tarball of the AppDir
 #
+# Every package carries the licence and third-party notice bundle. The
+# notices are generated from Cargo.lock for every build, and each packaging
+# job checks that the bundle really is inside the artefact it produced.
+#
 # The macOS artefacts are **unsigned and not notarised**: they are produced
 # from an unsigned build and are not signed with a Developer ID certificate,
 # so macOS Gatekeeper will quarantine them on first launch. The release notes
@@ -19,6 +23,16 @@
 # no `|| true` around a packaging step. If a tool is missing, the packaging
 # script says so in its own output and the missing artefact shows up as a
 # missing file in the release.
+#
+# Pinned inputs, because a release has to be reproducible:
+#
+#   * the actions are pinned to exact release tags, not to a floating major
+#     version;
+#   * the runner images are pinned to explicit labels, so the operating
+#     system the binary is built on does not change under the release;
+#   * the Rust toolchain is pinned to one version, the one in
+#     `packaging/rust-toolchain.toml`, which the packaging scripts check;
+#   * the release publishes a SHA-256 manifest of every artefact.
 
 name: Release
 
@@ -40,23 +54,29 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The Rust toolchain every job builds with. It has to be the version in
+  # packaging/rust-toolchain.toml: the packaging scripts refuse to build a
+  # release with a different compiler.
+  STAGESYNC_RUST_TOOLCHAIN: '1.99.1'
 
 jobs:
   test:
     name: Test suite
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.ref || github.ref }}
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.STAGESYNC_RUST_TOOLCHAIN }}
 
       - name: Cache the cargo registry and the git checkouts
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -90,20 +110,22 @@ jobs:
 
   build-windows:
     name: Windows x64
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 45
     needs: test
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.ref || github.ref }}
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.STAGESYNC_RUST_TOOLCHAIN }}
 
       - name: Cache the cargo registry and the git checkouts
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -113,7 +135,7 @@ jobs:
             cargo-home-${{ runner.os }}-
 
       - name: Cache the build directory
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: target
           key: target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
@@ -136,13 +158,41 @@ jobs:
           }
           & $makensis /VERSION
 
+      - name: Check the NSIS script before it is compiled
+        run: python packaging/windows/check_nsi.py packaging/windows/installer.nsi
+
       - name: Build the portable ZIP and the installer
         shell: pwsh
         run: |
           ./packaging/windows/build.ps1 -Profile release -OutputDir dist/windows
 
+      - name: Check the contents of the portable ZIP
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = Get-ChildItem dist/windows/*.zip | Select-Object -First 1
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+          try {
+            $names = $archive.Entries | ForEach-Object { $_.FullName }
+            $names | Sort-Object | ForEach-Object { Write-Output $_ }
+            foreach ($required in @(
+                    'portable/stagesync-desktop.exe',
+                    'portable/notices/LICENSE-MIT',
+                    'portable/notices/LICENSE-APACHE',
+                    'portable/notices/LICENSE-MPL-2.0',
+                    'portable/notices/THIRD_PARTY_NOTICES.md',
+                    'portable/notices/SOURCE-AVAILABILITY.md')) {
+              if ($names -notcontains $required) {
+                throw "the ZIP does not contain '$required'"
+              }
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
       - name: Upload the Windows artefacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: stagesync-windows-x86_64
           path: dist/windows
@@ -157,7 +207,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15
             arch: arm64
             artifact: stagesync-macos-arm64
           - os: macos-15-intel
@@ -165,15 +215,17 @@ jobs:
             artifact: stagesync-macos-x86_64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.ref || github.ref }}
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.STAGESYNC_RUST_TOOLCHAIN }}
 
       - name: Cache the cargo registry and the git checkouts
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -183,7 +235,7 @@ jobs:
             cargo-home-${{ runner.os }}-${{ matrix.arch }}-
 
       - name: Cache the build directory
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: target
           key: target-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
@@ -198,8 +250,23 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: '11.0'
         run: bash packaging/macos/build.sh
 
+      - name: Check the contents of the application bundle
+        run: |
+          set -euo pipefail
+          bundle="dist/macos/StageSync.app"
+          test -d "${bundle}" || { echo "the application bundle was not built" >&2; exit 1; }
+          find "${bundle}/Contents/Resources/notices" -type f | sort
+          for required in LICENSE-MIT LICENSE-APACHE LICENSE-MPL-2.0 \
+                        THIRD_PARTY_NOTICES.md SOURCE-AVAILABILITY.md; do
+            test -f "${bundle}/Contents/Resources/notices/${required}" \
+              || { echo "the bundle does not contain notices/${required}" >&2; exit 1; }
+          done
+          archive="$(ls dist/macos/*.app.tar.gz | head -n 1)"
+          tar -tzf "${archive}" | grep -E 'Resources/notices/(LICENSE-MIT|LICENSE-APACHE|LICENSE-MPL-2.0|THIRD_PARTY_NOTICES.md|SOURCE-AVAILABILITY.md)$' \
+            || { echo "the archive does not carry the notices" >&2; exit 1; }
+
       - name: Upload the macOS artefacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: ${{ matrix.artifact }}
           path: dist/macos
@@ -207,20 +274,22 @@ jobs:
 
   build-linux:
     name: Linux x86_64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     needs: test
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.ref || github.ref }}
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.STAGESYNC_RUST_TOOLCHAIN }}
 
       - name: Cache the cargo registry and the git checkouts
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -230,7 +299,7 @@ jobs:
             cargo-home-${{ runner.os }}-
 
       - name: Cache the build directory
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: target
           key: target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
@@ -241,7 +310,9 @@ jobs:
         run: |
           # The eframe/winit development headers, plus the two tools the Linux
           # packaging step needs: `mksquashfs` (called by appimagetool) and
-          # `desktop-file-validate` (called by appimagetool as well).
+          # `desktop-file-validate` (called by appimagetool as well), and
+          # `binutils`, which the packaging step reads the binary's shared
+          # library dependencies with.
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgl1-mesa-dev \
@@ -258,30 +329,42 @@ jobs:
             pkg-config \
             squashfs-tools \
             desktop-file-utils \
+            binutils \
             file
 
-      - name: Install appimagetool
-        run: |
-          # appimagetool is distributed as an AppImage, and the GitHub runner has
-          # no FUSE, so the AppImage cannot be mounted. It is extracted instead
-          # and its own AppRun is put on PATH under the name `appimagetool`.
-          set -euo pipefail
-          mkdir -p "$HOME/appimagetool" "$HOME/.local/bin"
-          cd "$HOME/appimagetool"
-          curl -fsSL -o appimagetool.AppImage \
-            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-          chmod +x appimagetool.AppImage
-          ./appimagetool.AppImage --appimage-extract
-          printf '#!/bin/sh\nexec "%s/squashfs-root/AppRun" "$@"\n' "$HOME/appimagetool" \
-            > "$HOME/.local/bin/appimagetool"
-          chmod +x "$HOME/.local/bin/appimagetool"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
       - name: Build the AppImage, the deb and the AppDir tarball
+        # appimagetool is downloaded, checksum-verified and extracted by the
+        # packaging script itself, from the pinned release in
+        # packaging/linux/appimagetool.sha256. The `continuous` release it
+        # used to come from is a moving target: the bytes under that URL
+        # change without notice.
         run: bash packaging/linux/build.sh
 
+      - name: Check the contents of the Linux artefacts
+        run: |
+          set -euo pipefail
+          for required in LICENSE-MIT LICENSE-APACHE LICENSE-MPL-2.0 \
+                        THIRD_PARTY_NOTICES.md SOURCE-AVAILABILITY.md; do
+            test -f "dist/linux/notices/${required}" \
+              || { echo "the notices bundle does not contain ${required}" >&2; exit 1; }
+          done
+          deb="$(ls dist/linux/*.deb | head -n 1)"
+          dpkg-deb --contents "${deb}" | grep -E 'usr/share/doc/stagesync/notices/(LICENSE-MIT|LICENSE-APACHE|LICENSE-MPL-2.0|THIRD_PARTY_NOTICES.md|SOURCE-AVAILABILITY.md)$' \
+            || { echo "the deb does not carry the notices" >&2; exit 1; }
+          tarball="$(ls dist/linux/*.tar.gz | head -n 1)"
+          tar -tzf "${tarball}" | grep -E 'AppDir/usr/share/doc/stagesync/notices/(LICENSE-MIT|LICENSE-APACHE|LICENSE-MPL-2.0|THIRD_PARTY_NOTICES.md|SOURCE-AVAILABILITY.md)$' \
+            || { echo "the AppDir tarball does not carry the notices" >&2; exit 1; }
+          appimage="$(ls dist/linux/*.AppImage | head -n 1)"
+          rm -rf dist/linux/appimage-extract
+          "${appimage}" --appimage-extract > /dev/null
+          for required in LICENSE-MIT LICENSE-APACHE LICENSE-MPL-2.0 \
+                        THIRD_PARTY_NOTICES.md SOURCE-AVAILABILITY.md; do
+            test -f "squashfs-root/usr/share/doc/stagesync/notices/${required}" \
+              || { echo "the AppImage does not carry notices/${required}" >&2; exit 1; }
+          done
+
       - name: Upload the Linux artefacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: stagesync-linux-x86_64
           path: dist/linux
@@ -293,13 +376,13 @@ jobs:
       - build-windows
       - build-macos
       - build-linux
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - name: Download every artefact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
           path: artifacts
           merge-multiple: true
@@ -309,8 +392,21 @@ jobs:
           ls -l artifacts
           test -n "$(ls -A artifacts)" || { echo 'no artefacts were downloaded' >&2; exit 1; }
 
+      - name: Write the release checksum manifest
+        run: |
+          set -euo pipefail
+          cd artifacts
+          # The per-platform manifests are overwritten by the merge above, so
+          # one manifest is written here, over every artefact that is about to
+          # be published.
+          rm -f SHA256SUMS.txt
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%P\n' \
+            | sort | xargs -d '\n' sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          sha256sum --check --strict SHA256SUMS.txt
+
       - name: Publish the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.6.2
         with:
           tag_name: ${{ github.event_name == 'push' && github.ref_name || inputs.ref || github.ref_name }}
           name: StageSync ${{ github.event_name == 'push' && github.ref_name || inputs.ref || github.ref_name }}
@@ -322,6 +418,7 @@ jobs:
             artifacts/*.deb
             artifacts/*.exe
             artifacts/*.dmg
+            artifacts/SHA256SUMS.txt
           body: |
             StageSync ${{ github.event_name == 'push' && github.ref_name || inputs.ref || github.ref_name }}
 
@@ -340,6 +437,25 @@ jobs:
             | macOS x64 | `stagesync-<version>-macos-x86_64.app.tar.gz`, `stagesync-<version>-macos-x86_64.dmg` |
             | Linux x86_64 | `stagesync-<version>-linux-x86_64.AppImage`, `stagesync-<version>-linux-x86_64.deb`, `stagesync-<version>-linux-x86_64.tar.gz` |
 
+            ### Checksums
+
+            `SHA256SUMS.txt` lists the SHA-256 of every file above. Check it
+            with:
+
+            ```
+            sha256sum --check SHA256SUMS.txt
+            ```
+
+            ### Licences and notices
+
+            Every package carries the licence and third-party notice bundle:
+            the licence of StageSync itself (MIT or Apache-2.0, your choice),
+            the licence of every dependency in `Cargo.lock`, and the Mozilla
+            Public License 2.0 that covers the `symphonia` audio decoder.
+            `symphonia` is linked into the binary, so the MPL requires that its
+            source be available; the `SOURCE-AVAILABILITY.md` file in the
+            bundle says exactly where to get it and how to verify it.
+
             ### The macOS builds are unsigned and not notarised
 
             The macOS artefacts are built from an unsigned binary. They are
@@ -357,3 +473,10 @@ jobs:
             *Microsoft Visual C++ Redistributable* installed. The installer
             does not bundle it; the README inside the portable ZIP explains how
             to get it.
+
+            ### The Linux AppImage needs a host C library and a graphics driver
+
+            The AppImage bundles the application and the X11/XCB/Wayland
+            client libraries it needs. It does not bundle the C library or the
+            graphics driver: those come from the host. The `.deb` package
+            declares the same libraries as ordinary dependencies.
