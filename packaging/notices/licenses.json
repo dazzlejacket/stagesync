@@ -1,0 +1,3484 @@
+{
+  "_comment": [
+    "Licence metadata for every package pinned in Cargo.lock.",
+    "",
+    "Cargo.lock records names, versions and checksums, but it does NOT record",
+    "licences. This file is therefore a checked-in transcription of the",
+    "licence each package declares in its own published manifest, taken from",
+    "the per-dependency table in LICENSES.md (Appendix A), which was read",
+    "from the crates.io manifests of the exact versions pinned here.",
+    "",
+    "packaging/notices/generate_notices.py reads Cargo.lock and this file to",
+    "produce THIRD_PARTY_NOTICES.md. If a dependency is added or upgraded,",
+    "this file has to be updated in the same change; the generator fails",
+    "loudly when a package in Cargo.lock has no entry here."
+  ],
+  "source": "LICENSES.md Appendix A (licence field of each crate's published Cargo.toml)",
+  "packages": [
+    {
+      "name": "ab_glyph",
+      "version": "0.2.32",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/alexheretic/ab-glyph>",
+      "kind": "registry"
+    },
+    {
+      "name": "ab_glyph_rasterizer",
+      "version": "0.1.10",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/alexheretic/ab-glyph>",
+      "kind": "registry"
+    },
+    {
+      "name": "accesskit",
+      "version": "0.25.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/AccessKit/accesskit>",
+      "kind": "registry"
+    },
+    {
+      "name": "accesskit_atspi_common",
+      "version": "0.21.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/AccessKit/accesskit>",
+      "kind": "registry"
+    },
+    {
+      "name": "accesskit_consumer",
+      "version": "0.39.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/AccessKit/accesskit>",
+      "kind": "registry"
+    },
+    {
+      "name": "accesskit_ios",
+      "version": "0.2.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/AccessKit/accesskit>",
+      "kind": "registry"
+    },
+    {
+      "name": "accesskit_macos",
+      "version": "0.27.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/AccessKit/accesskit>",
+      "kind": "registry"
+    },
+    {
+      "name": "accesskit_unix",
+      "version": "0.24.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/AccessKit/accesskit>",
+      "kind": "registry"
+    },
+    {
+      "name": "accesskit_windows",
+      "version": "0.35.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/AccessKit/accesskit>",
+      "kind": "registry"
+    },
+    {
+      "name": "accesskit_winit",
+      "version": "0.34.2",
+      "license": "Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/AccessKit/accesskit>",
+      "kind": "registry"
+    },
+    {
+      "name": "adler2",
+      "version": "2.0.1",
+      "license": "0BSD OR MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-0BSD`, `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/oyvindln/adler2>",
+      "kind": "registry"
+    },
+    {
+      "name": "ahash",
+      "version": "0.8.12",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/tkaitchuck/ahash>",
+      "kind": "registry"
+    },
+    {
+      "name": "aho-corasick",
+      "version": "1.1.5",
+      "license": "Unlicense OR MIT",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/aho-corasick>",
+      "kind": "registry"
+    },
+    {
+      "name": "allocator-api2",
+      "version": "0.2.21",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/zakarumych/allocator-api2>",
+      "kind": "registry"
+    },
+    {
+      "name": "android-activity",
+      "version": "0.6.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE`, `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-mobile/android-activity>",
+      "kind": "registry"
+    },
+    {
+      "name": "android-properties",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/miklelappo/android-properties>",
+      "kind": "registry"
+    },
+    {
+      "name": "android_system_properties",
+      "version": "0.1.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/nical/android_system_properties>",
+      "kind": "registry"
+    },
+    {
+      "name": "anstream",
+      "version": "1.0.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-cli/anstyle.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "anstyle",
+      "version": "1.0.14",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-cli/anstyle.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "anstyle-parse",
+      "version": "1.0.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-cli/anstyle.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "anstyle-query",
+      "version": "1.1.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-cli/anstyle.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "anstyle-wincon",
+      "version": "3.0.11",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-cli/anstyle.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "anyhow",
+      "version": "1.0.104",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/anyhow>",
+      "kind": "registry"
+    },
+    {
+      "name": "arboard",
+      "version": "3.7.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE.txt`, `LICENSE-MIT.txt` &mdash; upstream repository: <https://github.com/1Password/arboard>",
+      "kind": "registry"
+    },
+    {
+      "name": "arrayref",
+      "version": "0.3.9",
+      "license": "BSD-2-Clause",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/droundy/arrayref>",
+      "kind": "registry"
+    },
+    {
+      "name": "arrayvec",
+      "version": "0.7.8",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/bluss/arrayvec>",
+      "kind": "registry"
+    },
+    {
+      "name": "as-raw-xcb-connection",
+      "version": "1.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/psychon/as-raw-xcb-connection>",
+      "kind": "registry"
+    },
+    {
+      "name": "ash",
+      "version": "0.38.0+1.3.281",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/ash-rs/ash>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-broadcast",
+      "version": "0.7.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/async-broadcast>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-channel",
+      "version": "2.5.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/async-channel>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-executor",
+      "version": "1.14.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/async-executor>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-io",
+      "version": "2.6.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/async-io>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-lock",
+      "version": "3.4.2",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/async-lock>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-process",
+      "version": "2.5.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/async-process>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-recursion",
+      "version": "1.2.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dcchut/async-recursion>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-signal",
+      "version": "0.2.14",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/async-signal>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-task",
+      "version": "4.7.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/async-task>",
+      "kind": "registry"
+    },
+    {
+      "name": "async-trait",
+      "version": "0.1.92",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/async-trait>",
+      "kind": "registry"
+    },
+    {
+      "name": "atomic-waker",
+      "version": "1.1.2",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-THIRD-PARTY` &mdash; upstream repository: <https://github.com/smol-rs/atomic-waker>",
+      "kind": "registry"
+    },
+    {
+      "name": "atspi",
+      "version": "0.29.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE2.txt`, `LICENSE-MIT.txt` &mdash; upstream repository: <https://github.com/odilia-app/atspi>",
+      "kind": "registry"
+    },
+    {
+      "name": "atspi-common",
+      "version": "0.13.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE2.txt`, `LICENSE-MIT.txt` &mdash; upstream repository: <https://github.com/odilia-app/atspi>",
+      "kind": "registry"
+    },
+    {
+      "name": "atspi-proxies",
+      "version": "0.13.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE2.txt`, `LICENSE-MIT.txt` &mdash; upstream repository: <https://github.com/odilia-app/atspi>",
+      "kind": "registry"
+    },
+    {
+      "name": "autocfg",
+      "version": "1.5.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/cuviper/autocfg>",
+      "kind": "registry"
+    },
+    {
+      "name": "bit-set",
+      "version": "0.10.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/contain-rs/bit-set>",
+      "kind": "registry"
+    },
+    {
+      "name": "bit-vec",
+      "version": "0.9.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/contain-rs/bit-vec>",
+      "kind": "registry"
+    },
+    {
+      "name": "bitflags",
+      "version": "1.3.2",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/bitflags/bitflags>",
+      "kind": "registry"
+    },
+    {
+      "name": "bitflags",
+      "version": "2.13.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/bitflags/bitflags>",
+      "kind": "registry"
+    },
+    {
+      "name": "block-buffer",
+      "version": "0.10.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/utils>",
+      "kind": "registry"
+    },
+    {
+      "name": "block2",
+      "version": "0.5.1",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "block2",
+      "version": "0.6.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "blocking",
+      "version": "1.7.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/blocking>",
+      "kind": "registry"
+    },
+    {
+      "name": "bumpalo",
+      "version": "3.20.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/fitzgen/bumpalo>",
+      "kind": "registry"
+    },
+    {
+      "name": "bytemuck",
+      "version": "1.25.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/Lokathor/bytemuck>",
+      "kind": "registry"
+    },
+    {
+      "name": "bytemuck_derive",
+      "version": "1.12.1",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/Lokathor/bytemuck>",
+      "kind": "registry"
+    },
+    {
+      "name": "byteorder-lite",
+      "version": "0.1.0",
+      "license": "Unlicense OR MIT",
+      "license_text": "Published crate package: `LICENSE-MIT` &mdash; upstream repository: <https://github.com/image-rs/byteorder-lite>",
+      "kind": "registry"
+    },
+    {
+      "name": "bytes",
+      "version": "1.12.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/bytes>",
+      "kind": "registry"
+    },
+    {
+      "name": "calloop",
+      "version": "0.13.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/Smithay/calloop>",
+      "kind": "registry"
+    },
+    {
+      "name": "calloop",
+      "version": "0.14.5",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/Smithay/calloop>",
+      "kind": "registry"
+    },
+    {
+      "name": "calloop-wayland-source",
+      "version": "0.3.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/calloop-wayland-source>",
+      "kind": "registry"
+    },
+    {
+      "name": "calloop-wayland-source",
+      "version": "0.4.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/calloop-wayland-source>",
+      "kind": "registry"
+    },
+    {
+      "name": "cc",
+      "version": "1.10.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/cc-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "cfg-if",
+      "version": "1.0.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/cfg-if>",
+      "kind": "registry"
+    },
+    {
+      "name": "cfg_aliases",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/katharostech/cfg_aliases>",
+      "kind": "registry"
+    },
+    {
+      "name": "cgl",
+      "version": "0.3.2",
+      "license": "MIT / Apache-2.0",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/cgl-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "clap",
+      "version": "4.6.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/clap-rs/clap>",
+      "kind": "registry"
+    },
+    {
+      "name": "clap_builder",
+      "version": "4.6.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/clap-rs/clap>",
+      "kind": "registry"
+    },
+    {
+      "name": "clap_derive",
+      "version": "4.6.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/clap-rs/clap>",
+      "kind": "registry"
+    },
+    {
+      "name": "clap_lex",
+      "version": "1.1.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/clap-rs/clap>",
+      "kind": "registry"
+    },
+    {
+      "name": "clipboard-win",
+      "version": "5.4.3",
+      "license": "BSL-1.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/DoumanAsh/clipboard-win>",
+      "kind": "registry"
+    },
+    {
+      "name": "codespan-reporting",
+      "version": "0.13.1",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/brendanzab/codespan>",
+      "kind": "registry"
+    },
+    {
+      "name": "color",
+      "version": "0.3.3",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/color>",
+      "kind": "registry"
+    },
+    {
+      "name": "colorchoice",
+      "version": "1.0.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-cli/anstyle.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "combine",
+      "version": "4.6.9",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/Marwes/combine>",
+      "kind": "registry"
+    },
+    {
+      "name": "concurrent-queue",
+      "version": "2.5.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/concurrent-queue>",
+      "kind": "registry"
+    },
+    {
+      "name": "core-foundation",
+      "version": "0.9.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "core-foundation-sys",
+      "version": "0.8.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "core-graphics",
+      "version": "0.23.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "core-graphics-types",
+      "version": "0.1.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "cpufeatures",
+      "version": "0.2.17",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/utils>",
+      "kind": "registry"
+    },
+    {
+      "name": "crc32fast",
+      "version": "1.5.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/srijs/rust-crc32fast>",
+      "kind": "registry"
+    },
+    {
+      "name": "crossbeam-deque",
+      "version": "0.8.8",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/crossbeam-rs/crossbeam>",
+      "kind": "registry"
+    },
+    {
+      "name": "crossbeam-epoch",
+      "version": "0.9.21",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/crossbeam-rs/crossbeam>",
+      "kind": "registry"
+    },
+    {
+      "name": "crossbeam-utils",
+      "version": "0.8.23",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/crossbeam-rs/crossbeam>",
+      "kind": "registry"
+    },
+    {
+      "name": "crunchy",
+      "version": "0.2.4",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/eira-fransham/crunchy>",
+      "kind": "registry"
+    },
+    {
+      "name": "crypto-common",
+      "version": "0.1.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/traits>",
+      "kind": "registry"
+    },
+    {
+      "name": "cursor-icon",
+      "version": "1.2.0",
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/rust-windowing/cursor-icon>",
+      "kind": "registry"
+    },
+    {
+      "name": "defmt",
+      "version": "1.2.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/knurling-rs/defmt>",
+      "kind": "registry"
+    },
+    {
+      "name": "defmt-macros",
+      "version": "1.2.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/knurling-rs/defmt>",
+      "kind": "registry"
+    },
+    {
+      "name": "defmt-parser",
+      "version": "1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/knurling-rs/defmt>",
+      "kind": "registry"
+    },
+    {
+      "name": "digest",
+      "version": "0.10.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/traits>",
+      "kind": "registry"
+    },
+    {
+      "name": "dispatch",
+      "version": "0.2.0",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <http://github.com/SSheldon/rust-dispatch>",
+      "kind": "registry"
+    },
+    {
+      "name": "dispatch2",
+      "version": "0.3.1",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "displaydoc",
+      "version": "0.2.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/yaahc/displaydoc>",
+      "kind": "registry"
+    },
+    {
+      "name": "dlib",
+      "version": "0.5.3",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/elinorbgr/dlib>",
+      "kind": "registry"
+    },
+    {
+      "name": "document-features",
+      "version": "0.2.12",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/slint-ui/document-features>",
+      "kind": "registry"
+    },
+    {
+      "name": "downcast-rs",
+      "version": "1.2.1",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/marcianx/downcast-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "dpi",
+      "version": "0.1.2",
+      "license": "Apache-2.0 AND MIT",
+      "license_text": "Published crate package: `LICENSE`, `LICENSE-LIBM-MIT` &mdash; upstream repository: <https://github.com/rust-windowing/winit>",
+      "kind": "registry"
+    },
+    {
+      "name": "ecolor",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui>",
+      "kind": "registry"
+    },
+    {
+      "name": "eframe",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/eframe>",
+      "kind": "registry"
+    },
+    {
+      "name": "egui",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui>",
+      "kind": "registry"
+    },
+    {
+      "name": "egui-wgpu",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui-wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "egui-winit",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui-winit>",
+      "kind": "registry"
+    },
+    {
+      "name": "egui_glow",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui_glow>",
+      "kind": "registry"
+    },
+    {
+      "name": "egui_system_font_provider",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui_system_font_provider>",
+      "kind": "registry"
+    },
+    {
+      "name": "either",
+      "version": "1.19.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rayon-rs/either>",
+      "kind": "registry"
+    },
+    {
+      "name": "emath",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/emath>",
+      "kind": "registry"
+    },
+    {
+      "name": "endi",
+      "version": "1.1.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE-MIT` &mdash; upstream repository: <https://github.com/zeenix/endi>",
+      "kind": "registry"
+    },
+    {
+      "name": "enumflags2",
+      "version": "0.7.12",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/meithecatte/enumflags2>",
+      "kind": "registry"
+    },
+    {
+      "name": "enumflags2_derive",
+      "version": "0.7.12",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/meithecatte/enumflags2>",
+      "kind": "registry"
+    },
+    {
+      "name": "env_filter",
+      "version": "2.0.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-cli/env_logger>",
+      "kind": "registry"
+    },
+    {
+      "name": "env_logger",
+      "version": "0.11.11",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-cli/env_logger>",
+      "kind": "registry"
+    },
+    {
+      "name": "epaint",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/epaint>",
+      "kind": "registry"
+    },
+    {
+      "name": "epaint_default_fonts",
+      "version": "0.37.0",
+      "license": "(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/epaint_default_fonts>",
+      "kind": "registry"
+    },
+    {
+      "name": "equivalent",
+      "version": "1.0.3",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/indexmap-rs/equivalent>",
+      "kind": "registry"
+    },
+    {
+      "name": "errno",
+      "version": "0.3.14",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/lambda-fairy/rust-errno>",
+      "kind": "registry"
+    },
+    {
+      "name": "error-code",
+      "version": "3.4.0",
+      "license": "BSL-1.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/DoumanAsh/error-code>",
+      "kind": "registry"
+    },
+    {
+      "name": "euclid",
+      "version": "0.22.14",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/euclid>",
+      "kind": "registry"
+    },
+    {
+      "name": "event-listener",
+      "version": "5.4.2",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/event-listener>",
+      "kind": "registry"
+    },
+    {
+      "name": "event-listener-strategy",
+      "version": "0.5.4",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/event-listener-strategy>",
+      "kind": "registry"
+    },
+    {
+      "name": "extended",
+      "version": "0.1.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/depp/extended-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "fastrand",
+      "version": "2.5.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/fastrand>",
+      "kind": "registry"
+    },
+    {
+      "name": "fax",
+      "version": "0.2.7",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdf-rs/fax>",
+      "kind": "registry"
+    },
+    {
+      "name": "fdeflate",
+      "version": "0.3.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/image-rs/fdeflate>",
+      "kind": "registry"
+    },
+    {
+      "name": "fearless_simd",
+      "version": "0.4.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/fearless_simd>",
+      "kind": "registry"
+    },
+    {
+      "name": "find-msvc-tools",
+      "version": "0.1.15",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/cc-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "fixedbitset",
+      "version": "0.5.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/petgraph/fixedbitset>",
+      "kind": "registry"
+    },
+    {
+      "name": "flate2",
+      "version": "1.1.10",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/flate2-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "foldhash",
+      "version": "0.1.5",
+      "license": "Zlib",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/orlp/foldhash>",
+      "kind": "registry"
+    },
+    {
+      "name": "foldhash",
+      "version": "0.2.0",
+      "license": "Zlib",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/orlp/foldhash>",
+      "kind": "registry"
+    },
+    {
+      "name": "font-types",
+      "version": "0.12.7",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/googlefonts/fontations>",
+      "kind": "registry"
+    },
+    {
+      "name": "fontique",
+      "version": "0.11.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/parley>",
+      "kind": "registry"
+    },
+    {
+      "name": "foreign-types",
+      "version": "0.5.0",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/sfackler/foreign-types>",
+      "kind": "registry"
+    },
+    {
+      "name": "foreign-types-macros",
+      "version": "0.2.4",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/sfackler/foreign-types>",
+      "kind": "registry"
+    },
+    {
+      "name": "foreign-types-shared",
+      "version": "0.3.1",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/sfackler/foreign-types>",
+      "kind": "registry"
+    },
+    {
+      "name": "form_urlencoded",
+      "version": "1.2.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/rust-url>",
+      "kind": "registry"
+    },
+    {
+      "name": "futures-core",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/futures-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "futures-io",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/futures-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "futures-lite",
+      "version": "2.6.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-THIRD-PARTY` &mdash; upstream repository: <https://github.com/smol-rs/futures-lite>",
+      "kind": "registry"
+    },
+    {
+      "name": "futures-macro",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/futures-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "futures-task",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/futures-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "futures-util",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/futures-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "generic-array",
+      "version": "0.14.7",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/fizyk20/generic-array.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "gethostname",
+      "version": "1.1.0",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://codeberg.org/swsnr/gethostname.rs.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "getrandom",
+      "version": "0.3.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-random/getrandom>",
+      "kind": "registry"
+    },
+    {
+      "name": "getrandom",
+      "version": "0.4.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-random/getrandom>",
+      "kind": "registry"
+    },
+    {
+      "name": "gl_generator",
+      "version": "0.14.0",
+      "license": "Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/brendanzab/gl-rs/>",
+      "kind": "registry"
+    },
+    {
+      "name": "glifo",
+      "version": "0.3.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/vello>",
+      "kind": "registry"
+    },
+    {
+      "name": "glow",
+      "version": "0.17.0",
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/grovesNL/glow>",
+      "kind": "registry"
+    },
+    {
+      "name": "glutin",
+      "version": "0.32.3",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-windowing/glutin>",
+      "kind": "registry"
+    },
+    {
+      "name": "glutin-winit",
+      "version": "0.5.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-windowing/glutin>",
+      "kind": "registry"
+    },
+    {
+      "name": "glutin_egl_sys",
+      "version": "0.7.1",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-windowing/glutin>",
+      "kind": "registry"
+    },
+    {
+      "name": "glutin_glx_sys",
+      "version": "0.6.1",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-windowing/glutin>",
+      "kind": "registry"
+    },
+    {
+      "name": "glutin_wgl_sys",
+      "version": "0.6.1",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-windowing/glutin>",
+      "kind": "registry"
+    },
+    {
+      "name": "gpu-allocator",
+      "version": "0.28.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/Traverse-Research/gpu-allocator>",
+      "kind": "registry"
+    },
+    {
+      "name": "guillotiere",
+      "version": "0.7.0",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/nical/guillotiere>",
+      "kind": "registry"
+    },
+    {
+      "name": "half",
+      "version": "2.7.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/VoidStarKat/half-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "harfrust",
+      "version": "0.12.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/harfbuzz/harfrust>",
+      "kind": "registry"
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.15.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/hashbrown>",
+      "kind": "registry"
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.16.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/hashbrown>",
+      "kind": "registry"
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.17.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/hashbrown>",
+      "kind": "registry"
+    },
+    {
+      "name": "heck",
+      "version": "0.5.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/withoutboats/heck>",
+      "kind": "registry"
+    },
+    {
+      "name": "hermit-abi",
+      "version": "0.5.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/hermit-os/hermit-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "hex",
+      "version": "0.4.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/KokaKiwi/rust-hex>",
+      "kind": "registry"
+    },
+    {
+      "name": "hound",
+      "version": "3.5.1",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `license` &mdash; upstream repository: <https://github.com/ruuda/hound>",
+      "kind": "registry"
+    },
+    {
+      "name": "icu_collections",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "icu_locale_core",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "icu_normalizer",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "icu_normalizer_data",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "icu_properties",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "icu_properties_data",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "icu_provider",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "idna",
+      "version": "1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/rust-url/>",
+      "kind": "registry"
+    },
+    {
+      "name": "idna_adapter",
+      "version": "1.2.2",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/hsivonen/idna_adapter>",
+      "kind": "registry"
+    },
+    {
+      "name": "image",
+      "version": "0.25.10",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/image-rs/image>",
+      "kind": "registry"
+    },
+    {
+      "name": "indexmap",
+      "version": "2.14.2",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/indexmap-rs/indexmap>",
+      "kind": "registry"
+    },
+    {
+      "name": "is_terminal_polyfill",
+      "version": "1.70.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/polyfill-rs/is_terminal_polyfill>",
+      "kind": "registry"
+    },
+    {
+      "name": "itertools",
+      "version": "0.15.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-itertools/itertools>",
+      "kind": "registry"
+    },
+    {
+      "name": "itoa",
+      "version": "1.0.18",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/itoa>",
+      "kind": "registry"
+    },
+    {
+      "name": "jiff",
+      "version": "0.2.38",
+      "license": "Unlicense OR MIT",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/jiff>",
+      "kind": "registry"
+    },
+    {
+      "name": "jiff-core",
+      "version": "0.1.1",
+      "license": "Unlicense OR MIT",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/jiff>",
+      "kind": "registry"
+    },
+    {
+      "name": "jiff-static",
+      "version": "0.2.38",
+      "license": "Unlicense OR MIT",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/jiff>",
+      "kind": "registry"
+    },
+    {
+      "name": "jni",
+      "version": "0.22.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/jni-rs/jni-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "jni-macros",
+      "version": "0.22.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/jni-rs/jni-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "jni-sys",
+      "version": "0.3.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/jni-rs/jni-sys>",
+      "kind": "registry"
+    },
+    {
+      "name": "jni-sys",
+      "version": "0.4.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/jni-rs/jni-sys>",
+      "kind": "registry"
+    },
+    {
+      "name": "jni-sys-macros",
+      "version": "0.4.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/jni-rs/jni-sys>",
+      "kind": "registry"
+    },
+    {
+      "name": "jobserver",
+      "version": "0.1.35",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/jobserver-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "js-sys",
+      "version": "0.3.106",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys>",
+      "kind": "registry"
+    },
+    {
+      "name": "khronos-egl",
+      "version": "6.0.0",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/timothee-haudebourg/khronos-egl>",
+      "kind": "registry"
+    },
+    {
+      "name": "khronos_api",
+      "version": "3.1.0",
+      "license": "Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/brendanzab/gl-rs/>",
+      "kind": "registry"
+    },
+    {
+      "name": "kurbo",
+      "version": "0.13.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/kurbo>",
+      "kind": "registry"
+    },
+    {
+      "name": "lazy_static",
+      "version": "1.5.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang-nursery/lazy-static.rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "libc",
+      "version": "0.2.191",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/libc>",
+      "kind": "registry"
+    },
+    {
+      "name": "libloading",
+      "version": "0.8.9",
+      "license": "ISC",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/nagisa/rust_libloading/>",
+      "kind": "registry"
+    },
+    {
+      "name": "libm",
+      "version": "0.2.16",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/rust-lang/compiler-builtins>",
+      "kind": "registry"
+    },
+    {
+      "name": "libredox",
+      "version": "0.1.25",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://gitlab.redox-os.org/redox-os/libredox.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "linebender_resource_handle",
+      "version": "0.1.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/raw_resource_handle>",
+      "kind": "registry"
+    },
+    {
+      "name": "linux-raw-sys",
+      "version": "0.12.1",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-Apache-2.0_WITH_LLVM-exception`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/sunfishcode/linux-raw-sys>",
+      "kind": "registry"
+    },
+    {
+      "name": "linux-raw-sys",
+      "version": "0.4.15",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-Apache-2.0_WITH_LLVM-exception`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/sunfishcode/linux-raw-sys>",
+      "kind": "registry"
+    },
+    {
+      "name": "litemap",
+      "version": "0.8.3",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "litrs",
+      "version": "1.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/LukasKalbertodt/litrs>",
+      "kind": "registry"
+    },
+    {
+      "name": "lock_api",
+      "version": "0.4.14",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/Amanieu/parking_lot>",
+      "kind": "registry"
+    },
+    {
+      "name": "log",
+      "version": "0.4.34",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/log>",
+      "kind": "registry"
+    },
+    {
+      "name": "memchr",
+      "version": "2.8.3",
+      "license": "Unlicense OR MIT",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/memchr>",
+      "kind": "registry"
+    },
+    {
+      "name": "memmap2",
+      "version": "0.9.12",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RazrFalcon/memmap2-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "memoffset",
+      "version": "0.9.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/Gilnaa/memoffset>",
+      "kind": "registry"
+    },
+    {
+      "name": "miniz_oxide",
+      "version": "0.8.9",
+      "license": "MIT OR Zlib OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE`, `LICENSE-APACHE.md`, `LICENSE-MIT.md`, `LICENSE-ZLIB.md` &mdash; upstream repository: <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide>",
+      "kind": "registry"
+    },
+    {
+      "name": "miniz_oxide",
+      "version": "0.9.1",
+      "license": "MIT OR Zlib OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE`, `LICENSE-APACHE.md`, `LICENSE-MIT.md`, `LICENSE-ZLIB.md` &mdash; upstream repository: <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide>",
+      "kind": "registry"
+    },
+    {
+      "name": "moxcms",
+      "version": "0.8.1",
+      "license": "BSD-3-Clause OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE.md`, `LICENSE.md` &mdash; upstream repository: <https://github.com/awxkee/moxcms.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "naga",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "naga-types",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "ndk",
+      "version": "0.9.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/rust-mobile/ndk>",
+      "kind": "registry"
+    },
+    {
+      "name": "ndk-context",
+      "version": "0.1.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/rust-windowing/android-ndk-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "ndk-sys",
+      "version": "0.6.0+11769913",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/rust-mobile/ndk>",
+      "kind": "registry"
+    },
+    {
+      "name": "nohash-hasher",
+      "version": "0.2.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/paritytech/nohash-hasher>",
+      "kind": "registry"
+    },
+    {
+      "name": "nom",
+      "version": "8.0.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-bakery/nom>",
+      "kind": "registry"
+    },
+    {
+      "name": "num-complex",
+      "version": "0.4.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-complex>",
+      "kind": "registry"
+    },
+    {
+      "name": "num-integer",
+      "version": "0.1.47",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-integer>",
+      "kind": "registry"
+    },
+    {
+      "name": "num-traits",
+      "version": "0.2.19",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-traits>",
+      "kind": "registry"
+    },
+    {
+      "name": "num_enum",
+      "version": "0.7.6",
+      "license": "BSD-3-Clause OR MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-BSD`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/illicitonion/num_enum>",
+      "kind": "registry"
+    },
+    {
+      "name": "num_enum_derive",
+      "version": "0.7.6",
+      "license": "BSD-3-Clause OR MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-BSD`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/illicitonion/num_enum>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc-sys",
+      "version": "0.3.5",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2",
+      "version": "0.5.3",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2",
+      "version": "0.6.5",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-app-kit",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-app-kit",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-cloud-kit",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-contacts",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-core-data",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-core-foundation",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-core-graphics",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-core-image",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-core-location",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-core-text",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-encode",
+      "version": "4.1.0",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-foundation",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-foundation",
+      "version": "0.3.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-io-surface",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-link-presentation",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-metal",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-metal",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-quartz-core",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-quartz-core",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-symbols",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-ui-kit",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-ui-kit",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-uniform-type-identifiers",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-user-notifications",
+      "version": "0.2.2",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "once_cell",
+      "version": "1.21.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/matklad/once_cell>",
+      "kind": "registry"
+    },
+    {
+      "name": "once_cell_polyfill",
+      "version": "1.70.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/polyfill-rs/once_cell_polyfill>",
+      "kind": "registry"
+    },
+    {
+      "name": "orbclient",
+      "version": "0.3.55",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://gitlab.redox-os.org/redox-os/orbclient>",
+      "kind": "registry"
+    },
+    {
+      "name": "ordered-float",
+      "version": "5.5.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE-MIT` &mdash; upstream repository: <https://github.com/reem/rust-ordered-float>",
+      "kind": "registry"
+    },
+    {
+      "name": "ordered-stream",
+      "version": "0.2.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/danieldg/ordered-stream>",
+      "kind": "registry"
+    },
+    {
+      "name": "os_pipe",
+      "version": "1.2.3",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/oconnor663/os_pipe.rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "owned_ttf_parser",
+      "version": "0.25.1",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/alexheretic/owned-ttf-parser>",
+      "kind": "registry"
+    },
+    {
+      "name": "parking",
+      "version": "2.2.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-THIRD-PARTY` &mdash; upstream repository: <https://github.com/smol-rs/parking>",
+      "kind": "registry"
+    },
+    {
+      "name": "parking_lot",
+      "version": "0.12.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/Amanieu/parking_lot>",
+      "kind": "registry"
+    },
+    {
+      "name": "parking_lot_core",
+      "version": "0.9.12",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/Amanieu/parking_lot>",
+      "kind": "registry"
+    },
+    {
+      "name": "parlance",
+      "version": "0.1.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/parley>",
+      "kind": "registry"
+    },
+    {
+      "name": "peniko",
+      "version": "0.6.1",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/peniko>",
+      "kind": "registry"
+    },
+    {
+      "name": "percent-encoding",
+      "version": "2.3.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/rust-url/>",
+      "kind": "registry"
+    },
+    {
+      "name": "petgraph",
+      "version": "0.8.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/petgraph/petgraph>",
+      "kind": "registry"
+    },
+    {
+      "name": "phf",
+      "version": "0.14.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-phf/rust-phf>",
+      "kind": "registry"
+    },
+    {
+      "name": "phf_generator",
+      "version": "0.14.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-phf/rust-phf>",
+      "kind": "registry"
+    },
+    {
+      "name": "phf_macros",
+      "version": "0.14.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-phf/rust-phf>",
+      "kind": "registry"
+    },
+    {
+      "name": "phf_shared",
+      "version": "0.14.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-phf/rust-phf>",
+      "kind": "registry"
+    },
+    {
+      "name": "pin-project",
+      "version": "1.1.13",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/taiki-e/pin-project>",
+      "kind": "registry"
+    },
+    {
+      "name": "pin-project-internal",
+      "version": "1.1.13",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/taiki-e/pin-project>",
+      "kind": "registry"
+    },
+    {
+      "name": "pin-project-lite",
+      "version": "0.2.17",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/taiki-e/pin-project-lite>",
+      "kind": "registry"
+    },
+    {
+      "name": "piper",
+      "version": "0.2.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/piper>",
+      "kind": "registry"
+    },
+    {
+      "name": "pkg-config",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/pkg-config-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "plain",
+      "version": "0.2.3",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/randomites/plain>",
+      "kind": "registry"
+    },
+    {
+      "name": "png",
+      "version": "0.18.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/image-rs/image-png>",
+      "kind": "registry"
+    },
+    {
+      "name": "poll-promise",
+      "version": "0.3.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/EmbarkStudios/poll-promise>",
+      "kind": "registry"
+    },
+    {
+      "name": "polling",
+      "version": "3.11.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/smol-rs/polling>",
+      "kind": "registry"
+    },
+    {
+      "name": "pollster",
+      "version": "0.4.0",
+      "license": "Apache-2.0/MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/zesterer/pollster>",
+      "kind": "registry"
+    },
+    {
+      "name": "pollster",
+      "version": "1.0.1",
+      "license": "Apache-2.0/MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/zesterer/pollster>",
+      "kind": "registry"
+    },
+    {
+      "name": "polycool",
+      "version": "0.4.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/kurbo>",
+      "kind": "registry"
+    },
+    {
+      "name": "portable-atomic",
+      "version": "1.15.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/taiki-e/portable-atomic>",
+      "kind": "registry"
+    },
+    {
+      "name": "portable-atomic-util",
+      "version": "0.2.8",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/taiki-e/portable-atomic-util>",
+      "kind": "registry"
+    },
+    {
+      "name": "potential_utf",
+      "version": "0.1.6",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "presser",
+      "version": "0.3.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/EmbarkStudios/presser>",
+      "kind": "registry"
+    },
+    {
+      "name": "primal-check",
+      "version": "0.3.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/huonw/primal>",
+      "kind": "registry"
+    },
+    {
+      "name": "proc-macro-crate",
+      "version": "3.5.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/bkchr/proc-macro-crate>",
+      "kind": "registry"
+    },
+    {
+      "name": "proc-macro2",
+      "version": "1.0.107",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/proc-macro2>",
+      "kind": "registry"
+    },
+    {
+      "name": "profiling",
+      "version": "1.0.18",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/aclysma/profiling>",
+      "kind": "registry"
+    },
+    {
+      "name": "pxfm",
+      "version": "0.1.30",
+      "license": "BSD-3-Clause OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE.md`, `LICENSE.md` &mdash; upstream repository: <https://github.com/awxkee/pxfm>",
+      "kind": "registry"
+    },
+    {
+      "name": "quick-error",
+      "version": "2.0.1",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <http://github.com/tailhook/quick-error>",
+      "kind": "registry"
+    },
+    {
+      "name": "quick-xml",
+      "version": "0.41.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE-MIT.md` &mdash; upstream repository: <https://github.com/tafia/quick-xml>",
+      "kind": "registry"
+    },
+    {
+      "name": "quote",
+      "version": "1.0.47",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/quote>",
+      "kind": "registry"
+    },
+    {
+      "name": "r-efi",
+      "version": "5.3.0",
+      "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/r-efi/r-efi>",
+      "kind": "registry"
+    },
+    {
+      "name": "r-efi",
+      "version": "6.0.0",
+      "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/r-efi/r-efi>",
+      "kind": "registry"
+    },
+    {
+      "name": "range-alloc",
+      "version": "0.1.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/range-alloc>",
+      "kind": "registry"
+    },
+    {
+      "name": "raw-window-handle",
+      "version": "0.6.2",
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "license_text": "Published crate package: `LICENSE-APACHE.md`, `LICENSE-MIT.md`, `LICENSE-ZLIB.md` &mdash; upstream repository: <https://github.com/rust-windowing/raw-window-handle>",
+      "kind": "registry"
+    },
+    {
+      "name": "raw-window-metal",
+      "version": "1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-windowing/raw-window-metal>",
+      "kind": "registry"
+    },
+    {
+      "name": "rayon",
+      "version": "1.12.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rayon-rs/rayon>",
+      "kind": "registry"
+    },
+    {
+      "name": "rayon-core",
+      "version": "1.13.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rayon-rs/rayon>",
+      "kind": "registry"
+    },
+    {
+      "name": "read-fonts",
+      "version": "0.41.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/googlefonts/fontations>",
+      "kind": "registry"
+    },
+    {
+      "name": "redox_syscall",
+      "version": "0.4.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://gitlab.redox-os.org/redox-os/syscall>",
+      "kind": "registry"
+    },
+    {
+      "name": "redox_syscall",
+      "version": "0.5.18",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://gitlab.redox-os.org/redox-os/syscall>",
+      "kind": "registry"
+    },
+    {
+      "name": "redox_syscall",
+      "version": "0.9.5",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://gitlab.redox-os.org/redox-os/kernel>",
+      "kind": "registry"
+    },
+    {
+      "name": "regex",
+      "version": "1.13.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/regex>",
+      "kind": "registry"
+    },
+    {
+      "name": "regex-automata",
+      "version": "0.4.18",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/regex>",
+      "kind": "registry"
+    },
+    {
+      "name": "regex-lite",
+      "version": "0.1.9",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/regex>",
+      "kind": "registry"
+    },
+    {
+      "name": "regex-syntax",
+      "version": "0.8.11",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/regex>",
+      "kind": "registry"
+    },
+    {
+      "name": "renderdoc-sys",
+      "version": "1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/ebkalderon/renderdoc-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "rfd",
+      "version": "0.17.2",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/PolyMeilex/rfd>",
+      "kind": "registry"
+    },
+    {
+      "name": "roxmltree",
+      "version": "0.21.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RazrFalcon/roxmltree>",
+      "kind": "registry"
+    },
+    {
+      "name": "rustc-hash",
+      "version": "1.1.0",
+      "license": "Apache-2.0/MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang-nursery/rustc-hash>",
+      "kind": "registry"
+    },
+    {
+      "name": "rustc-hash",
+      "version": "2.1.3",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/rustc-hash>",
+      "kind": "registry"
+    },
+    {
+      "name": "rustc_version",
+      "version": "0.4.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/djc/rustc-version-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "rustfft",
+      "version": "6.4.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/ejmahler/RustFFT>",
+      "kind": "registry"
+    },
+    {
+      "name": "rustix",
+      "version": "0.38.44",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-Apache-2.0_WITH_LLVM-exception`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/bytecodealliance/rustix>",
+      "kind": "registry"
+    },
+    {
+      "name": "rustix",
+      "version": "1.1.6",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-Apache-2.0_WITH_LLVM-exception`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/bytecodealliance/rustix>",
+      "kind": "registry"
+    },
+    {
+      "name": "rustversion",
+      "version": "1.0.23",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/rustversion>",
+      "kind": "registry"
+    },
+    {
+      "name": "same-file",
+      "version": "1.0.6",
+      "license": "Unlicense/MIT",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/same-file>",
+      "kind": "registry"
+    },
+    {
+      "name": "scoped-tls",
+      "version": "1.0.1",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/alexcrichton/scoped-tls>",
+      "kind": "registry"
+    },
+    {
+      "name": "scopeguard",
+      "version": "1.2.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/bluss/scopeguard>",
+      "kind": "registry"
+    },
+    {
+      "name": "sctk-adwaita",
+      "version": "0.10.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/PolyMeilex/sctk-adwaita>",
+      "kind": "registry"
+    },
+    {
+      "name": "self_cell",
+      "version": "1.3.0",
+      "license": "Apache-2.0 OR GPL-2.0-only",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-GPLv2` &mdash; upstream repository: <https://github.com/Voultapher/self_cell>",
+      "kind": "registry"
+    },
+    {
+      "name": "semver",
+      "version": "1.0.28",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/semver>",
+      "kind": "registry"
+    },
+    {
+      "name": "send_wrapper",
+      "version": "0.6.0",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE.txt`, `LICENSE-MIT.txt` &mdash; upstream repository: <https://github.com/thk1/send_wrapper>",
+      "kind": "registry"
+    },
+    {
+      "name": "serde",
+      "version": "1.0.229",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/serde-rs/serde>",
+      "kind": "registry"
+    },
+    {
+      "name": "serde_core",
+      "version": "1.0.229",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/serde-rs/serde>",
+      "kind": "registry"
+    },
+    {
+      "name": "serde_derive",
+      "version": "1.0.229",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/serde-rs/serde>",
+      "kind": "registry"
+    },
+    {
+      "name": "serde_json",
+      "version": "1.0.154",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/serde-rs/json>",
+      "kind": "registry"
+    },
+    {
+      "name": "serde_repr",
+      "version": "0.1.21",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/serde-repr>",
+      "kind": "registry"
+    },
+    {
+      "name": "sha2",
+      "version": "0.10.9",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/hashes>",
+      "kind": "registry"
+    },
+    {
+      "name": "shlex",
+      "version": "2.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/comex/rust-shlex>",
+      "kind": "registry"
+    },
+    {
+      "name": "signal-hook-registry",
+      "version": "1.4.8",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/vorner/signal-hook>",
+      "kind": "registry"
+    },
+    {
+      "name": "simd-adler32",
+      "version": "0.3.10",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.md` &mdash; upstream repository: <https://github.com/mcountryman/simd-adler32>",
+      "kind": "registry"
+    },
+    {
+      "name": "simd_cesu8",
+      "version": "1.2.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/seancroach/simd_cesu8>",
+      "kind": "registry"
+    },
+    {
+      "name": "simdutf8",
+      "version": "0.1.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-Apache`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rusticstuff/simdutf8>",
+      "kind": "registry"
+    },
+    {
+      "name": "siphasher",
+      "version": "1.0.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/jedisct1/rust-siphash>",
+      "kind": "registry"
+    },
+    {
+      "name": "skrifa",
+      "version": "0.44.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/googlefonts/fontations>",
+      "kind": "registry"
+    },
+    {
+      "name": "slab",
+      "version": "0.4.12",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/slab>",
+      "kind": "registry"
+    },
+    {
+      "name": "slotmap",
+      "version": "1.1.1",
+      "license": "Zlib",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/orlp/slotmap>",
+      "kind": "registry"
+    },
+    {
+      "name": "smallvec",
+      "version": "1.16.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/rust-smallvec>",
+      "kind": "registry"
+    },
+    {
+      "name": "smithay-client-toolkit",
+      "version": "0.19.2",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/client-toolkit>",
+      "kind": "registry"
+    },
+    {
+      "name": "smithay-client-toolkit",
+      "version": "0.20.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/client-toolkit>",
+      "kind": "registry"
+    },
+    {
+      "name": "smithay-clipboard",
+      "version": "0.7.3",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/smithay/smithay-clipboard>",
+      "kind": "registry"
+    },
+    {
+      "name": "smol_str",
+      "version": "0.2.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-analyzer/smol_str>",
+      "kind": "registry"
+    },
+    {
+      "name": "spirv",
+      "version": "0.4.0+sdk-1.4.341.0",
+      "license": "Apache-2.0",
+      "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/gfx-rs/rspirv>",
+      "kind": "registry"
+    },
+    {
+      "name": "stable_deref_trait",
+      "version": "1.2.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/storyyeller/stable_deref_trait>",
+      "kind": "registry"
+    },
+    {
+      "name": "stagesync-cli",
+      "version": "0.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "The StageSync workspace licence: LICENSE-MIT and LICENSE-APACHE in the source tree.",
+      "kind": "workspace"
+    },
+    {
+      "name": "stagesync-core",
+      "version": "0.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "The StageSync workspace licence: LICENSE-MIT and LICENSE-APACHE in the source tree.",
+      "kind": "workspace"
+    },
+    {
+      "name": "stagesync-desktop",
+      "version": "0.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "The StageSync workspace licence: LICENSE-MIT and LICENSE-APACHE in the source tree.",
+      "kind": "workspace"
+    },
+    {
+      "name": "static_assertions",
+      "version": "1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/nvzqz/static-assertions-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "strength_reduce",
+      "version": "0.2.4",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <http://github.com/ejmahler/strength_reduce>",
+      "kind": "registry"
+    },
+    {
+      "name": "strict-num",
+      "version": "0.1.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/RazrFalcon/strict-num>",
+      "kind": "registry"
+    },
+    {
+      "name": "strsim",
+      "version": "0.11.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rapidfuzz/strsim-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-bundle-flac",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-codec-aac",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-codec-adpcm",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-codec-pcm",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-codec-vorbis",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-common",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-core",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-format-isomp4",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-format-mkv",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-format-ogg",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-format-riff",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "symphonia-metadata",
+      "version": "0.6.1",
+      "license": "MPL-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/pdeljanov/Symphonia>",
+      "kind": "registry"
+    },
+    {
+      "name": "syn",
+      "version": "2.0.119",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/syn>",
+      "kind": "registry"
+    },
+    {
+      "name": "syn",
+      "version": "3.0.9",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/syn>",
+      "kind": "registry"
+    },
+    {
+      "name": "synstructure",
+      "version": "0.14.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/mystor/synstructure>",
+      "kind": "registry"
+    },
+    {
+      "name": "sys-locale",
+      "version": "0.3.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/1Password/sys-locale>",
+      "kind": "registry"
+    },
+    {
+      "name": "tempfile",
+      "version": "3.27.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/Stebalien/tempfile>",
+      "kind": "registry"
+    },
+    {
+      "name": "termcolor",
+      "version": "1.4.1",
+      "license": "Unlicense OR MIT",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/termcolor>",
+      "kind": "registry"
+    },
+    {
+      "name": "thiserror",
+      "version": "1.0.69",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/thiserror>",
+      "kind": "registry"
+    },
+    {
+      "name": "thiserror",
+      "version": "2.0.21",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/thiserror>",
+      "kind": "registry"
+    },
+    {
+      "name": "thiserror-impl",
+      "version": "1.0.69",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/thiserror>",
+      "kind": "registry"
+    },
+    {
+      "name": "thiserror-impl",
+      "version": "2.0.21",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/thiserror>",
+      "kind": "registry"
+    },
+    {
+      "name": "tiff",
+      "version": "0.11.3",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/image-rs/image-tiff>",
+      "kind": "registry"
+    },
+    {
+      "name": "tiny-skia",
+      "version": "0.11.4",
+      "license": "BSD-3-Clause",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/RazrFalcon/tiny-skia>",
+      "kind": "registry"
+    },
+    {
+      "name": "tiny-skia-path",
+      "version": "0.11.4",
+      "license": "BSD-3-Clause",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/RazrFalcon/tiny-skia/tree/master/path>",
+      "kind": "registry"
+    },
+    {
+      "name": "tinystr",
+      "version": "0.8.5",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "tokio",
+      "version": "1.54.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/tokio>",
+      "kind": "registry"
+    },
+    {
+      "name": "toml_datetime",
+      "version": "1.1.2+spec-1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml>",
+      "kind": "registry"
+    },
+    {
+      "name": "toml_edit",
+      "version": "0.25.17+spec-1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml>",
+      "kind": "registry"
+    },
+    {
+      "name": "toml_parser",
+      "version": "1.1.5+spec-1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml>",
+      "kind": "registry"
+    },
+    {
+      "name": "tracing",
+      "version": "0.1.44",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/tracing>",
+      "kind": "registry"
+    },
+    {
+      "name": "tracing-attributes",
+      "version": "0.1.31",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/tracing>",
+      "kind": "registry"
+    },
+    {
+      "name": "tracing-core",
+      "version": "0.1.36",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/tracing>",
+      "kind": "registry"
+    },
+    {
+      "name": "transpose",
+      "version": "0.2.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/ejmahler/transpose>",
+      "kind": "registry"
+    },
+    {
+      "name": "tree_magic_mini",
+      "version": "3.2.2",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/mbrubeck/tree_magic/>",
+      "kind": "registry"
+    },
+    {
+      "name": "ttf-parser",
+      "version": "0.25.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/harfbuzz/ttf-parser>",
+      "kind": "registry"
+    },
+    {
+      "name": "type-map",
+      "version": "0.5.1",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/kardeiz/type-map>",
+      "kind": "registry"
+    },
+    {
+      "name": "typenum",
+      "version": "1.20.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE`, `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/paholg/typenum>",
+      "kind": "registry"
+    },
+    {
+      "name": "uds_windows",
+      "version": "1.2.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/haraldh/rust_uds_windows>",
+      "kind": "registry"
+    },
+    {
+      "name": "unicode-general-category",
+      "version": "1.1.0",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/yeslogic/unicode-general-category>",
+      "kind": "registry"
+    },
+    {
+      "name": "unicode-ident",
+      "version": "1.0.27",
+      "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-UNICODE` &mdash; upstream repository: <https://github.com/dtolnay/unicode-ident>",
+      "kind": "registry"
+    },
+    {
+      "name": "unicode-properties",
+      "version": "0.1.4",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/unicode-rs/unicode-properties>",
+      "kind": "registry"
+    },
+    {
+      "name": "unicode-script",
+      "version": "0.5.8",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/unicode-rs/unicode-script>",
+      "kind": "registry"
+    },
+    {
+      "name": "unicode-segmentation",
+      "version": "1.13.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/unicode-rs/unicode-segmentation>",
+      "kind": "registry"
+    },
+    {
+      "name": "unicode-width",
+      "version": "0.2.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/unicode-rs/unicode-width>",
+      "kind": "registry"
+    },
+    {
+      "name": "url",
+      "version": "2.5.8",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/rust-url>",
+      "kind": "registry"
+    },
+    {
+      "name": "utf8_iter",
+      "version": "1.0.4",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/hsivonen/utf8_iter>",
+      "kind": "registry"
+    },
+    {
+      "name": "utf8parse",
+      "version": "0.2.2",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/alacritty/vte>",
+      "kind": "registry"
+    },
+    {
+      "name": "uuid",
+      "version": "1.29.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/uuid-rs/uuid>",
+      "kind": "registry"
+    },
+    {
+      "name": "vello_common",
+      "version": "0.2.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/vello>",
+      "kind": "registry"
+    },
+    {
+      "name": "vello_cpu",
+      "version": "0.2.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/vello>",
+      "kind": "registry"
+    },
+    {
+      "name": "version_check",
+      "version": "0.9.5",
+      "license": "MIT/Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/SergioBenitez/version_check>",
+      "kind": "registry"
+    },
+    {
+      "name": "walkdir",
+      "version": "2.5.0",
+      "license": "Unlicense/MIT",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/walkdir>",
+      "kind": "registry"
+    },
+    {
+      "name": "wasip2",
+      "version": "1.0.4+wasi-0.2.12",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-Apache-2.0_WITH_LLVM-exception`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/bytecodealliance/wasi-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wasm-bindgen",
+      "version": "0.2.129",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/wasm-bindgen/wasm-bindgen>",
+      "kind": "registry"
+    },
+    {
+      "name": "wasm-bindgen-futures",
+      "version": "0.4.79",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures>",
+      "kind": "registry"
+    },
+    {
+      "name": "wasm-bindgen-macro",
+      "version": "0.2.129",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro>",
+      "kind": "registry"
+    },
+    {
+      "name": "wasm-bindgen-macro-support",
+      "version": "0.2.129",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support>",
+      "kind": "registry"
+    },
+    {
+      "name": "wasm-bindgen-shared",
+      "version": "0.2.129",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-backend",
+      "version": "0.3.17",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-client",
+      "version": "0.31.15",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-csd-frame",
+      "version": "0.3.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-windowing/wayland-csd-frame>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-cursor",
+      "version": "0.31.14",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-protocols",
+      "version": "0.32.13",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-protocols-experimental",
+      "version": "20250721.0.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-protocols-misc",
+      "version": "0.3.12",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-protocols-plasma",
+      "version": "0.3.12",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-protocols-wlr",
+      "version": "0.3.12",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-scanner",
+      "version": "0.31.11",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "wayland-sys",
+      "version": "0.31.11",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE.txt` &mdash; upstream repository: <https://github.com/smithay/wayland-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "web-sys",
+      "version": "0.3.106",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys>",
+      "kind": "registry"
+    },
+    {
+      "name": "web-time",
+      "version": "1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/daxpedda/web-time>",
+      "kind": "registry"
+    },
+    {
+      "name": "webbrowser",
+      "version": "1.2.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/amodm/webbrowser-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "weezl",
+      "version": "0.1.12",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/image-rs/weezl>",
+      "kind": "registry"
+    },
+    {
+      "name": "wgpu",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "wgpu-core",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "wgpu-core-deps-apple",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "wgpu-core-deps-emscripten",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "wgpu-core-deps-wasm",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "wgpu-core-deps-windows-linux-android",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "wgpu-hal",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "wgpu-naga-bridge",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "wgpu-types",
+      "version": "30.0.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE.APACHE`, `LICENSE.MIT` &mdash; upstream repository: <https://github.com/gfx-rs/wgpu>",
+      "kind": "registry"
+    },
+    {
+      "name": "winapi-util",
+      "version": "0.1.11",
+      "license": "Unlicense OR MIT",
+      "license_text": "Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/winapi-util>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows",
+      "version": "0.62.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-collections",
+      "version": "0.3.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-core",
+      "version": "0.62.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-future",
+      "version": "0.3.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-implement",
+      "version": "0.60.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-interface",
+      "version": "0.59.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-link",
+      "version": "0.2.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-numerics",
+      "version": "0.3.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-result",
+      "version": "0.4.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-strings",
+      "version": "0.5.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-sys",
+      "version": "0.52.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-sys",
+      "version": "0.59.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-sys",
+      "version": "0.61.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-targets",
+      "version": "0.52.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows-threading",
+      "version": "0.2.1",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows_aarch64_gnullvm",
+      "version": "0.52.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows_aarch64_msvc",
+      "version": "0.52.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows_i686_gnu",
+      "version": "0.52.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows_i686_gnullvm",
+      "version": "0.52.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows_i686_msvc",
+      "version": "0.52.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows_x86_64_gnu",
+      "version": "0.52.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows_x86_64_gnullvm",
+      "version": "0.52.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "windows_x86_64_msvc",
+      "version": "0.52.6",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `license-apache-2.0`, `license-mit` &mdash; upstream repository: <https://github.com/microsoft/windows-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "winit",
+      "version": "0.30.13",
+      "license": "Apache-2.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-windowing/winit>",
+      "kind": "registry"
+    },
+    {
+      "name": "winnow",
+      "version": "1.0.4",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE-MIT` &mdash; upstream repository: <https://github.com/winnow-rs/winnow>",
+      "kind": "registry"
+    },
+    {
+      "name": "wit-bindgen",
+      "version": "0.57.1",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-Apache-2.0_WITH_LLVM-exception`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/bytecodealliance/wit-bindgen>",
+      "kind": "registry"
+    },
+    {
+      "name": "wl-clipboard-rs",
+      "version": "0.9.5",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/YaLTeR/wl-clipboard-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "writeable",
+      "version": "0.6.4",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "x11-dl",
+      "version": "2.21.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE-MIT` &mdash; upstream repository: <https://github.com/AltF02/x11-rs.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "x11rb",
+      "version": "0.13.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/psychon/x11rb>",
+      "kind": "registry"
+    },
+    {
+      "name": "x11rb-protocol",
+      "version": "0.13.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/psychon/x11rb>",
+      "kind": "registry"
+    },
+    {
+      "name": "xcursor",
+      "version": "0.3.11",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/esposm03/xcursor-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "xkbcommon-dl",
+      "version": "0.4.2",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-windowing/xkbcommon-dl>",
+      "kind": "registry"
+    },
+    {
+      "name": "xkeysym",
+      "version": "0.2.1",
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/notgull/xkeysym>",
+      "kind": "registry"
+    },
+    {
+      "name": "xml-rs",
+      "version": "0.8.29",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/kornelski/xml-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "yeslogic-fontconfig-sys",
+      "version": "6.0.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/yeslogic/fontconfig-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "yoke",
+      "version": "0.8.4",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "yoke-derive",
+      "version": "0.8.4",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "zbus",
+      "version": "5.19.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/z-galaxy/zbus/>",
+      "kind": "registry"
+    },
+    {
+      "name": "zbus-lockstep",
+      "version": "0.5.2",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE-MIT` &mdash; upstream repository: <https://github.com/luukvanderduim/zbus-lockstep>",
+      "kind": "registry"
+    },
+    {
+      "name": "zbus-lockstep-macros",
+      "version": "0.5.2",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE-MIT` &mdash; upstream repository: <https://github.com/luukvanderduim/zbus-lockstep>",
+      "kind": "registry"
+    },
+    {
+      "name": "zbus_macros",
+      "version": "5.19.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/z-galaxy/zbus/>",
+      "kind": "registry"
+    },
+    {
+      "name": "zbus_names",
+      "version": "4.3.5",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/z-galaxy/zbus/>",
+      "kind": "registry"
+    },
+    {
+      "name": "zbus_xml",
+      "version": "5.2.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/z-galaxy/zbus/>",
+      "kind": "registry"
+    },
+    {
+      "name": "zcheapstr",
+      "version": "1.1.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/z-galaxy/zcheapstr/>",
+      "kind": "registry"
+    },
+    {
+      "name": "zerocopy",
+      "version": "0.8.63",
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-BSD`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/google/zerocopy>",
+      "kind": "registry"
+    },
+    {
+      "name": "zerocopy-derive",
+      "version": "0.8.63",
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-BSD`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/google/zerocopy>",
+      "kind": "registry"
+    },
+    {
+      "name": "zerofrom",
+      "version": "0.1.8",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "zerofrom-derive",
+      "version": "0.1.8",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "zerotrie",
+      "version": "0.2.5",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "zerovec",
+      "version": "0.11.9",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "zerovec-derive",
+      "version": "0.11.7",
+      "license": "Unicode-3.0",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x>",
+      "kind": "registry"
+    },
+    {
+      "name": "zlib-rs",
+      "version": "0.6.8",
+      "license": "Zlib",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/trifectatechfoundation/zlib-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "zmij",
+      "version": "1.0.23",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/zmij>",
+      "kind": "registry"
+    },
+    {
+      "name": "zune-core",
+      "version": "0.5.3",
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/etemesi254/zune-image>",
+      "kind": "registry"
+    },
+    {
+      "name": "zune-jpeg",
+      "version": "0.5.15",
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg>",
+      "kind": "registry"
+    },
+    {
+      "name": "zvariant",
+      "version": "5.15.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/z-galaxy/zbus/>",
+      "kind": "registry"
+    },
+    {
+      "name": "zvariant_derive",
+      "version": "5.15.1",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/z-galaxy/zbus/>",
+      "kind": "registry"
+    },
+    {
+      "name": "zvariant_utils",
+      "version": "4.2.0",
+      "license": "MIT",
+      "license_text": "Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/z-galaxy/zbus/>",
+      "kind": "registry"
+    }
+  ]
+}

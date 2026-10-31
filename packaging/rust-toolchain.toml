@@ -1,0 +1,20 @@
+# The Rust toolchain the release artefacts are built with.
+#
+# This file deliberately lives under `packaging/` rather than at the repository
+# root. A `rust-toolchain.toml` at the root would silently change the
+# toolchain of every `cargo` invocation in the repository - including an
+# engineer's own `cargo test` run on a different day - which is not this
+# file's business. The packaging scripts read the `channel` below, compare it
+# with the compiler that is actually installed, and refuse to build a release
+# with a different one unless they are explicitly told to.
+#
+# The workflows install exactly this version (see `.github/workflows/`), so the
+# release binary is compiled by a known compiler rather than by whatever
+# "stable" happened to be that week.
+#
+# The floor the *code* requires is set by the dependencies, not here: see the
+# `rust-version` key in the workspace manifest.
+
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"

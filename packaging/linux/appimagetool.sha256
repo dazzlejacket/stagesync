@@ -1,0 +1,28 @@
+# The SHA-256 of the appimagetool that the Linux packaging step uses.
+#
+# Format: one "<sha256>  <file name>" line. The packaging script reads the
+# first hash in this file, downloads the tool, and refuses to run it unless
+# the download hashes to exactly this value. The environment variable
+# APPIMAGETOOL_SHA256 overrides this file, for the case where a different
+# build of the tool has to be used.
+#
+# The file name is the asset name of the pinned release, and the release tag
+# is in packaging/linux/build.sh next to the download URL. The two have to
+# be changed together.
+#
+# Provenance of the hash below:
+#
+#   release    AppImage/appimagetool 1.9.1 (2025-11-18), an immutable tag
+#   asset      appimagetool-x86_64.AppImage, 15092216 bytes
+#   url        https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+#   checksum   the sha256 digest GitHub publishes for that release asset, and
+#              the value this repository computed from the asset it
+#              downloaded and hashed itself.
+#
+# The tool used to come from the `continuous` release of AppImageKit. That
+# tag is a moving one: the bytes under its URL change without notice, so a
+# build that fetched it was a build that ran whatever happened to be
+# published last, with nothing to compare it against. This pin is what
+# replaces that.
+
+ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool-x86_64.AppImage
