@@ -3,6 +3,14 @@
 The state of StageSync, stated precisely. Everything below was actually run; nothing
 is a plan.
 
+> **After the post-release audit.** Release `0a128df` was audited independently
+> (`CODEX_AUDIT.md`, 2026-10-29) and reviewed for usability (`UX_REVIEW.md`, the same
+> day). Every finding and what was done about it is in `POST_CODEX_FIXES.md`; what is
+> verified, what is only statically checked and what is not done at all is in
+> `RELEASE_READINESS.md`. The repair branch is `repair/post-codex`. **One P1 finding
+> (P1-08, the normalisation rule) is still open, and it is a decision for the
+> maintainer rather than a defect** — see §9.
+
 ---
 
 ## 1. What works
@@ -516,19 +524,26 @@ Test counts as they were run:
 
 ```
 stagesync-cli    unit tests     0 passed
-stagesync-core   unit tests    13 passed
+stagesync-core   unit tests    15 passed
 stagesync-core   alignment     12 passed
 stagesync-core   drift          6 passed
 stagesync-core   dsp           18 passed
-stagesync-core   render        12 passed
-stagesync-core   robustness    10 passed
+stagesync-core   render        21 passed
+stagesync-core   repair regressions 21 passed
+stagesync-core   robustness    12 passed
 stagesync-core   doc tests      0 passed
-stagesync-desktop unit tests   28 passed
+stagesync-desktop unit tests   30 passed
 stagesync-desktop platform     16 passed
 stagesync-desktop workflow      6 passed
 stagesync-desktop doc tests     0 passed
-                          total 121 passed, 0 failed
+                          total 157 passed, 0 failed
 ```
+
+The suite is hermetic: every test generates the fixtures it needs, each test
+process keeps its own fixture directory under the operating system's temporary
+directory, and the generation lock is held *across* the generation, so a cold
+parallel run cannot race with itself. The run above was made from a cold cache,
+in parallel and serially; both are green.
 
 ### Cross-platform builds
 
@@ -572,3 +587,108 @@ The macOS builds are **unsigned and not notarised**, and the release notes say s
 * Nothing from any proprietary application, decompiler output, internal table,
   parameter set or weight file was used in the implementation. See `PROVENANCE.md` and
   `cleanroom/`.
+
+---
+
+## 9. The post-audit repair
+
+Release `0a128df` was audited independently and reviewed for usability. The findings
+and the repairs are in `POST_CODEX_FIXES.md`; this section is the status.
+
+### 9.1 What the audit found wrong, and what is now true
+
+| Finding | Subject | State |
+|---|---|---|
+| P1-01 | A sidecar could overwrite an input recording | **fixed** — the whole output manifest, sidecars included, is checked against the recordings before anything is written |
+| P1-02 | The merged export destroyed stereo and used the first source's rate | **fixed** — one position map per channel, and each source is read at its own rate |
+| P1-03 | The resampler's buffer origin ran ahead of the buffer | **fixed** |
+| P1-04 | The merge could invent an uncovered span | **fixed** — the merge is a boundary sweep, and the renderer draws the report's own timeline |
+| P1-05 | The per-source timeline export exceeded its length | **fixed** |
+| P1-06 | Temporary WAV names collided within one process | **fixed** — exclusive creation, and the test fixture cache is per-process |
+| P1-07 | No size guard beyond 4 GiB | **fixed by refusal** — see §9.3 |
+| P1-08 | The normalisation contradicts the silence-independent rule | **open** — see §9.3 |
+| P1-09 | The window extractor retained the whole suffix | **fixed** |
+| P1-10 | The Windows packaging stopped before the build | **fixed** — but the NSIS installer is still unbuilt; see `RELEASE_READINESS.md` |
+| P1-11 | The packages omitted the licence material | **fixed** |
+| P2-01…P2-06 | Anchor loss, verifier frame count and 24-bit scale, the offset-only resample, the collision comparison, the verifier's grid, `report.json`'s hashes | **fixed** |
+| P2-07 | Layout limits with many recordings | **partly fixed** |
+| P2-08 | The test count hid environmental dependencies | **fixed** — the suite is hermetic and passes cold in parallel and serially |
+| P2-09 | The independence and uncertainty claims | **partly fixed** |
+| P2-10 | The cancellation guarantees | **partly fixed** |
+| P2-11 | The Linux packaging | **partly fixed** — not built on Linux |
+| P2-12 | The documentation overstated the validation | **fixed** |
+| P2-13 | The calibration mapped quiet flags the wrong way round | **fixed** |
+| P3-01 | `SlopeFit::signal_to_noise` used the wrong expression | **fixed** |
+| P3-02 | The packaging was not reproducible | **fixed** — two runs of the Windows script produce a byte-identical ZIP |
+| UX-1 | The timeline must describe the actual export | **fixed** |
+| UX-2 | Every essential control must be reachable | **partly fixed** |
+| UX-3 | The manual override must be reliable and explicit | **fixed** — it is an override layer that survives the drift assessment, keyed by the recording's identity |
+| UX-4 | The window must state what has been verified | **fixed** — the analysis status and the export verification are kept apart |
+| UX-5 | The reference and export geometry must be explicit | **fixed** — every target row has a *Make reference* button |
+| UX-stable | Waveform tracks and synchronised A/B audition | **not built** — see §9.3 |
+
+### 9.2 What the repair added
+
+* **A regression suite for the audit's findings** — `crates/stagesync-core/tests/repair_regressions.rs`.
+  Twenty-one tests, each named after the defect it pins down, so a failure says which
+  behaviour regressed rather than leaving it to be diagnosed from a symptom.
+* **An honest output manifest.** The export refuses to write anything over a recording
+  it read — the corrected audio, the sidecars and the manifest, all of them. The
+  comparison asks the file system rather than guessing: an existing file is identified
+  by its canonical path, and a file that does not exist yet is compared by a name folded
+  the way the platform folds names.
+* **An atomic export.** Everything is written into a staging directory and moved into
+  place in one step, so a failure leaves the output directory exactly as it was rather
+  than half an export next to the recordings.
+* **A truthful window.** Every target carries a status — *Auto aligned*, *Needs
+  inspection*, *No reliable match*, *Override applied*, *Not analysed* — and, separately,
+  the state of the export verification. A target can be perfectly aligned and still have
+  an export that was never verified, and the window no longer leads with a residual of
+  0.000 ms when there were no trusted measurements.
+* **A licence bundle in every package** — `packaging/notices/`, generated from
+  `Cargo.lock` by a script that needs no network, produces byte-identical output every
+  run, and fails loudly rather than shipping an incomplete notice.
+* **A pinned toolchain and reproducible archives** — `packaging/rust-toolchain.toml`,
+  fixed timestamps and sorted entries, a SHA-256 manifest published with the release.
+
+### 9.3 What is still open
+
+1. **P1-08 — the normalisation rule (a decision, not a defect).** `AGENTS.md` requires
+   the envelope's local statistics to be identical for both files, with the silent
+   frames excluded from the correlation. The code takes the statistics from the
+   **signal** frames and does exclude the silent frames from the correlation.
+
+   The prescribed change was implemented and **measured**, and it is worse. On the
+   fixture with a thirty-second recorder gap, taking the statistics from every frame
+   moved the measured correspondence by up to **6.5 seconds**, dropped every probe
+   below the trust threshold, reported the recording as wholly uncovered, and stopped
+   reporting the recorder gap at all.
+
+   The reason is that the correlation is invariant to an affine change of either side,
+   so what matters is the *shape* of the music. Taking the statistics from the signal
+   frames keeps the music's own dynamic range; taking them from every frame lets a
+   silence inflate the spread and squash the music around it, and the reference — which
+   has no silence at that position — no longer matches it.
+
+   The implementation was therefore left as it was, and the properties it depends on
+   are now pinned by tests. **The contract and the code still disagree**, and that has
+   to be reconciled before release — either the documents are corrected to describe the
+   signal-frame statistics and say why, or a different normalisation is designed that
+   satisfies the rule *and* keeps the correspondence. Changing the repository's
+   operating contract is the maintainer's decision, so it has been left open rather than
+   resolved unilaterally.
+2. **A recording longer than about four gigabytes of float audio cannot be exported.**
+   RF64 was not implemented; the output is refused before it is written, with a message
+   that says what to do about it.
+3. **The window has never been observed interactively.** No one has watched the
+   application run. The GUI changes are substantial and the layout has only been
+   exercised by a test against an empty session, at three sizes.
+4. **The NSIS installer has never been compiled**, and the Linux and macOS packages
+   have never been built on their own platforms.
+5. **The waveform tracks and the synchronised A/B audition were not built** (UX-stable).
+   The pieces an audition would need are in place; the window around them is not.
+6. **A render in progress cannot be interrupted.** The cancel flag is checked at stage
+   boundaries and inside the decoding loop, so a cancellation takes effect within about
+   a second — but a render already under way runs to completion, because stopping it
+   half way would leave a truncated WAV behind.
+
