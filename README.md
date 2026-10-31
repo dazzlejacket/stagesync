@@ -500,6 +500,14 @@ repeated.
 
 `PRE_RELEASE_REPORT.md` is the account of the release-preparation pass, and
 `CODEX_HANDOFF.md` is the state of the work for whoever picks it up next.
+
+`CODEX_AUDIT.md` is an independent audit of the previous release and
+`UX_REVIEW.md` is its companion usability review. `POST_CODEX_FIXES.md` says
+what was done about each finding, and `RELEASE_READINESS.md` says what has
+actually been run, what has only been statically checked, and what has not
+been run at all — including the one finding that is still open and the
+decisions that are still the maintainer's to make.
+
 `CHANGELOG.md` records what changed, `CONTRIBUTING.md` says what a change has to
 satisfy, and `SECURITY.md` says how to report a problem privately.
 

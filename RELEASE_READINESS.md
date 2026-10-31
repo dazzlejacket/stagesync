@@ -179,6 +179,14 @@ depends on are now pinned by tests
 (`the_normalisation_keeps_the_music_beside_a_silence_intact`,
 `a_recording_whose_silence_is_elsewhere_is_still_aligned`).
 
+The finding was **re-measured independently** on the repair branch: the
+prescribed change was applied again, the suite was run against it, and it was
+reverted. With the statistics taken from every frame,
+`the_normalisation_keeps_the_music_beside_a_silence_intact` fails — the
+silence beside the music flattens it, which is the very property the
+prescribed change is supposed to preserve. The experiment was reverted and
+nothing of it remains in the committed code.
+
 **What is still open:** `AGENTS.md` and the `PROJECT_STATUS.md` table describe a
 rule the code does not implement. The contract and the code must be reconciled
 before release, in one direction or the other — either the documents are

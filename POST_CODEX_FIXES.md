@@ -262,6 +262,14 @@ the signal-frame statistics and say why, or a different normalisation is
 designed that satisfies the rule *and* keeps the correspondence — which the
 measurement above says the obvious version of does not.
 
+**The finding was re-measured independently.** The prescribed change was
+applied again on the repair branch, the suite was run against it, and it was
+then reverted. With the statistics taken from every frame,
+`the_normalisation_keeps_the_music_beside_a_silence_intact` fails — the silence
+beside the music flattens it, which is exactly the property the prescribed
+change is supposed to preserve. The change was reverted and the tree returned
+to a clean state; nothing of the experiment remains in the committed code.
+
 ### P1-09 — the window extractor retained the whole suffix — **fixed**
 
 Once every requested window had been produced, the buffer was no longer
