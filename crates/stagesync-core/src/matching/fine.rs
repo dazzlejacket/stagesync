@@ -300,8 +300,15 @@ pub fn spectral_offsets(
     options: &FineOptions,
 ) -> Vec<MatchPoint> {
     let mut points = Vec::new();
-    let rate = source.rate_hz;
-    let win = (options.window_secs * rate).round() as usize;
+    // The two files' log-mel frame rates are equal only by accident. The hop is
+    // rounded to whole samples, so a 44.1 kHz file's frames are 32.0017 ms apart
+    // and a 48 kHz file's are 32 ms apart: the nominal rates are identical and the
+    // actual rates are 143 ppm apart. A frame index must therefore be converted
+    // with the rate of the file it indexes — the source's indices with the
+    // source's rate, the reference's with the reference's.
+    let source_rate = source.rate_hz;
+    let reference_rate = reference.rate_hz;
+    let win = (options.window_secs * source_rate).round() as usize;
 
     if win < 8 {
         return points;
@@ -311,15 +318,21 @@ pub fn spectral_offsets(
     let mut probe = half as f64;
     while (probe as usize) + half < source.n_frames {
         let p = probe as usize;
-        let predicted = model.reference_time(probe / rate);
-        let region_start = predicted - (half as f64 / rate) - options.search_secs;
-        let region_end = predicted + (half as f64 / rate) + options.search_secs;
+        // The probe's own time is the time of the frame that is actually read. The
+        // probe position is a fractional frame index and is truncated to the frame
+        // that is correlated, so the two differ by up to one frame — and a frame is
+        // 32 ms. Reporting the ideal position instead would put a 32 ms sawtooth on
+        // every measurement.
+        let source_time = p as f64 / source_rate;
+        let predicted = model.reference_time(source_time);
+        let region_start = predicted - (half as f64 / source_rate) - options.search_secs;
+        let region_end = predicted + (half as f64 / source_rate) + options.search_secs;
         let r0 = reference.index_at(region_start.max(0.0));
         let r1 = reference
             .index_at(region_end)
             .min(reference.n_frames.saturating_sub(1));
         if r1 <= r0 {
-            probe += options.hop_secs * rate;
+            probe += options.hop_secs * source_rate;
             continue;
         }
         let region_len = r1 - r0 + 1;
@@ -353,7 +366,7 @@ pub fn spectral_offsets(
             valid = true;
         }
         if !valid {
-            probe += options.hop_secs * rate;
+            probe += options.hop_secs * source_rate;
             continue;
         }
         let scale = 1.0 / source.n_bands as f32;
@@ -368,24 +381,25 @@ pub fn spectral_offsets(
             lag_min: -(win as i64 - 1),
             lag_max: region_len as i64,
         };
-        let min_sep = ((options.search_secs * rate * 0.5) as i64).max(1);
+        let min_sep = ((options.search_secs * reference_rate * 0.5) as i64).max(1);
         let peaks = find_peaks(&corr, 1, min_sep);
         if let Some(peak) = peaks.first() {
             let frac = parabolic_offset(&corr, peak.index);
             let lag_frames = peak.lag as f64 + frac;
-            let reference_time = r0 as f64 / rate + lag_frames / rate + half as f64 / rate;
+            // The reference's own frames, converted with the reference's own rate.
+            let reference_time = (r0 as f64 + lag_frames + half as f64) / reference_rate;
             let (score, reason) = score_point(peak.ncc, peak.zscore, 1.0, options);
             points.push(MatchPoint {
-                source_time: probe / rate,
+                source_time,
                 reference_time,
-                lag: reference_time - probe / rate,
+                lag: reference_time - source_time,
                 residual_ms: 0.0,
                 confidence: Confidence::new(score, reason),
                 method: MatchMethod::FineSpectral,
                 note: String::new(),
             });
         }
-        probe += options.hop_secs * rate;
+        probe += options.hop_secs * source_rate;
     }
     points
 }

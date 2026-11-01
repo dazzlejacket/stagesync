@@ -54,7 +54,12 @@ impl Default for LogMelConfig {
 /// A computed log-mel spectrogram, stored band-major.
 #[derive(Debug, Clone)]
 pub struct LogMel {
-    /// Frames per second.
+    /// Frames per second — the **actual** rate, not the nominal one.
+    ///
+    /// The hop is rounded to whole samples, so the frames of a 44.1 kHz file are
+    /// 32.0017 ms apart and the frames of a 48 kHz file are 32 ms apart: the two
+    /// nominal rates are the same and the two actual rates are not. A frame index
+    /// must therefore be converted with this rate, not with `1000 / hop_ms`.
     pub rate_hz: f64,
     /// Number of mel bands.
     pub n_bands: usize,
@@ -102,6 +107,7 @@ impl LogMel {
 /// Streaming log-mel extractor.
 pub struct LogMelExtractor {
     config: LogMelConfig,
+    sample_rate: u32,
     frame_len: usize,
     hop_len: usize,
     fft_size: usize,
@@ -153,6 +159,7 @@ impl LogMelExtractor {
 
         Self {
             config,
+            sample_rate,
             frame_len,
             hop_len,
             fft_size,
@@ -254,7 +261,9 @@ impl LogMelExtractor {
             values.extend_from_slice(band);
         }
         LogMel {
-            rate_hz: 1000.0 / self.config.hop_ms,
+            // The **actual** frame rate. The hop is rounded to whole samples, so it
+            // is only the nominal rate when the sample rate divides by it exactly.
+            rate_hz: self.sample_rate as f64 / self.hop_len as f64,
             n_bands: self.config.n_bands,
             n_frames: self.n_out_frames,
             values,
