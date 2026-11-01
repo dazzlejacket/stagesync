@@ -505,8 +505,14 @@ repeated.
 `UX_REVIEW.md` is its companion usability review. `POST_CODEX_FIXES.md` says
 what was done about each finding, and `RELEASE_READINESS.md` says what has
 actually been run, what has only been statically checked, and what has not
-been run at all — including the one finding that is still open and the
-decisions that are still the maintainer's to make.
+been run at all — including the decisions that are still the maintainer's to
+make.
+
+A second audit followed it. `FINAL_REPAIR_HANDOFF.md` is the account of that
+repair: the merged export that lost half its material, the log-mel cross-check
+that converted frame indices with the wrong rate, the recorder gap that
+defeated the coarse lock, and the measurements behind each of them — including
+the findings that were measured, understood and deliberately not changed.
 
 `CHANGELOG.md` records what changed, `CONTRIBUTING.md` says what a change has to
 satisfy, and `SECURITY.md` says how to report a problem privately.

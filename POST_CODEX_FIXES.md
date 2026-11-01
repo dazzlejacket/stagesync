@@ -262,6 +262,14 @@ the signal-frame statistics and say why, or a different normalisation is
 designed that satisfies the rule *and* keeps the correspondence — which the
 measurement above says the obvious version of does not.
 
+**Closed.** The rule and the code were reconciled in the direction the
+measurement supports: `AGENTS.md` now states the property that is actually
+wanted — *the normalised shape of the music must not change when silence is
+added or removed nearby* — and says that the local statistics are taken from the
+**signal frames only** precisely because that makes the shape silence-invariant.
+The document no longer describes an implementation that does not exist. See
+`FINAL_REPAIR_HANDOFF.md`.
+
 **The finding was re-measured independently.** The prescribed change was
 applied again on the repair branch, the suite was run against it, and it was
 then reverted. With the statistics taken from every frame,
@@ -438,6 +446,24 @@ deliberate — a three-hour fixture does not belong in the repository — and th
 directory is now per process, so two machines and two processes never share
 one.
 
+**The compressed-format test was the one place where this was not true.** It
+returned quietly when `ffmpeg` was missing or failed, so the AAC path was
+counted as covered when it had never been checked. It now **fails loudly**, with
+`SKIP-UNVERIFIED` and the reason, when `ffmpeg` is missing, fails, or produces
+a file of one kibibyte or less — and, once it could run at all, it found three
+further facts about the compressed path, which are recorded in
+`FINAL_REPAIR_HANDOFF.md`:
+
+* ffmpeg's AAC encoder refuses the project's own float WAV files, because they
+  declare `WAVE_FORMAT_EXTENSIBLE` with a zero channel mask;
+* an AAC encoder primes the stream with 1024 samples, so the decoded recording
+  is 23 ms later than the file it was made from;
+* the encoder only accepts a fixed list of sample rates, so a source at 7200 Hz
+  has to be resampled before it can be encoded — and that resampling is enough
+  to spoil the envelope's fine structure.
+
+*Changed:* `crates/stagesync-core/tests/robustness_tests.rs`.
+
 ### P2-09 — the independence and uncertainty claims exceeded the validation — **partly fixed**
 
 The claims that are now backed by an artefact are backed by an artefact:
@@ -487,9 +513,14 @@ being folded into a percentile.
 The waveform/envelope resampler reads input at `alpha * output_index`, and the
 quiet flags used `output_index / alpha`; for a non-unity scale those select
 different source positions. The flags now use the same coordinate as the
-samples.
+samples: `i * alpha`, the same expression the resampler's map uses.
 
 *Changed:* `crates/stagesync-core/src/calibration.rs`.
+
+**This entry was wrong before this repair pass.** The audit's account of the
+repair marked it *Fixed* while the code was still unchanged; the change was
+made afterwards, in the pass recorded in `FINAL_REPAIR_HANDOFF.md`. The same is
+true of P3-01 and P2-08 below.
 
 ---
 
@@ -501,6 +532,11 @@ It computed `abs(slope) / SE`, which is the signal-to-noise of a *rate*, rather
 than `abs(slope - 1) / SE`, which is the signal-to-noise of a *clock scale*.
 The helper is now correct, and the release decisions are unchanged — they
 already used the right expression.
+
+*Changed:* `crates/stagesync-core/src/matching/drift.rs`.
+
+**This entry was wrong before this repair pass:** the change was made
+afterwards, in the pass recorded in `FINAL_REPAIR_HANDOFF.md`.
 
 ### P3-02 — the packaging was not reproducible — **fixed**
 

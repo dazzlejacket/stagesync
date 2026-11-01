@@ -606,7 +606,7 @@ and the repairs are in `POST_CODEX_FIXES.md`; this section is the status.
 | P1-05 | The per-source timeline export exceeded its length | **fixed** |
 | P1-06 | Temporary WAV names collided within one process | **fixed** — exclusive creation, and the test fixture cache is per-process |
 | P1-07 | No size guard beyond 4 GiB | **fixed by refusal** — see §9.3 |
-| P1-08 | The normalisation contradicts the silence-independent rule | **open** — see §9.3 |
+| P1-08 | The normalisation contradicts the silence-independent rule | **closed** — the contract was corrected to describe the implementation the measurement supports; see §9.3 and §10 |
 | P1-09 | The window extractor retained the whole suffix | **fixed** |
 | P1-10 | The Windows packaging stopped before the build | **fixed** — but the NSIS installer is still unbuilt; see `RELEASE_READINESS.md` |
 | P1-11 | The packages omitted the licence material | **fixed** |
@@ -677,6 +677,13 @@ and the repairs are in `POST_CODEX_FIXES.md`; this section is the status.
    satisfies the rule *and* keeps the correspondence. Changing the repository's
    operating contract is the maintainer's decision, so it has been left open rather than
    resolved unilaterally.
+
+   **Closed in the repair pass.** `AGENTS.md` now states the property that is actually
+   wanted — *the normalised shape of the music must not change when silence is added or
+   removed nearby* — and says that the local statistics are taken from the **signal
+   frames only** precisely because that makes the shape silence-invariant. The
+   contract and the code agree, and the entry no longer describes an implementation
+   that does not exist. See `FINAL_REPAIR_HANDOFF.md`.
 2. **A recording longer than about four gigabytes of float audio cannot be exported.**
    RF64 was not implemented; the output is refused before it is written, with a message
    that says what to do about it.
@@ -692,3 +699,56 @@ and the repairs are in `POST_CODEX_FIXES.md`; this section is the status.
    a second — but a render already under way runs to completion, because stopping it
    half way would leave a truncated WAV behind.
 
+## 10. The second repair pass
+
+Release `0a128df` was audited a second time, by `CODEX_REPAIR_VERIFICATION.md`.
+The findings and the repairs are in `FINAL_REPAIR_HANDOFF.md`; this is the
+status.
+
+### 10.1 What the second audit found, and what is now true
+
+| Finding | Subject | State |
+|---|---|---|
+| P1 | The merged export lost 48 % of the material and displaced it by 15-29 s | **fixed** -- the cursor advanced by the frames it skipped and not by the frames it handed over |
+| P2 | The log-mel cross-check converted frame indices with the nominal rate | **fixed** -- each file's indices are converted with that file's own rate |
+| P2-13 | The calibration mapped quiet flags the wrong way round | **fixed** -- the change was made in this pass |
+| P3-01 | `SlopeFit::signal_to_noise` used the wrong expression | **fixed** -- the change was made in this pass |
+| P2-08 | The AAC test reported success when `ffmpeg` failed | **fixed** -- it now fails loudly, and it actually checks the compressed path |
+| P4 | `report.json` recorded staging paths and swallowed hash errors | **fixed** -- the final path is recorded and a hash error aborts the export |
+| P4 | The path-comparison claims overstated what is folded | **corrected** -- Unicode normalisation is not folded, and the claim now says so |
+| P4 | The release workflow had no `fmt` or `clippy` gate | **fixed** |
+| P5 | The quiet threshold depends on whether the recording has a gap | **measured and left alone** -- the coupling is 121.5 dB and does not move the correspondence |
+| P5 | The 90 s / 60 s gap case | **reconciled** -- the audit's own harness measured the ground truth; the pipeline did not |
+| P5 | `AGENTS.md`'s normalisation rule | **corrected** |
+| -- | The coarse lock was defeated by a recorder gap | **found and fixed** -- the whole-file correlation was not masked, and the peaks were ranked by the wrong criterion |
+
+### 10.2 What the second repair pass added
+
+* **Three new regression suites** -- `merged_timeline_tests.rs` (6 tests),
+  `spectral_timing_tests.rs` (5 tests) and `gap_alignment_tests.rs` (4 tests).
+  Each was checked against the code as it stood: the merged-timeline tests fail at
+  a displacement of exactly twenty seconds, the spectral test reports *"the
+  reference time is 132.9920 s instead of 132.9732 s"*, and the gap tests fail
+  with the coarse lock 106 000 ms from the truth and no trusted probe at all.
+* **A verdict on the noise-floor coupling** that does not rest on opinion: the
+  coupling is real, it is 121.5 dB, and the alignment does not depend on it, so
+  the rule was not changed.
+* **A reconciliation of the audit's own contradiction** about the 90-second
+  source with a 60-second gap, with the arithmetic that shows why ten trusted
+  probes is impossible for that fixture.
+
+### 10.3 What the second repair pass did not fix
+
+1. **The robust fit cannot reject a gross outlier when only three or four probes
+   are trusted.** A probe 11.5 s out was trusted with a confidence of 0.507 and
+   the resulting offset was 3.8 s wrong. The drift was correctly refused; the
+   offset was not protected.
+2. **The fine stage never probes the last half-window of a source**, so material
+   in the final fifteen seconds of a recording is never probed.
+3. **The float WAV writer emits `WAVE_FORMAT_EXTENSIBLE` with a zero channel
+   mask.** Most tools read the file correctly; ffmpeg's AAC encoder does not.
+4. **The noise-floor coupling** -- measured, and left alone on the evidence.
+5. **The envelope's ten-millisecond hop does not divide evenly at every sample
+   rate.** The envelope's rate is nominal and shared by both sides of every
+   comparison, so the matcher is consistent, but a frame index from an envelope
+   must never be converted with a different rate -- which is what P2 was about.

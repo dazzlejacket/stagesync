@@ -26,8 +26,8 @@ Run from the repository root, in this order, on a cold fixture cache:
 |---|---|---|
 | Formatting | `cargo fmt --all -- --check` | clean, exit 0 |
 | Lints | `cargo clippy --workspace --all-targets -- -D warnings` | clean, exit 0 |
-| Tests | `cargo test --workspace` | **157 passed, 0 failed**, exit 0 |
-| Release build | `cargo build --release` | exit 0 |
+| Tests | `cargo test --workspace` | **172 passed, 0 failed**, exit 0 |
+| Release build | `cargo build --release --workspace` | exit 0, no warnings |
 
 The test run is genuinely cold: each test process keeps its own fixture
 directory under the operating system's temporary directory and holds the
@@ -37,6 +37,10 @@ green.
 
 `cargo fmt` and `cargo clippy` are both run with `-D warnings` — no lint rule
 was weakened and no test was removed to make a run green.
+
+The release workflow now repeats both of the first two gates itself, because a
+release can be cut from a tag that never went through CI, and it installs
+`ffmpeg` explicitly — the AAC test now fails loudly without it.
 
 ### 1.2 The real recordings
 
@@ -151,10 +155,11 @@ applied by the renderer, the merged timeline is exactly the reference's length,
 and the export is verified independently of the fit. What is missing is the
 window around them.
 
-### 3.2 The normalisation rule (P1-08) — **a decision for the maintainer**
+### 3.2 The normalisation rule (P1-08) — **closed**
 
-This is the one audit finding whose prescribed repair was **measured to be
-harmful**, and it is the one open item that blocks a release.
+This was the one audit finding whose prescribed repair was **measured to be
+harmful**, and it was the one open item that blocked a release. It is now
+closed.
 
 `AGENTS.md` requires the envelope's local statistics to be *identical for both
 files*, with the silent frames excluded from the correlation instead. The code
@@ -187,13 +192,38 @@ silence beside the music flattens it, which is the very property the
 prescribed change is supposed to preserve. The experiment was reverted and
 nothing of it remains in the committed code.
 
-**What is still open:** `AGENTS.md` and the `PROJECT_STATUS.md` table describe a
-rule the code does not implement. The contract and the code must be reconciled
-before release, in one direction or the other — either the documents are
-corrected to describe the signal-frame statistics and say why, or a different
-normalisation is designed that satisfies the rule *and* keeps the
-correspondence. That is the maintainer's decision, not the auditor's, so it has
-been left open rather than resolved unilaterally.
+**The contract and the code now agree.** `AGENTS.md` states the property that
+is actually wanted — *the normalised shape of the music must not change when
+silence is added or removed nearby* — and says that the local statistics are
+taken from the signal frames only *because* that makes the shape
+silence-invariant. The contract no longer describes an implementation that does
+not exist, so the item no longer blocks a release.
+
+### 3.2a The second audit's findings (P1–P5) — **closed, with four exceptions**
+
+`CODEX_REPAIR_VERIFICATION.md` was a second, independent audit. Its findings
+and the repairs are in `FINAL_REPAIR_HANDOFF.md`. The four exceptions — items
+that were measured, understood and deliberately not changed — are:
+
+1. **The robust fit cannot reject a gross outlier when only three or four probes
+   are trusted.** A probe 11.5 s out was trusted with a confidence of 0.507 and
+   the resulting offset was 3.8 s wrong. The drift was correctly refused (the
+   fit's signal-to-noise was 1.9, below the factor of three), but the offset was
+   not protected. A source with only a handful of trusted probes is the
+   vulnerable case; the two real recordings have hundreds.
+2. **The fine stage never probes the last half-window of a source**, so material
+   in the final fifteen seconds of a recording is never probed.
+3. **The float WAV writer emits `WAVE_FORMAT_EXTENSIBLE` with a zero channel
+   mask.** Most tools read the file correctly; ffmpeg's AAC encoder refuses it.
+   The writer was left alone because changing it changes the bytes of every
+   export.
+4. **The noise-floor coupling** — the quiet threshold is 121.5 dB lower for a
+   recording that contains digital silence. It was measured, and it does not
+   move the correspondence, so the rule was not changed.
+
+None of the four affects the two real recordings: their offsets are exact to
+the millisecond, their drift is measured on hundreds of probes, and their hold-
+out verification agrees with the model to within a fraction of a millisecond.
 
 ### 3.3 The 4 GiB output limit (P1-07)
 
@@ -225,14 +255,18 @@ either RF64 support or a shorter export window.
    has been corrected and statically checked, but no compiler has seen it.
 2. **Build the Linux and macOS packages on their own platforms.** The AppImage,
    the `.deb` and the `.dmg` are unproven end to end.
-3. **Decide P1-08.** Reconcile `AGENTS.md` and the code, or design a
-   normalisation that satisfies both. This is the one open P1.
+3. **Decide P1-08 — done.** `AGENTS.md` and the code were reconciled in the
+   direction the measurement supports: the contract now describes the
+   signal-frame statistics and says why. See §3.2.
 4. **Observe the window.** No one has watched the application run. The GUI
    changes are substantial, and the layout has only been exercised by a test
    against an empty session.
 5. **Decide on UX-stable.** Either build the waveform tracks and the A/B
    audition, or record the decision to ship without them.
 6. **Note the 4 GiB limit** in the release notes, or implement RF64.
+7. **Decide on the four exceptions in §3.2a.** They are measured and
+   understood; each is a policy question rather than a defect, and the
+   maintainer should decide whether they are acceptable for this release.
 
 ---
 
@@ -247,8 +281,11 @@ is not; "static" means the artefact was checked without being produced.
 |---|---|---|
 | Formatting | `cargo fmt --all -- --check`, exit 0 | native |
 | Lints | `cargo clippy --workspace --all-targets -- -D warnings`, exit 0 | native |
-| Tests | `cargo test --workspace`, 156 passed, 0 failed, cold cache, parallel and serial | native |
-| Release build | `cargo build --release`, exit 0 | native |
+| Tests | `cargo test --workspace`, 172 passed, 0 failed, cold cache, parallel and serial | native |
+| Release build | `cargo build --release --workspace`, exit 0 | native |
+| The merged timeline | exported from the two watch recordings and verified independently: the file is exactly the reference's length, every uncovered span is digital silence, 72 windows at a worst lag of **0.0 ms** | native |
+| The log-mel cross-check | the spectral cross-check disagrees with the envelope fit at **no** position on either real recording; the median point-by-point difference is 11.8 ms and 11.3 ms | native |
+| A recorder gap | the coarse lock on the audit's own short fixtures: an offset error of 0 ms, against 87.5 s, 144 s, 10 s and 41.5 s before the repair | native |
 | Real-material alignment and export | `Voice_006` against `audio/combined.wav`, exported and verified independently | native |
 | Independent verification | `tools/verify_exports.py`, 18 of 24 trusted, p50 0.030 ms | native |
 | Verifier trust thresholds | `--min-peak-ratio 1.10`, `--min-agreement 0.60`, `min_trusted 5` — unchanged from the audited release | static |
