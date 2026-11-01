@@ -157,12 +157,18 @@ test is genuinely wrong — and then say so explicitly.
   onto the wrong place turns into a per-cent rate error that then displaces every fine
   probe. The coarse stage finds *where* the recording is. The fine stage, with hundreds
   of probes, measures *how fast its clock ran*.
-* **Making the envelope's normalisation depend on where the silence is.** If the local
-  z-score is computed from the signal frames only, the source and the reference get
-  different shapes wherever their silence differs — and that difference is a bias in the
-  measured drift. Keep the statistics identical for both files and exclude the silent
-  frames from the *correlation* instead (`ncc_correlate_masked`), where they cannot bias
-  anything.
+* **Making the envelope's normalisation depend on where the silence is.** The property
+  the matcher depends on is that *the normalised shape of the music does not change when
+  silence is added or removed nearby*. The local z-score's statistics are therefore taken
+  from the **signal frames only** — precisely because that makes the shape
+  silence-invariant: a silence added next to the music does not change which frames are
+  signal frames in the window, so it does not change the window's mean or spread, so it
+  does not change the normalised values of the music at all. The silent frames are
+  excluded from the *correlation* (`ncc_correlate_masked`), where they cannot bias
+  anything. Taking the statistics from every frame instead is the opposite of what the
+  rule asks for: it makes the normalised shape depend on how much silence happens to be
+  in the window, and it was measured to be worse — every probe of a gapped recording
+  became untrustworthy.
 * **A correlation that multiplies `A * conj(B)`** inverts the lag sign. The convention
   is `a[n] ~= b[n + lag]`, positive lag means `b` runs late.
 * **Decoding a packet without stopping.** A decode loop that keeps pulling packets after
@@ -238,6 +244,23 @@ test is genuinely wrong — and then say so explicitly.
   measured on the **rendered** file, where the residuals are flat if the rate is
   right and slope if it is wrong. Measured against the model that produced them, the
   residuals are flat by construction and the figure is meaningless.
+* **Converting one file's frame indices with the other file's rate.** The log-mel hop
+  is rounded to whole samples, so a 44.1 kHz file's frames are 32.0017 ms apart and a
+  48 kHz file's are 32 ms apart: the two nominal rates are identical and the two
+  actual rates are 143 ppm apart. A frame index must be converted with the rate of
+  the file it indexes, and the rate must be the **actual** one
+  (`sample_rate / hop_len`), not `1000 / hop_ms`. Getting this wrong made the spectral
+  cross-check report reference times that were short by 143 ppm — 690 ms by the end of
+  an eighty-minute recording — and made it disagree with the envelope fit on material
+  where the two estimators were in fact agreeing.
+* **Advancing a cursor by the frames it handed over.** The merged timeline's cursor
+  walks each source's material once and hands it over span by span. Its position has
+  to advance by exactly the frames that leave it — the ones discarded because they lie
+  before the requested span, and the ones handed to the caller. A cursor that advanced
+  only for the frames it *skipped* computed the next span's skip from a stale origin,
+  threw away material it had already given away, and read from further along the
+  recording than the plan asked for. The merged export kept about half the material it
+  was supposed to contain and placed it fifteen to twenty-nine seconds away, silently.
 
 ## Git
 

@@ -426,14 +426,103 @@ pub fn find_peaks(corr: &Correlation, max_peaks: usize, min_separation: i64) -> 
         .collect()
 }
 
+/// Find the strongest correlation peaks, ranked by the **overlap-normalised** value.
+///
+/// This is the criterion the **coarse** stage uses, and it differs from
+/// [`find_peaks`] deliberately.
+///
+/// `find_peaks` ranks by the matched-filter score with a *global* normalisation,
+/// which is the right criterion when a short overlap must not outrank a real
+/// match. It is the wrong criterion when the reference's own level varies over the
+/// compared span: the matched-filter sum is linear in the reference's amplitude,
+/// so it is largest where the reference happens to be most dynamic, not where the
+/// two envelopes agree best. Measured against a synthetic fixture with a known
+/// correspondence, that bias put the coarse lock 144 seconds away from the truth
+/// on a ninety-second source whose music was split by a recorder gap.
+///
+/// The overlap-normalised value divides the same sum by the energy of exactly the
+/// material that was compared, so it measures the *shape* agreement — which is
+/// what the envelope matcher is looking for. The short-overlap edge artefacts
+/// that made this project abandon the normalised ranking are excluded here by the
+/// same reliability rule `find_peaks` uses: a lag whose overlap is below half of
+/// the usable samples is not evidence of anything.
+///
+/// The peaks are returned **strongest first**, on the normalised value.
+pub fn find_peaks_by_ncc(corr: &Correlation, max_peaks: usize, min_separation: i64) -> Vec<Peak> {
+    if corr.len() < 3 {
+        return Vec::new();
+    }
+    let mut candidates: Vec<usize> = Vec::new();
+    for k in 1..corr.len() - 1 {
+        let lag = corr.lag_min + k as i64;
+        // Lags with too little overlap are not evidence of anything.
+        if !corr.is_reliable(lag) {
+            continue;
+        }
+        if corr.values[k] > corr.values[k - 1] && corr.values[k] >= corr.values[k + 1] {
+            candidates.push(k);
+        }
+    }
+    candidates.sort_unstable_by(|&x, &y| {
+        corr.values[y]
+            .partial_cmp(&corr.values[x])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut picked: Vec<usize> = Vec::new();
+    for k in candidates {
+        if picked.len() >= max_peaks {
+            break;
+        }
+        let lag = corr.lag_min + k as i64;
+        if picked
+            .iter()
+            .all(|&p| (corr.lag_min + p as i64 - lag).abs() >= min_separation)
+        {
+            picked.push(k);
+        }
+    }
+
+    picked
+        .into_iter()
+        .map(|k| {
+            let lag = corr.lag_min + k as i64;
+            let (mean, std) = sidelobe_stats_on(&corr.values, corr, k, min_separation);
+            let z = if std > 1e-9 {
+                (corr.values[k] - mean) / std
+            } else {
+                0.0
+            };
+            Peak {
+                lag,
+                value: corr.fixed[k],
+                ncc: corr.values[k],
+                zscore: z,
+                index: k,
+            }
+        })
+        .collect()
+}
+
 /// Mean and standard deviation of the correlation curve with the peak neighbourhood
 /// and the unreliable lags removed.
 pub fn sidelobe_stats(corr: &Correlation, peak_index: usize, min_separation: i64) -> (f32, f32) {
+    sidelobe_stats_on(&corr.fixed, corr, peak_index, min_separation)
+}
+
+/// Mean and standard deviation of a given curve with the peak neighbourhood and the
+/// unreliable lags removed.
+fn sidelobe_stats_on(
+    curve: &[f32],
+    corr: &Correlation,
+    peak_index: usize,
+    min_separation: i64,
+) -> (f32, f32) {
     let peak_lag = corr.lag_min + peak_index as i64;
     let mut count = 0u64;
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
-    for (k, &v) in corr.fixed.iter().enumerate() {
+    for (k, &v) in curve.iter().enumerate() {
         let lag = corr.lag_min + k as i64;
         if (lag - peak_lag).abs() < min_separation {
             continue;

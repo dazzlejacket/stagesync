@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::dsp::{find_peaks, ncc_correlate, ncc_correlate_masked};
+use super::dsp::{find_peaks_by_ncc, ncc_correlate_masked};
 use super::model::LinearModel;
 use crate::features::Envelope;
 
@@ -198,7 +198,7 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
         // peak away from the true position.
         let mask = &src_quiet_dec[pos..pos + window_len];
         let corr = ncc_correlate_masked(query, &ref_dec, Some(mask));
-        let peaks = find_peaks(&corr, config.max_candidates, min_sep_samples.max(1));
+        let peaks = find_peaks_by_ncc(&corr, config.max_candidates, min_sep_samples.max(1));
         let centre = (pos as f64 + window_len as f64 / 2.0) / rate;
 
         if peaks.is_empty() {
@@ -293,7 +293,17 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
     // it uses every sample of both recordings at once. Individual windows can be fooled
     // by a passage that happens to sound like another one; the whole-file correlation
     // is what breaks that tie.
-    let (full_lag, full_score) = full_range_correlation(&src_dec, &ref_dec, rate);
+    //
+    // It is only reliable while the recording has no hole in it. A recorder gap
+    // contributes frames that carry no information, and correlating them against the
+    // reference's music corrupts the peak: on a ninety-second source of which sixty
+    // seconds are a gap, the unmasked whole-file correlation landed between ten and a
+    // hundred and forty-four seconds away from the truth, and it overrode a window
+    // consensus that had found the right offset. The gap is therefore excluded from
+    // the comparison exactly as it is excluded from the window correlations — the
+    // reference's energy is measured over precisely the same positions, so the two
+    // sides are always compared over the same material.
+    let (full_lag, full_score) = full_range_correlation(&src_dec, &ref_dec, &src_quiet_dec, rate);
 
     // Choose the candidate that the whole-file correlation agrees with. Without that
     // agreement, a candidate needs support from at least two windows before it is
@@ -371,9 +381,18 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
 }
 
 /// Correlate the whole source envelope against the whole reference envelope.
-fn full_range_correlation(src_dec: &[f32], ref_dec: &[f32], rate: f64) -> (Option<f64>, f32) {
-    let corr = ncc_correlate(src_dec, ref_dec);
-    let peaks = find_peaks(&corr, 1, 1);
+///
+/// The source's silent frames are excluded from the comparison, so that a recorder
+/// gap cannot drag the peak away from the true correspondence. See the call site for
+/// why this measurement has to be masked as well.
+fn full_range_correlation(
+    src_dec: &[f32],
+    ref_dec: &[f32],
+    src_quiet_dec: &[bool],
+    rate: f64,
+) -> (Option<f64>, f32) {
+    let corr = ncc_correlate_masked(src_dec, ref_dec, Some(src_quiet_dec));
+    let peaks = find_peaks_by_ncc(&corr, 1, 1);
     match peaks.first() {
         Some(p) => (Some(p.lag as f64 / rate), p.value),
         None => (None, 0.0),
