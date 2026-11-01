@@ -535,9 +535,24 @@ pub fn render_reference_timeline(
 /// its two channels, and it is driven by that source's **own** sample rate.
 struct SourceCursor {
     decoder: AudioDecoder,
+    /// The position map this source's material is read through.
+    geometry: Geometry,
+    options: RenderOptions,
+    /// The output frame the source's material starts at.
+    start_frame: i64,
+    /// One position map per channel of the source.
     processors: Vec<Processor>,
     /// Output frames not yet consumed, starting at frame index `pending_start`.
     pending: Vec<VecDeque<f32>>,
+    /// The cursor's position on the timeline: the output frame index of the first
+    /// frame still held in `pending`.
+    ///
+    /// This advances by exactly the frames that *leave* the cursor — the ones
+    /// discarded because they lie before the requested span, and the ones handed to
+    /// the caller. A cursor whose position did not advance would compute the next
+    /// span's skip from a stale origin, throw away material it had already given
+    /// away and read from further along the recording than the plan asked for,
+    /// which is how a merged timeline ends up short and displaced.
     pending_start: i64,
     finished: bool,
     block_frames: usize,
@@ -550,14 +565,13 @@ impl SourceCursor {
         start_frame: i64,
         options: &RenderOptions,
     ) -> Self {
-        let channels = decoder.meta().channels.max(1);
-        let processors = (0..channels)
-            .map(|_| Processor::new(geom, options, start_frame, None))
-            .collect();
         Self {
             decoder,
-            processors,
-            pending: vec![VecDeque::new(); channels],
+            geometry: geom,
+            options: options.clone(),
+            start_frame,
+            processors: Vec::new(),
+            pending: Vec::new(),
             pending_start: start_frame,
             finished: false,
             block_frames: options.block_frames,
@@ -576,6 +590,18 @@ impl SourceCursor {
                 self.finished = true;
                 break;
             };
+            if self.processors.is_empty() {
+                // The channel count comes from the samples the decoder actually
+                // hands over, not from the container's claim about it. A file whose
+                // metadata names more channels than the stream carries would
+                // otherwise leave a channel that never receives a sample, and a
+                // frame only one channel has is not a frame of the recording.
+                let channels = block.planes.len().max(1);
+                self.processors = (0..channels)
+                    .map(|_| Processor::new(self.geometry, &self.options, self.start_frame, None))
+                    .collect();
+                self.pending = vec![VecDeque::new(); channels];
+            }
             for index in 0..self.processors.len() {
                 let plane = block.planes.get(index).map(Vec::as_slice).unwrap_or(&[]);
                 let out = self.processors[index].push(plane);
@@ -585,26 +611,43 @@ impl SourceCursor {
         Ok(())
     }
 
-    /// The number of frames every channel holds.
+    /// The number of frames the channels hold **in common**.
+    ///
+    /// The channels are driven by one position map, so they hold the same frames.
+    /// The minimum is taken so that a frame one channel does not have is never
+    /// treated as a frame of the recording.
     fn pending_len(&self) -> usize {
-        self.pending.first().map_or(0, |p| p.len())
+        self.pending.iter().map(|p| p.len()).min().unwrap_or(0)
     }
 
     /// Take the frames in `[from, to)`, one plane per channel.
+    ///
+    /// Every channel returns the **same number of frames**: a frame that one channel
+    /// does not have is not a frame of the recording, and the writer requires the
+    /// planes it is given to be of equal length.
     fn take(&mut self, from: i64, to: i64) -> Result<Vec<Vec<f32>>> {
         self.fill_to(to)?;
+
+        // The frames that lie before `from` are discarded.
         let skip = (from - self.pending_start).max(0) as usize;
+        let mut discarded = 0usize;
         for pending in self.pending.iter_mut() {
-            for _ in 0..skip.min(pending.len()) {
+            let removed = skip.min(pending.len());
+            for _ in 0..removed {
                 pending.pop_front();
             }
+            discarded = discarded.max(removed);
         }
-        self.pending_start += skip as i64;
+        self.pending_start += discarded as i64;
+
+        // Only the frames every channel holds are frames of the recording.
         let want = (to - from).max(0) as usize;
+        let count = want.min(self.pending_len());
+
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(self.pending.len());
         for pending in self.pending.iter_mut() {
-            let mut plane = Vec::with_capacity(want);
-            for _ in 0..want {
+            let mut plane = Vec::with_capacity(count);
+            for _ in 0..count {
                 match pending.pop_front() {
                     Some(v) => plane.push(v),
                     None => break,
@@ -612,6 +655,12 @@ impl SourceCursor {
             }
             out.push(plane);
         }
+
+        // The frames that were handed over are gone, so the cursor now stands at the
+        // frame after the last one it returned. A **short read** — the source ran
+        // out before the span did — advances the cursor by what was actually
+        // returned, not by what was asked for.
+        self.pending_start += count as i64;
         Ok(out)
     }
 }
@@ -691,6 +740,12 @@ pub fn render_merged_timeline(
     let mut cursor = 0u64;
     let mut source_frames = 0u64;
     let mut silence_frames = 0u64;
+    // Whether any source's material was put through the resampler. The flag is
+    // derived from the geometry that was actually used, so a merged timeline of
+    // sources that all need no rate change reports `false` — the same rule the
+    // two per-source layouts follow. Claiming otherwise would make the three
+    // layouts disagree with each other about the same correction.
+    let mut resampled = false;
 
     for span in &report.timeline {
         let start = (span.reference_start * output_rate as f64)
@@ -735,6 +790,7 @@ pub fn render_merged_timeline(
                 };
                 let source_rate = source_rates[index];
                 let geom = geometry_timeline(&model, source_rate, output_rate);
+                resampled = resampled || !geom.is_unity_copy();
                 if cursors[index].is_none() {
                     let decoder = decoders[index].take().ok_or_else(|| {
                         anyhow::anyhow!(
@@ -785,9 +841,13 @@ pub fn render_merged_timeline(
         frames,
         source_frames,
         silence_frames,
+        // The merged timeline is the reference's own timeline: it is written at the
+        // reference's rate, so its effective rate is one and it carries no pitch
+        // shift of its own. Each source's drift correction is described by that
+        // source's own model.
         effective_rate: 1.0,
         pitch_shift_cents: 0.0,
-        resampled: true,
+        resampled,
     })
 }
 
@@ -810,9 +870,9 @@ pub fn prepare_output(path: &Path) -> Result<()> {
 /// altered at all, so this is refused rather than carried out.
 ///
 /// The comparison models the file system the export is going to, not the one the
-/// code happens to run on: a name that differs only in case, or only in its
-/// Unicode normalisation, names the same file on the volumes a user actually
-/// exports to.
+/// code happens to run on: a name that differs only in case names the same file
+/// on Windows and on a case-insensitive volume. See [`same_path`] for exactly
+/// what is and is not folded.
 pub fn ensure_output_does_not_overwrite(output: &Path, inputs: &[PathBuf]) -> Result<()> {
     let Some(target) = comparable_path(output) else {
         return Ok(());
@@ -897,14 +957,23 @@ fn comparable_path(path: &Path) -> Option<PathBuf> {
 /// The answer depends on the platform, because the file systems do:
 ///
 /// * Windows compares names without regard to case.
-/// * macOS and Linux normally do not, but a case-insensitive volume does — and a
-///   name that differs only in Unicode normalisation names the same file on a
-///   file system that normalises names.
+/// * macOS and Linux normally do not, but a case-insensitive volume does.
 ///
 /// Rather than guess, the comparison asks the operating system. An existing file
 /// is identified by its canonical path, which resolves symbolic links and gives
-/// the name the file system actually stores. A file that does not exist yet is
-/// compared by a name that has been folded the way the platform folds names.
+/// the name the file system actually stores — so on a file system that
+/// normalises names, two spellings of the same *existing* file are recognised
+/// as the same file, because the canonical path is the stored spelling of both.
+///
+/// What is **not** done is folding Unicode normalisation into the comparison.
+/// Two names that differ only in their Unicode normalisation are the same file
+/// on a file system that normalises names, but the comparison does not know
+/// that: it compares the names as they are written. The case where this could
+/// matter — an output name that differs from a recording's name only in
+/// normalisation, and the output does not exist yet — is therefore not
+/// detected. Folding normalisation would need a Unicode database, and on
+/// Windows it would be wrong: NTFS stores the name it is given, so two
+/// differently-normalised names really are two files there.
 fn same_path(a: &Path, b: &Path) -> bool {
     // An existing file may be reached through a link or through a different
     // spelling of its name; the canonical path settles that.
