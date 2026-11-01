@@ -204,12 +204,20 @@ pub fn warp_envelope(env: &Envelope, scale: f64, config: &CalibrationConfig) -> 
     db.extend_from_slice(&db_res.flush());
     norm.extend_from_slice(&norm_res.flush());
 
-    // The quiet flags follow the original timeline; the resampled level decides too.
+    // The quiet flags follow the warped timeline, and they have to follow it in
+    // the **same** direction as the samples.
+    //
+    // The resampler reads the input at `alpha * output_index`, with
+    // `alpha = 1 / scale`, so output frame `i` carries the material of input
+    // frame `i * alpha`. The flag for that frame has to come from that same
+    // input frame; taking `i / alpha` instead would attach every flag to the
+    // wrong span, and the error is invisible when the scale is one and grows
+    // with the drift when it is not.
     let quiet: Vec<bool> = db
         .iter()
         .enumerate()
         .map(|(i, v)| {
-            let src = (i as f64 / alpha).floor() as usize;
+            let src = (i as f64 * alpha).floor() as usize;
             let was_quiet = env.quiet.get(src).copied().unwrap_or(false);
             was_quiet && *v < env.quiet_threshold_db
         })

@@ -53,13 +53,17 @@ impl SlopeFit {
 
     /// How many times the drift exceeds its own uncertainty.
     ///
+    /// The drift is the slope's departure from unity, not the slope itself: a
+    /// clock that runs at exactly the reference's rate has a slope of one and no
+    /// drift at all, so the comparison is against one and not against zero.
+    ///
     /// A value below one means the drift is not distinguishable from zero; the sign of
     /// the drift would then be a property of the noise.
     pub fn signal_to_noise(&self) -> f64 {
         if self.slope_se <= 0.0 {
             f64::INFINITY
         } else {
-            self.slope.abs() / self.slope_se
+            (self.slope - 1.0).abs() / self.slope_se
         }
     }
 

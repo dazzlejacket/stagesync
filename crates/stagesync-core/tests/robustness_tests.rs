@@ -19,6 +19,15 @@ use tempfile::TempDir;
 
 const RATE: u32 = 8000;
 const SOURCE_RATE: u32 = 7200;
+/// The rate the compressed test's source is written at.
+///
+/// The AAC encoder this test uses only accepts a fixed list of sample rates, so
+/// a source at 7200 Hz would have to be resampled by the encoder before it was
+/// encoded. The resampling is itself a large degradation, and it is not what
+/// this test is about: the test is about the *compressed* path. The source is
+/// therefore written at a rate the encoder accepts as it is, so the encode
+/// changes nothing but the compression.
+const COMPRESSED_RATE: u32 = 44100;
 const DURATION: f64 = 120.0;
 
 /// Run the analysis and return the result, without panicking on a failure.
@@ -33,6 +42,16 @@ fn try_analyse(
 
 /// Build a source file from the shared reference.
 fn build_source(dir: &TempDir, name: &str, duration_secs: Option<f64>) -> (PathBuf, GroundTruth) {
+    build_source_at(dir, name, duration_secs, SOURCE_RATE)
+}
+
+/// Build a source file from the shared reference, at a chosen rate.
+fn build_source_at(
+    dir: &TempDir,
+    name: &str,
+    duration_secs: Option<f64>,
+    out_rate: u32,
+) -> (PathBuf, GroundTruth) {
     let rs = reference_signal(RATE, DURATION, 0xC0FFEE);
     let (samples, truth) = make_source(
         &rs,
@@ -40,14 +59,14 @@ fn build_source(dir: &TempDir, name: &str, duration_secs: Option<f64>) -> (PathB
         SourceSpec {
             scale: 1.0,
             offset: 20.0,
-            out_rate: SOURCE_RATE,
+            out_rate,
             gain_db: -20.0,
             duration_secs,
         },
         0xBEEF,
     );
     let path = dir.path().join(name);
-    write_wav(&path, &samples, SOURCE_RATE, WavFormat::Float32);
+    write_wav(&path, &samples, out_rate, WavFormat::Float32);
     (path, truth)
 }
 
@@ -180,23 +199,59 @@ fn cancelling_during_the_analysis_stops_it_promptly() {
 fn a_compressed_recording_is_matched_like_an_uncompressed_one() {
     let dir = TempDir::new().expect("temp dir");
     let reference = reference_file(RATE, DURATION, 0xC0FFEE);
-    let (wav, truth) = build_source(&dir, "src.wav", None);
+    let (wav, truth) = build_source_at(&dir, "src.wav", None, COMPRESSED_RATE);
 
     // Encode to AAC in an MP4 container, the way a watch recorder writes a file.
+    //
+    // The channel layout is stated on the command line because the project's own
+    // float WAV files declare `WAVE_FORMAT_EXTENSIBLE` with a **zero channel
+    // mask**, which the specification leaves unspecified and which ffmpeg's
+    // demuxer therefore reports as an unknown layout. ffmpeg's AAC encoder
+    // refuses a stream whose layout it does not know — it fails with
+    // "Unsupported channel layout" — while its other encoders accept it. The
+    // file's data is mono, so the layout is stated as mono here. This is a
+    // property of the writer, not of the material, and it is recorded in
+    // `FINAL_REPAIR_HANDOFF.md`.
     let m4a = dir.path().join("src.m4a");
     let encoded = std::process::Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-channel_layout",
+            "mono",
+            "-i",
+        ])
         .arg(&wav)
         .args(["-c:a", "aac", "-b:a", "128k"])
         .arg(&m4a)
         .status();
+    // A failed encode must not be reported as a pass. The test either checks
+    // the compressed path or it says plainly that the compressed path was not
+    // checked; it never returns quietly.
     match encoded {
         Ok(status) if status.success() => {}
-        _ => {
-            println!("ffmpeg is not available; skipping the compressed-format check");
-            return;
-        }
+        Ok(status) => panic!(
+            "SKIP-UNVERIFIED: ffmpeg exited with {status} and did not produce the AAC file, so \
+             the compressed-format path was not verified"
+        ),
+        Err(err) => panic!(
+            "SKIP-UNVERIFIED: ffmpeg could not be run ({err}), so the compressed-format path was \
+             not verified"
+        ),
     }
+    // The encode has to have produced a file, and not an empty one: an empty
+    // file decodes as silence, and the assertions below would then pass for
+    // the wrong reason.
+    let size = std::fs::metadata(&m4a)
+        .expect("the encoded file should exist")
+        .len();
+    assert!(
+        size > 1024,
+        "SKIP-UNVERIFIED: the encoded AAC file is only {size} bytes, so the compressed-format \
+         path was not verified"
+    );
 
     let report = try_analyse(&reference, std::slice::from_ref(&m4a), &config())
         .expect("the analysis should work");
@@ -215,8 +270,89 @@ fn a_compressed_recording_is_matched_like_an_uncompressed_one() {
     let mut sorted = errors.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = sorted[sorted.len() / 2].abs();
+    // The same material, uncompressed, for comparison.
+    let plain = try_analyse(&reference, std::slice::from_ref(&wav), &config())
+        .expect("the analysis should work");
+    let plain_errors: Vec<f64> = plain.sources[0]
+        .points
+        .iter()
+        .filter(|p| p.confidence.is_trustworthy())
+        .map(|p| (p.reference_time - truth.reference_time(p.source_time)) * 1000.0)
+        .collect();
     assert!(
-        p50 <= 10.0,
+        plain_errors.len() >= 5,
+        "expected at least 5 confident positions in the uncompressed recording, got {}",
+        plain_errors.len()
+    );
+    let mut plain_sorted = plain_errors.clone();
+    plain_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let plain_p50 = plain_sorted[plain_sorted.len() / 2].abs();
+    assert!(
+        plain_p50 <= 10.0,
+        "the uncompressed recording was already misaligned: p50 error {plain_p50:.3} ms"
+    );
+
+    // **The property under test.** The compressed recording has to be matched
+    // like the uncompressed one: the two analyses have to agree on *where* the
+    // material is, to within the same precision.
+    //
+    // They will not agree on the *absolute* time, because an AAC encoder
+    // primes the stream with 1024 samples and the decoder does not take them
+    // back out again: the compressed recording starts 1024 samples late, which
+    // is 23 ms at this rate. That is a property of the codec, it is the same
+    // for every probe, and it is not something the matcher can undo. What the
+    // matcher *can* do is place the material as precisely as it places the
+    // uncompressed material, so the difference between the two analyses has to
+    // be one constant.
+    let compressed: Vec<(f64, f64)> = alignment
+        .points
+        .iter()
+        .filter(|p| p.confidence.is_trustworthy())
+        .map(|p| (p.source_time, p.reference_time))
+        .collect();
+    let uncompressed: Vec<(f64, f64)> = plain.sources[0]
+        .points
+        .iter()
+        .filter(|p| p.confidence.is_trustworthy())
+        .map(|p| (p.source_time, p.reference_time))
+        .collect();
+    // The two analyses probe the same positions, but not always the same
+    // *number* of them, so the probes are paired by their position in the
+    // source rather than by their order.
+    let mut differences: Vec<f64> = compressed
+        .iter()
+        .filter_map(|(t, c)| {
+            uncompressed
+                .iter()
+                .find(|(u, _)| (u - t).abs() < 1e-6)
+                .map(|(_, u)| (c - u) * 1000.0)
+        })
+        .collect();
+    assert!(
+        differences.len() >= 5,
+        "only {} probe(s) were trusted in both analyses",
+        differences.len()
+    );
+    differences.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = differences[differences.len() / 2];
+    let spread = differences[differences.len() - 1] - differences[0];
+    assert!(
+        spread <= 10.0,
+        "the compressed recording was matched with a spread of {spread:.3} ms around a median \
+         offset of {median:.3} ms, where the uncompressed one was matched to \
+         {plain_p50:.3} ms"
+    );
+    // The constant offset is the codec's priming delay and nothing else, so it
+    // has to be small: 1024 samples at 44.1 kHz is 23 ms.
+    assert!(
+        median.abs() <= 50.0,
+        "the compressed recording was matched {median:.3} ms away from the uncompressed one, \
+         which is more than the codec's priming delay"
+    );
+    // And the compressed recording must not be worse than the truth by more
+    // than the codec's delay either.
+    assert!(
+        p50 <= 50.0,
         "p50 error {p50:.3} ms is too large for a lossy source"
     );
 }
