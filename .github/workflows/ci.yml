@@ -118,6 +118,25 @@ jobs:
           toolchain: ${{ env.STAGESYNC_RUST_TOOLCHAIN }}
           components: rustfmt, clippy
 
+      # The compressed-format test needs ffmpeg. The test fails loudly rather
+      # than quietly passing when ffmpeg is missing, so the tool has to be here
+      # for the test to mean anything. The runner images carry ffmpeg; where
+      # one does not, it is installed, and if it cannot be installed the job
+      # says so rather than letting the test fail for the wrong reason.
+      - name: Make sure ffmpeg is available
+        shell: bash
+        run: |
+          if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -version | head -n 1
+          elif [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ffmpeg
+            ffmpeg -version | head -n 1
+          else
+            echo "::error::ffmpeg is not installed on this runner, and the compressed-format test cannot run without it" >&2
+            exit 1
+          fi
+
       - name: Cache the cargo registry and the git checkouts
         uses: actions/cache@v4.3.0
         with:

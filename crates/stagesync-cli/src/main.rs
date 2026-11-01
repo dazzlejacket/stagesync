@@ -715,30 +715,37 @@ fn write_artefacts(
     let mut artefacts: Vec<Artifact> = Vec::new();
     let mut kinds: Vec<(String, String)> = Vec::new();
 
+    // Every artefact is described by the path it will have once the export is
+    // committed, and by the hash of the bytes that were actually written.
+    let describe = |kind: &str, written: &Path| -> Result<Artifact> {
+        let final_path = staged.final_path(written);
+        artifact(kind, written, &final_path)
+    };
+
     let syncmap = staged.path("syncmap.csv");
     export::write_syncmap_csv(&syncmap, report)?;
-    artefacts.push(artifact("syncmap", &syncmap)?);
+    artefacts.push(describe("syncmap", &syncmap)?);
     kinds.push(("syncmap.csv".into(), "syncmap".into()));
 
     let segments = staged.path("segments.csv");
     export::write_segments_csv(&segments, report)?;
-    artefacts.push(artifact("segments", &segments)?);
+    artefacts.push(describe("segments", &segments)?);
     kinds.push(("segments.csv".into(), "segments".into()));
 
     let graph = staged.path("drift_graph.svg");
     export::write_drift_graph(&graph, report)?;
-    artefacts.push(artifact("drift_graph", &graph)?);
+    artefacts.push(describe("drift_graph", &graph)?);
     kinds.push(("drift_graph.svg".into(), "drift_graph".into()));
 
     let summary = staged.path("timeline.txt");
     export::write_timeline_summary(&summary, report)?;
-    artefacts.push(artifact("timeline_summary", &summary)?);
+    artefacts.push(describe("timeline_summary", &summary)?);
     kinds.push(("timeline.txt".into(), "timeline_summary".into()));
 
     let plan = staged.path("plan.json");
     let plan_json = serde_json::to_string_pretty(report)?;
     std::fs::write(&plan, plan_json)?;
-    artefacts.push(artifact("plan", &plan)?);
+    artefacts.push(describe("plan", &plan)?);
     kinds.push(("plan.json".into(), "plan".into()));
 
     // The corrected audio, and the verification that was run on it.
@@ -748,7 +755,7 @@ fn write_artefacts(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        artefacts.push(artifact("corrected_audio", &r.path)?);
+        artefacts.push(describe("corrected_audio", &r.path)?);
         kinds.push((name, "corrected_audio".into()));
     }
 
@@ -756,7 +763,7 @@ fn write_artefacts(
     // artefacts is the whole list.
     let report_path = staged.path("report.json");
     export::write_report_json(&report_path, report, artefacts.clone())?;
-    artefacts.push(artifact("report", &report_path)?);
+    artefacts.push(describe("report", &report_path)?);
     kinds.push(("report.json".into(), "report".into()));
 
     // And the manifest is written after the report, so that it can list it.
@@ -766,7 +773,7 @@ fn write_artefacts(
         .ok_or_else(|| anyhow::anyhow!("the staging directory has no parent"))?;
     export::write_manifest_json(&manifest_path, staging_dir, &kinds)?;
     kinds.push(("manifest.json".into(), "manifest".into()));
-    artefacts.push(artifact("manifest", &manifest_path)?);
+    artefacts.push(describe("manifest", &manifest_path)?);
 
     Ok(artefacts)
 }
@@ -776,13 +783,26 @@ fn write_artefacts(
 /// The SHA-256 is recorded as well as the size, so that "the artefacts are
 /// byte-identical between two runs" is a checkable statement rather than a
 /// claim: the hash of each output is in `report.json`.
-fn artifact(kind: &str, path: &Path) -> Result<Artifact> {
-    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+///
+/// The path that is recorded is the one the file will have when the export is
+/// committed, not the one it has while it is still in the staging directory —
+/// the staging directory is renamed away, so a path into it stops existing
+/// the moment the export finishes.
+///
+/// A file that cannot be measured or hashed is an error, not an artefact with
+/// a missing hash: a report that says "the artefacts are identical" has to be
+/// able to prove it.
+fn artifact(kind: &str, written: &Path, final_path: &Path) -> Result<Artifact> {
+    let bytes = std::fs::metadata(written)
+        .with_context(|| format!("failed to read the size of {}", written.display()))?
+        .len();
+    let sha256 = stagesync_core::audio::hash::sha256_file(written)
+        .with_context(|| format!("failed to hash {}", written.display()))?;
     Ok(Artifact {
         kind: kind.to_string(),
-        path: path.to_path_buf(),
+        path: final_path.to_path_buf(),
         bytes,
-        sha256: stagesync_core::audio::hash::sha256_file(path).ok(),
+        sha256: Some(sha256),
     })
 }
 

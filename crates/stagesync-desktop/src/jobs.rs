@@ -432,25 +432,32 @@ pub fn export_report(
 
     let mut artefacts: Vec<Artifact> = Vec::new();
 
+    // Every artefact is described by the path it will have once the export is
+    // committed, and by the hash of the bytes that were actually written.
+    let describe = |kind: &str, written: &Path| -> Result<Artifact, JobFailure> {
+        let final_path = staged.final_path(written);
+        artifact(kind, written, &final_path)
+    };
+
     let syncmap = staged.path("syncmap.csv");
     export::write_syncmap_csv(&syncmap, report)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
-    artefacts.push(artifact("syncmap", &syncmap));
+    artefacts.push(describe("syncmap", &syncmap)?);
 
     let segments = staged.path("segments.csv");
     export::write_segments_csv(&segments, report)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
-    artefacts.push(artifact("segments", &segments));
+    artefacts.push(describe("segments", &segments)?);
 
     let graph = staged.path("drift_graph.svg");
     export::write_drift_graph(&graph, report)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
-    artefacts.push(artifact("drift_graph", &graph));
+    artefacts.push(describe("drift_graph", &graph)?);
 
     let summary = staged.path("timeline.txt");
     export::write_timeline_summary(&summary, report)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
-    artefacts.push(artifact("timeline_summary", &summary));
+    artefacts.push(describe("timeline_summary", &summary)?);
 
     let plan = staged.path("plan.json");
     let plan_json = serde_json::to_string_pretty(report).map_err(|error| {
@@ -459,16 +466,16 @@ pub fn export_report(
     std::fs::write(&plan, plan_json).map_err(|error| {
         JobFailure::Failed(format!("failed to write {}: {error}", plan.display()))
     })?;
-    artefacts.push(artifact("plan", &plan));
+    artefacts.push(describe("plan", &plan)?);
 
     for result in &renders {
-        artefacts.push(artifact("corrected_audio", &result.path));
+        artefacts.push(describe("corrected_audio", &result.path)?);
     }
 
     let report_path = staged.path("report.json");
     export::write_report_json(&report_path, report, artefacts.clone())
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
-    artefacts.push(artifact("report", &report_path));
+    artefacts.push(describe("report", &report_path)?);
 
     // The manifest is written after the report, so that it can list it. It
     // lists every file of the export with its hash, which is what makes "the
@@ -492,7 +499,7 @@ pub fn export_report(
     }
     export::write_manifest_json(&manifest_path, staging_dir, &kinds)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
-    artefacts.push(artifact("manifest", &manifest_path));
+    artefacts.push(describe("manifest", &manifest_path)?);
 
     // The artefacts are written, and the cancel flag is read once more: a
     // cancel that arrived while the artefacts were being written still means
@@ -547,14 +554,29 @@ fn report_progress(
 }
 
 /// Describe a written file.
-fn artifact(kind: &str, path: &Path) -> Artifact {
-    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    Artifact {
+///
+/// The path that is recorded is the one the file will have once the export is
+/// committed, not the one it has while it is still in the staging directory.
+/// A file that cannot be measured or hashed is an error: a report that says
+/// "the artefacts are identical" has to be able to prove it.
+fn artifact(kind: &str, written: &Path, final_path: &Path) -> Result<Artifact, JobFailure> {
+    let bytes = std::fs::metadata(written)
+        .map_err(|error| {
+            JobFailure::Failed(format!(
+                "failed to read the size of {}: {error}",
+                written.display()
+            ))
+        })?
+        .len();
+    let sha256 = stagesync_core::audio::hash::sha256_file(written).map_err(|error| {
+        JobFailure::Failed(format!("failed to hash {}: {error}", written.display()))
+    })?;
+    Ok(Artifact {
         kind: kind.to_string(),
-        path: path.to_path_buf(),
+        path: final_path.to_path_buf(),
         bytes,
-        sha256: stagesync_core::audio::hash::sha256_file(path).ok(),
-    }
+        sha256: Some(sha256),
+    })
 }
 
 /// The absolute path of a file, resolved against the file system when possible.

@@ -190,6 +190,21 @@ impl StagedExport {
         self.staging.join(name)
     }
 
+    /// The path a staged file will have once the export is committed.
+    ///
+    /// The staging directory is renamed away when the export is committed, so
+    /// a path that points into it stops existing the moment the export
+    /// finishes. The paths recorded in the report are therefore the ones the
+    /// files will really have.
+    pub fn final_path(&self, written: &Path) -> PathBuf {
+        self.target.join(
+            written
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| written.to_path_buf()),
+        )
+    }
+
     /// The directory the export will end up in.
     pub fn target(&self) -> &Path {
         &self.target
