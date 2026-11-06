@@ -146,9 +146,51 @@ unchanged**.
 
 | Suite | Tests |
 |---|---|
-| `stagesync-core` (all) | 145 |
-| `stagesync-desktop` | 38 |
-| `stagesync-cli` | 21 |
+| `stagesync-core` (unit and nine integration suites) | 132 |
+| `stagesync-desktop` (unit, platform and workflow suites) | 60 |
+| `stagesync-cli` | 0 of its own — its behaviour is covered by the core's suites |
+| **the whole workspace, cold** | **192, all passing** |
+
+### The export on the real recordings, re-verified
+
+The real material was exported again with the release build after all of this,
+and the export was checked by the independent Python verifier — a separate
+numpy/scipy implementation that shares no code with the Rust core.
+
+```
+stagesync.exe export --reference audio/combined.wav \
+  --source "audio/Voice 005_W_20250208_152158.m4a" \
+  --source "audio/Voice 006_W_20250208_164548.m4a" \
+  --out out/real_export --layout source-aligned
+```
+
+The export took **172 s** for a 2.69-hour reference and two 44.1 kHz recorders,
+and reported the drift it applied and the hold-out residuals it measured on the
+rendered file:
+
+| Source | Drift applied | Hold-out residual p50 | p95 | max |
+|---|---|---|---|---|
+| Voice 005 | +16.061 ppm | +2.126 ms | +2.372 ms | 6.948 ms |
+| Voice 006 | +16.386 ppm | +2.180 ms | +2.386 ms | 8.680 ms |
+
+These are the figures the documentation already gave, so nothing regressed.
+
+The independent verifier, on the Voice 005 export, at the 30 positions of its
+default grid:
+
+```
+trusted positions : 23 of 30   (disputed: 1, untrusted: 6, error: 0)
+|residual| p50    : 0.000 ms
+|residual| p95    : 0.074 ms
+|residual| max    : 1.901 ms
+envelope method (self-confirming, for comparison): p50 -0.489 ms, p95 1.972 ms, max 8.080 ms
+RESULT: residual statistics above are the measured alignment error of this export at the listed positions.
+STATUS: success
+```
+
+**The three recordings were not touched**: `combined.wav` is still 1,859,608,412
+bytes with the modification time it had before the run, and the two `.m4a`
+files are unchanged as well.
 
 ---
 

@@ -819,6 +819,14 @@ which is the same path a mouse takes; a real defect was found that way — the
 button that removes a recording was labelled with a character egui's bundled
 font does not have, so it was an empty box.
 
+**The export was run again on the real material and verified again** with the
+independent Python verifier: 23 of 30 positions trusted, residual p50 0.000 ms,
+p95 0.074 ms, max 1.901 ms, `STATUS: success`; the hold-out residuals the
+export itself measures are p50 2.126 ms and p95 2.372 ms for Voice 005 and
+p50 2.180 ms and p95 2.386 ms for Voice 006 — the figures §2 already gave. The
+three recordings are byte-for-byte unchanged. The full account is in
+`DESKTOP_APP_REPORT.md`.
+
 ### 11.3 What is still open
 
 1. **No one has watched the window run on an interactive desktop.** This machine
