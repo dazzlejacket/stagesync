@@ -2668,6 +2668,9 @@ mod tests {
     #[test]
     fn the_window_aligns_a_recording_and_exports_the_correction() {
         let dir = tempfile::TempDir::new().expect("temp dir");
+        // The export finishes by writing the settings, and the settings must not
+        // be those of whoever is running the test.
+        let _settings = SettingsGuard::new(&dir);
         let reference_rate = 48_000u32;
         let reference_secs = 40.0f64;
         let signal = performance(reference_secs, reference_rate, 11);
@@ -2760,6 +2763,47 @@ mod tests {
 
     // --- The buttons of the window ----------------------------------------
 
+    /// The lock that keeps the two tests that touch the settings apart.
+    ///
+    /// The environment variable that says where the settings live is
+    /// process-wide, so only one test may point it somewhere else at a time.
+    static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A guard that points the settings at a temporary folder.
+    ///
+    /// The window writes its settings when a job finishes. The tests run the
+    /// window's own code, so without this the settings of whoever is running
+    /// the tests would be overwritten with the test's temporary paths — which
+    /// is exactly what happened once.
+    struct SettingsGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<String>,
+    }
+
+    impl SettingsGuard {
+        /// Point the settings at a folder inside the given temporary directory.
+        fn new(dir: &tempfile::TempDir) -> Self {
+            let lock = SETTINGS_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var(crate::platform::CONFIG_DIR_ENV).ok();
+            std::env::set_var(crate::platform::CONFIG_DIR_ENV, dir.path());
+            SettingsGuard {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(crate::platform::CONFIG_DIR_ENV, value),
+                None => std::env::remove_var(crate::platform::CONFIG_DIR_ENV),
+            }
+        }
+    }
+
     /// The buttons of the window do what they say.
     ///
     /// The test drives the real widgets: it finds the button by its label and
@@ -2772,19 +2816,10 @@ mod tests {
     #[test]
     fn the_buttons_of_the_window_do_what_they_say() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let previous = std::env::var(crate::platform::CONFIG_DIR_ENV).ok();
-        // The variable is only read when the settings are loaded or written, and
-        // the test binary is the only one that sets it. The old value is put
-        // back afterwards.
-        std::env::set_var(crate::platform::CONFIG_DIR_ENV, dir.path());
+        let _settings = SettingsGuard::new(&dir);
 
-        let result = the_buttons_of_the_window_do_what_they_say_inner(&dir);
-
-        match previous {
-            Some(value) => std::env::set_var(crate::platform::CONFIG_DIR_ENV, value),
-            None => std::env::remove_var(crate::platform::CONFIG_DIR_ENV),
-        }
-        result.expect("the buttons did not do what they say");
+        the_buttons_of_the_window_do_what_they_say_inner(&dir)
+            .expect("the buttons did not do what they say");
     }
 
     /// The body of the button test, kept apart so that the environment variable
