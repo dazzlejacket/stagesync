@@ -261,6 +261,36 @@ test is genuinely wrong — and then say so explicitly.
   threw away material it had already given away, and read from further along the
   recording than the plan asked for. The merged export kept about half the material it
   was supposed to contain and placed it fifteen to twenty-nine seconds away, silently.
+* **Trusting a fit that only three or four measurements support.** The robust fit cannot
+  reject a gross outlier when there are only a handful of trusted points: one probe
+  11.5 s out was trusted with a confidence of 0.507 and pulled the offset 3.8 s away
+  from the truth, and the result was reported with confidence. The fine fit is now
+  refused unless at most a third of its own confident measurements disagree with it
+  (`matching::fine::corroboration_support`); a refused fit falls back to the
+  independent coarse lock and says so in a warning. A fit is only as good as the
+  measurements that support it.
+* **Averaging the lags of an offset-only fit.** The mean of the measured lags is
+  dragged by a single gross outlier; the median is not. `fit_offset_only` uses the
+  median.
+* **Advancing a peak bucket by the block instead of by the sample.** The peak cache
+  builds its buckets from a decoded block; the bucket of a sample is
+  `block.start_frame + index`, not the block's own start frame. Getting that wrong put
+  every sample of a block in one bucket, and the waveform was drawn as a handful of
+  spikes.
+* **A button with a glyph the bundled font does not have.** egui's default font has no
+  U+2716 (`✖`), so a button labelled with it is an empty box. The glyphs the interface
+  may use are the ones in `Ubuntu-Light.ttf`; `work/font_coverage.py` checks a
+  character against it. `egui_kittest` refuses to draw a missing glyph, which is how
+  this was found.
+* **A window that is larger than the screen.** The layout is computed for the whole
+  window and the window manager clips it, so the panels that lie outside the screen
+  are simply not drawn. The window is asked to shrink to the monitor.
+* **A screenshot taken by a process that is not aware of the display's scaling.** The
+  window rectangle comes back in virtualised pixels while the window is drawn at the
+  real resolution, so a capture shows only the top-left quarter of a 2× display. Ask
+  for the window's DPI (`GetDpiForWindow`) and make the bitmap that big.
+* **An unquoted path on a command line.** A path with a space in it is split into two
+  arguments, and the program is given files that do not exist. Quote every path.
 
 ## Git
 

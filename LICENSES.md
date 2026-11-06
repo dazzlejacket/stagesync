@@ -64,18 +64,18 @@ The complete per-dependency table is **Appendix A** (§3). The summary:
 
 | Licence | Packages | What it means for you |
 |---|---|---|
-| MIT / Apache-2.0 dual, in either order, plus the `/` and `,` spellings some manifests use | 289 | Permissive. Keep the notices. |
-| MIT only | 98 | Permissive. Keep the notices. |
-| Apache-2.0 only | 16 | Permissive. Keep the notices. Note `hound` is one of these. |
+| MIT / Apache-2.0 dual, in either order, plus the `/` and `,` spellings some manifests use | 300 | Permissive. Keep the notices. |
+| MIT only | 99 | Permissive. Keep the notices. |
+| Apache-2.0 only | 17 | Permissive. Keep the notices. Note `hound` is one of these. |
 | Unicode-3.0 | 18 | Permissive (OSI-approved). Keep the notices. |
 | MPL-2.0 | 13 | **Weak, file-level copyleft.** All thirteen are the `symphonia` family. See §4.3 and §5. |
-| Zlib OR Apache-2.0 OR MIT | 11 | Permissive. Take the MIT or Apache-2.0 option. |
+| Zlib OR Apache-2.0 OR MIT | 15 | Permissive. Take the MIT or Apache-2.0 option. |
 | Unlicense OR MIT | 8 | Permissive. Take the MIT option. |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 6 | The LLVM exception removes Apache-2.0's copyleft effect. Take the MIT or plain-Apache-2.0 option. |
 | MIT OR Apache-2.0 OR Zlib | 6 | Permissive. Take the MIT or Apache-2.0 option. |
 | Zlib | 4 | Permissive. Keep the notices. |
 | BSD-3-Clause (alone, or OR MIT/Apache-2.0, or OR Apache-2.0) | 6 | Permissive. Keep the notices. |
-| BSD-2-Clause OR Apache-2.0 OR MIT | 2 | Permissive. Take the MIT or Apache-2.0 option. |
+| BSD-2-Clause OR Apache-2.0 OR MIT | 3 | Permissive. Take the MIT or Apache-2.0 option. |
 | BSD-2-Clause | 1 | Permissive. Keep the notices. |
 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | 2 | LGPL is a weak copyleft, but you do not have to take it: take the MIT/Apache-2.0 option. (`r-efi` 5.3.0 and 6.0.0.) |
 | BSL-1.0 | 2 | Permissive. Keep the notices. |
@@ -87,7 +87,7 @@ The complete per-dependency table is **Appendix A** (§3). The summary:
 | Apache-2.0 AND MIT | 1 | Both notices apply. (`dpi` 0.1.2.) |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 1 | Both notices apply. (`unicode-ident` 1.0.27.) |
 | (MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0 | 1 | Font licence conditions apply on top. (`epaint_default_fonts` 0.37.0.) See §4.5. |
-| **Total** | **492** | |
+| **Total** | **510** | |
 
 **Nothing in the dependency graph is under a licence that would require StageSync, or
 anything you build with it, to be published as source code.** The single copyleft
@@ -96,8 +96,8 @@ not reach your own files, but it does oblige you to make its source available (�
 
 ### 2.1 What "verified" means in this document
 
-Every one of the 492 packages pinned in `Cargo.lock` declares a licence in the
-`license` field of its published `Cargo.toml` manifest, and all 492 were read from
+Every one of the 510 packages pinned in `Cargo.lock` declares a licence in the
+`license` field of its published `Cargo.toml` manifest, and all 510 were read from
 the local cargo registry cache. **No licence in Appendix A is marked "unverified",
 because there is no package in the graph for which the licence could not be stated
 from the manifest.**
@@ -107,15 +107,15 @@ That is a narrower claim than it may sound, and it is worth being precise:
 - **What is verified:** the licence each upstream project *declares* for the exact
   version pinned here.
 - **What is not verified:** that the upstream code actually complies with the
-  licence it declares. Auditing 492 third-party codebases is not something this
+  licence it declares. Auditing 510 third-party codebases is not something this
   repository can do, and no claim of that kind is made. This is the normal state of
   affairs for every project that depends on crates.io packages; licence scanners
   read the same manifests and reach the same conclusion.
 
 If you need the *actual* licence text for a specific crate, Appendix A tells you
-exactly where to find it: either in the published crate package (430 of the 492
+exactly where to find it: either in the published crate package (442 of the 510
 packages ship a `LICENSE`-style file — the table names the exact file) or, for the
-remaining 62, in the upstream repository, which the table also links.
+remaining 68, in the upstream repository, which the table also links.
 
 ---
 
@@ -151,6 +151,8 @@ or from `https://crates.io/crates/<crate>`.
 | `ahash` | `0.8.12` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/tkaitchuck/ahash> |
 | `aho-corasick` | `1.1.5` | `Unlicense OR MIT` | Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/aho-corasick> |
 | `allocator-api2` | `0.2.21` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/zakarumych/allocator-api2> |
+| `alsa` | `0.11.0` | `Apache-2.0/MIT` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/diwic/alsa-rs> |
+| `alsa-sys` | `0.4.0` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/diwic/alsa-sys> |
 | `android_system_properties` | `0.1.6` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/nical/android_system_properties> |
 | `android-activity` | `0.6.1` | `MIT OR Apache-2.0` | Published crate package: `LICENSE`, `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-mobile/android-activity> |
 | `android-properties` | `0.2.2` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/miklelappo/android-properties> |
@@ -215,6 +217,8 @@ or from `https://crates.io/crates/<crate>`.
 | `core-foundation-sys` | `0.8.7` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs> |
 | `core-graphics` | `0.23.2` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs> |
 | `core-graphics-types` | `0.1.3` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs> |
+| `coreaudio-rs` | `0.14.2` | `MIT/Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustAudio/coreaudio-rs.git> |
+| `cpal` | `0.18.2` | `Apache-2.0` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/RustAudio/cpal> |
 | `cpufeatures` | `0.2.17` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/utils> |
 | `crc32fast` | `1.5.3` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/srijs/rust-crc32fast> |
 | `crossbeam-deque` | `0.8.8` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/crossbeam-rs/crossbeam> |
@@ -223,6 +227,7 @@ or from `https://crates.io/crates/<crate>`.
 | `crunchy` | `0.2.4` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/eira-fransham/crunchy> |
 | `crypto-common` | `0.1.7` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/traits> |
 | `cursor-icon` | `1.2.0` | `MIT OR Apache-2.0 OR Zlib` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/rust-windowing/cursor-icon> |
+| `dasp_sample` | `0.11.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/rustaudio/sample.git> |
 | `defmt` | `1.2.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/knurling-rs/defmt> |
 | `defmt-macros` | `1.2.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/knurling-rs/defmt> |
 | `defmt-parser` | `1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/knurling-rs/defmt> |
@@ -238,6 +243,7 @@ or from `https://crates.io/crates/<crate>`.
 | `eframe` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/eframe> |
 | `egui` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui> |
 | `egui_glow` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui_glow> |
+| `egui_kittest` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui> |
 | `egui_system_font_provider` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui_system_font_provider> |
 | `egui-wgpu` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui-wgpu> |
 | `egui-winit` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui-winit> |
@@ -327,6 +333,7 @@ or from `https://crates.io/crates/<crate>`.
 | `js-sys` | `0.3.106` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys> |
 | `khronos_api` | `3.1.0` | `Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/brendanzab/gl-rs/> |
 | `khronos-egl` | `6.0.0` | `MIT/Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/timothee-haudebourg/khronos-egl> |
+| `kittest` | `0.5.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rerun-io/kittest> |
 | `kurbo` | `0.13.1` | `Apache-2.0 OR MIT` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/kurbo> |
 | `lazy_static` | `1.5.1` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang-nursery/lazy-static.rs> |
 | `libc` | `0.2.191` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/libc> |
@@ -340,6 +347,7 @@ or from `https://crates.io/crates/<crate>`.
 | `litrs` | `1.0.1` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/LukasKalbertodt/litrs> |
 | `lock_api` | `0.4.14` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/Amanieu/parking_lot> |
 | `log` | `0.4.34` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/log> |
+| `mach2` | `0.6.0` | `BSD-2-Clause OR MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-BSD`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/JohnTitor/mach2> |
 | `memchr` | `2.8.3` | `Unlicense OR MIT` | Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/memchr> |
 | `memmap2` | `0.9.12` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RazrFalcon/memmap2-rs> |
 | `memoffset` | `0.9.1` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/Gilnaa/memoffset> |
@@ -353,17 +361,24 @@ or from `https://crates.io/crates/<crate>`.
 | `ndk-sys` | `0.6.0+11769913` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/rust-mobile/ndk> |
 | `nohash-hasher` | `0.2.0` | `Apache-2.0 OR MIT` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/paritytech/nohash-hasher> |
 | `nom` | `8.0.0` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-bakery/nom> |
+| `num-bigint` | `0.4.8` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-bigint> |
+| `num-derive` | `0.4.2` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-derive> |
 | `num_enum` | `0.7.6` | `BSD-3-Clause OR MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-BSD`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/illicitonion/num_enum> |
 | `num_enum_derive` | `0.7.6` | `BSD-3-Clause OR MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-BSD`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/illicitonion/num_enum> |
 | `num-complex` | `0.4.6` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-complex> |
 | `num-integer` | `0.1.47` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-integer> |
+| `num-rational` | `0.4.2` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-rational> |
 | `num-traits` | `0.2.19` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-traits> |
 | `objc2` | `0.5.3` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2` | `0.6.5` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-app-kit` | `0.2.2` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-app-kit` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
+| `objc2-audio-toolbox` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
+| `objc2-avf-audio` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-cloud-kit` | `0.2.2` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-contacts` | `0.2.2` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
+| `objc2-core-audio` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
+| `objc2-core-audio-types` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-core-data` | `0.2.2` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-core-foundation` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-core-graphics` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
@@ -444,6 +459,7 @@ or from `https://crates.io/crates/<crate>`.
 | `regex-syntax` | `0.8.11` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/regex> |
 | `renderdoc-sys` | `1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/ebkalderon/renderdoc-rs> |
 | `rfd` | `0.17.2` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/PolyMeilex/rfd> |
+| `rodio` | `0.23.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustAudio/rodio> |
 | `roxmltree` | `0.21.2` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RazrFalcon/roxmltree> |
 | `rustc_version` | `0.4.1` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/djc/rustc-version-rs> |
 | `rustc-hash` | `1.1.0` | `Apache-2.0/MIT` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang-nursery/rustc-hash> |
@@ -464,6 +480,8 @@ or from `https://crates.io/crates/<crate>`.
 | `serde_derive` | `1.0.229` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/serde-rs/serde> |
 | `serde_json` | `1.0.154` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/serde-rs/json> |
 | `serde_repr` | `0.1.21` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/serde-repr> |
+| `serde_spanned` | `1.1.3` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml> |
+| `toml` | `1.2.1+spec-1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml> |
 | `sha2` | `0.10.9` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/hashes> |
 | `shlex` | `2.0.1` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/comex/rust-shlex> |
 | `signal-hook-registry` | `1.4.8` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/vorner/signal-hook> |
@@ -513,7 +531,7 @@ or from `https://crates.io/crates/<crate>`.
 | `tiny-skia-path` | `0.11.4` | `BSD-3-Clause` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/RazrFalcon/tiny-skia/tree/master/path> |
 | `tinystr` | `0.8.5` | `Unicode-3.0` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x> |
 | `tokio` | `1.54.1` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/tokio> |
-| `toml_datetime` | `1.1.2+spec-1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml> |
+| `toml_datetime` | `1.1.3+spec-1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml> |
 | `toml_edit` | `0.25.17+spec-1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml> |
 | `toml_parser` | `1.1.5+spec-1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml> |
 | `tracing` | `0.1.44` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/tracing> |

@@ -19,14 +19,14 @@ is a plan.
 |---|---|---|
 | `stagesync-core` | **complete** | Ingest, features, matching, robust model, calibration, **waveform-domain drift measurement**, segmentation, rendering, holdout verification, exports. |
 | `stagesync-cli` | **complete** | `analyze`, `export`, `verify`, `info`, `level`. |
-| `stagesync-desktop` | **complete** | Native egui/eframe app, **Windows, macOS and Linux from one codebase**: drag-and-drop import, background analysis with real cancellation, zoomable timeline, per-source metrics and the drift verdict, manual anchors, persisted settings, export. |
+| `stagesync-desktop` | **complete** | Native egui/eframe app, **Windows, macOS and Linux from one codebase**: drag-and-drop import, background analysis with real cancellation, **real waveforms** (reference on top, targets below, placed by the alignment), a zoomable and pannable timeline with gaps and uncertain spans shown, **working playback** of the reference and of the corrected target with an A/B switch at the same position and a loop, manual nudges in milliseconds with undo and a re-check, persisted settings, export. See `DESKTOP_APP_REPORT.md`. |
 | Exports | **complete** | Corrected WAV (three layouts), `syncmap.csv`, `segments.csv`, `report.json`, `drift_graph.svg`, `timeline.txt`, `plan.json`. |
 | End-to-end test suite | **complete** | Hermetic, deterministic, generated in Rust. See §4. |
 | Independent Python verifier | **complete** | `tools/verify_exports.py` — a separate numpy/scipy implementation that never shares code with the Rust core. Its gates were audited against a relaxed variant and the stricter ones were kept; see §2. |
 | Cross-platform builds | **configured** | Native CI runners for Windows, macOS (x64 and arm64) and Linux, plus packaging scripts for a Windows installer, a macOS `.app`/`.dmg` and a Linux AppImage/`.deb`. The **Windows build and the whole test suite were run locally**; the macOS and Linux builds are **not verified** — see §7. |
 | Camera / video retiming | **not started** | Phase 2. |
 | NLE multicam export | **not started** | Phase 2. |
-| A/B audio preview in the GUI | **deliberately absent** | There is no playback button rather than a broken one. |
+| A/B audio preview in the GUI | **done** | Playback was deliberately absent before; it exists now — the reference and the corrected target, switched at the same position on the timeline. See §11. |
 
 ---
 
@@ -752,3 +752,85 @@ status.
    rate.** The envelope's rate is nominal and shared by both sides of every
    comparison, so the matcher is consistent, but a frame index from an envelope
    must never be converted with a different rate -- which is what P2 was about.
+
+---
+
+## 11. The short-clip fix and the desktop rebuild
+
+### 11.1 The short-clip false alignment, fixed
+
+The first two items of §10.3 are now closed.
+
+**The problem.** The robust fit cannot reject a gross outlier when only three or
+four probes are trusted: one probe 11.5 s out was trusted with a confidence of
+0.507 and pulled the offset 3.8 s from the truth, and the result was reported
+*with* confidence. The drift was refused; the offset was not protected.
+
+**What was done.**
+
+1. **The fine fit has to be corroborated by its own measurements.**
+   `matching::fine::corroboration_support` counts how many of the confident
+   measurements agree with the fitted line. The fit is **refused** unless at most
+   a third of them disagree; a refused fit sets `model: None`, marks the
+   measurements that do not support the line as outliers, and reports why.
+2. **A refused fit falls back to the independent coarse lock**, and the pipeline
+   pushes a warning that says the placement rests on the coarse lock alone. It
+   never reports a placement it cannot support.
+3. **The offset-only fallback uses the median of the measured lags**, not the
+   mean, so that one gross outlier cannot drag it.
+4. **The fine stage now probes the tail of a recording**, so that a short
+   recording is measured at its end as well as along its body.
+
+The new suite is `crates/stagesync-core/tests/short_source_tests.rs` (6 tests):
+the gate refuses a contaminated line and accepts a good one, the offset is the
+median with an 11.5 s outlier present, a short recording is placed within 50 ms,
+the tail of a short recording is probed, and the model that is applied is
+supported by its own measurements.
+
+**Nothing else moved.** On the real material the figures are the same as before:
+Voice 005 at **+317.389 s**, Voice 006 at **+5753.314 s**, the drifts within
+their own standard errors, the hold-out residuals unchanged. The 319-probe fit on
+the real recordings is supported by its own measurements and was not touched.
+
+### 11.2 The desktop application
+
+The window now draws the material and plays it. The full description, with the
+figures and the tests, is in **`DESKTOP_APP_REPORT.md`**; the short of it:
+
+* **Real waveforms.** The reference on top, the targets below, each placed
+  **through the alignment model**, so the picture is the measurement and not an
+  approximation of it. The peaks come from a new multiresolution cache in
+  `stagesync-core` that streams the file and never holds its samples: 9.7 MB of
+  peak data for the three-hour reference, against 1.85 GB of samples.
+* **A timeline that can be worked in.** Zoom around the cursor, pan, `Fit`, drag
+  to select, and a strip under every lane that shows where the material is
+  matched, where the match is weak and where the reference has material nobody
+  recorded.
+* **Working playback.** The reference, or the corrected target, through the
+  machine's own device, using the core's own resampler so that the preview and
+  the export agree. The A/B switch does not move the playhead; a selected region
+  loops; the list of gaps and uncertain spans jumps the playhead to each.
+* **Manual corrections that do not touch the rate.** A nudge of ±1, ±10 or ±100 ms
+  moves the placement; *Apply and re-check* turns it into a manual anchor and
+  runs the analysis again; *Undo* and *Reset to automatic* are there.
+
+The buttons were clicked **through egui's own input harness** (`egui_kittest`),
+which is the same path a mouse takes; a real defect was found that way — the
+button that removes a recording was labelled with a character egui's bundled
+font does not have, so it was an empty box.
+
+### 11.3 What is still open
+
+1. **No one has watched the window run on an interactive desktop.** This machine
+   has no input desktop: `SendInput` returns nothing and posted mouse messages
+   never reach egui. The buttons were clicked through egui's harness and the
+   window was captured as an image, but a literal mouse was never moved on this
+   display. Anything that depends on the window manager rather than on egui — a
+   native drag-and-drop from the file manager, a context menu — is **unverified**.
+2. **macOS and Linux are not built here.** One codebase, CI configured for
+   Windows, macOS (x64 and arm64) and Linux; the Linux job now installs
+   `libasound2-dev`, because `cpal` links ALSA. The macOS and Linux builds are
+   **not verified** — see §7.
+3. **A machine with no audio device** is handled and says so; it was not
+   exercised on one.
+4. The items 3, 4 and 5 of §10.3 are still open.
