@@ -238,6 +238,69 @@ impl AudioDecoder {
         self.frames_decoded
     }
 
+    /// Move the read position to a frame, and report the frame actually reached.
+    ///
+    /// Decoding is sequential, so this is what makes it possible to *start* at a
+    /// position rather than at the beginning of the recording: a player that has to
+    /// decode two hours of material to reach the middle of a show is not a player.
+    ///
+    /// The frame that is reached is not always the one that was asked for. A
+    /// container can only seek to a packet boundary, so the packets between the
+    /// boundary and the requested frame are decoded and dropped, and the frame the
+    /// read position ends up on is reported back.
+    pub fn seek_to_frame(&mut self, frame: u64) -> Result<u64> {
+        use symphonia::core::formats::{SeekMode, SeekTo};
+        use symphonia::core::units::Timestamp;
+
+        // Anything that was decoded but not handed over is no longer wanted.
+        self.pending.clear();
+        self.pending_frames = 0;
+        self.eof = false;
+
+        // A position past the end of the recording is a position at its end, not an
+        // error: a playhead that runs off the end of the show should stop there.
+        let frame = match self.meta.frames {
+            0 => frame,
+            total => frame.min(total.saturating_sub(1)),
+        };
+
+        let seeked = self
+            .format
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Timestamp {
+                    ts: Timestamp::new(frame as i64),
+                    track_id: self.track_id,
+                },
+            )
+            .map_err(|error| anyhow!("failed to seek in the file: {error}"))?;
+        // The codec's state belongs to the old position.
+        self.decoder.reset();
+
+        // The track's time base is one tick per frame for uncompressed audio, so the
+        // timestamp of the seek is the frame it landed on.
+        self.frames_decoded = seeked.actual_ts.get().max(0) as u64;
+
+        // Decode forward to the requested frame, dropping what comes before it.
+        while self.frames_decoded < frame {
+            let before_packet = self.frames_decoded;
+            self.decode_next_packet()?;
+            let produced = self.frames_decoded - before_packet;
+            if produced == 0 {
+                // The end of the file was reached before the frame was.
+                break;
+            }
+            let before_target = (frame - before_packet).min(produced) as usize;
+            if before_target > 0 {
+                for plane in self.pending.iter_mut() {
+                    plane.drain(..before_target);
+                }
+                self.pending_frames -= before_target;
+            }
+        }
+        Ok(self.frames_decoded)
+    }
+
     /// Read the next block of decoded audio, accumulating until at least `min_frames`
     /// frames are available.
     ///
@@ -362,4 +425,65 @@ fn planes_of(buf: &GenericAudioBufferRef<'_>) -> Vec<Vec<f32>> {
     let mut out: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); planes];
     buf.copy_to_vecs_planar(&mut out);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::wav::{WavFormat, WavWriter};
+
+    /// A file whose every sample says which frame it is, so a seek can be checked
+    /// against the truth rather than against another seek.
+    fn ramp_file(path: &Path, rate: u32, frames: usize) {
+        let samples: Vec<f32> = (0..frames).map(|i| (i % 1000) as f32 / 1000.0).collect();
+        let mut writer = WavWriter::create(path, rate, 1, WavFormat::Float32).expect("create");
+        writer
+            .write_planar(std::slice::from_ref(&samples))
+            .expect("write");
+        writer.finalize().expect("finalise");
+    }
+
+    #[test]
+    fn a_seek_lands_on_the_frame_it_asked_for() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("ramp.wav");
+        let rate = 8000u32;
+        let frames = 40_000usize;
+        ramp_file(&path, rate, frames);
+
+        let mut decoder = AudioDecoder::open(&path).expect("open");
+        for target in [0u64, 1, 512, 12_345, 30_000] {
+            let reached = decoder.seek_to_frame(target).expect("seek");
+            assert!(
+                reached >= target,
+                "the seek to {target} landed before it, on {reached}"
+            );
+            let block = decoder.read_block(64).expect("read").expect("a block");
+            assert_eq!(
+                block.start_frame, target,
+                "the block after a seek to {target} starts at {}",
+                block.start_frame
+            );
+            let first = block.planes[0][0];
+            let expected = (target % 1000) as f32 / 1000.0;
+            assert!(
+                (first - expected).abs() < 1e-6,
+                "the first sample after a seek to {target} was {first}, not {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seek_past_the_end_of_the_file_stops_at_the_end() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("ramp.wav");
+        ramp_file(&path, 8000, 1000);
+
+        let mut decoder = AudioDecoder::open(&path).expect("open");
+        let reached = decoder.seek_to_frame(100_000).expect("seek");
+        assert!(
+            reached <= 1000,
+            "the seek past the end reached frame {reached}"
+        );
+    }
 }
