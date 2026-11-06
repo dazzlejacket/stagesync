@@ -373,6 +373,13 @@ pub fn analyze(
         );
         let fine = fine_match(&source_env, &reference_env, &seed_model, &config.fine);
         let direct_model: LinearModel = fine.model.unwrap_or(seed_model);
+        if let Some(reason) = &fine.fit_rejection {
+            warnings.push(format!(
+                "{}: the fine measurements did not corroborate each other — {reason}. \
+                 The recording's placement rests on the coarse lock alone.",
+                source_meta.file_name
+            ));
+        }
 
         // Independent spectral cross-check (a different feature family).
         let mut points: Vec<MatchPoint> = fine.points.clone();

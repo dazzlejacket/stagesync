@@ -28,6 +28,16 @@ pub struct FineOptions {
     pub min_zscore: f32,
     /// Minimum normalised correlation value for a trusted match.
     pub min_peak: f32,
+    /// How far a measurement may sit from the fitted line and still support it, in
+    /// milliseconds.
+    ///
+    /// This is the tolerance of the **corroboration test**: a line that most of the
+    /// measurements do not support is refused rather than applied. It is set far
+    /// above the matcher's own resolution — the envelope resolves a position to
+    /// about a millisecond, and the real recordings' residuals stay under ten — and
+    /// far below the distance a *wrong* match can be, which is the search radius
+    /// around the prediction.
+    pub support_tolerance_ms: f64,
 }
 
 impl Default for FineOptions {
@@ -39,6 +49,7 @@ impl Default for FineOptions {
             min_active_fraction: 0.35,
             min_zscore: 3.0,
             min_peak: 0.15,
+            support_tolerance_ms: 100.0,
         }
     }
 }
@@ -62,6 +73,14 @@ pub struct FineResult {
     pub skipped: usize,
     /// Why the probes were skipped.
     pub skip_reasons: SkipReasons,
+    /// Why the fitted model was refused, when it was.
+    ///
+    /// A model that the measurements do not corroborate is not a measurement, and
+    /// applying it would place a recording somewhere it does not belong. When this
+    /// is set, [`FineResult::model`] is `None` and the caller keeps the model it
+    /// already had — the coarse lock's, which came from an independent estimator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit_rejection: Option<String>,
 }
 
 /// A breakdown of why fine probes could not be measured.
@@ -100,13 +119,13 @@ pub fn fine_match(
             measured: 0,
             skipped: 0,
             skip_reasons: SkipReasons::default(),
+            fit_rejection: None,
         };
     }
 
     let half = win / 2;
-    let mut probe = half as f64;
-    while (probe as usize) + half < source.len() {
-        let p = probe as usize;
+    let hop = (options.hop_secs * rate).max(1.0);
+    for p in probe_positions(source.len(), half, hop) {
         let window = &source.norm[p - half..p + half];
 
         // The probe must contain real signal, not just the noise floor.
@@ -118,11 +137,10 @@ pub fn fine_match(
         if active < options.min_active_fraction {
             skipped += 1;
             reasons.low_energy += 1;
-            probe += options.hop_secs * rate;
             continue;
         }
         // Reference region around the model prediction.
-        let predicted = model.reference_time(probe / rate);
+        let predicted = model.reference_time(p as f64 / rate);
         let region_start = predicted - (half as f64 / rate) - options.search_secs;
         let region_end = predicted + (half as f64 / rate) + options.search_secs;
         let i0 = reference.index_at(region_start.max(0.0));
@@ -132,7 +150,6 @@ pub fn fine_match(
         if i1 <= i0 {
             skipped += 1;
             reasons.no_region += 1;
-            probe += options.hop_secs * rate;
             continue;
         }
         let region = &reference.norm[i0..=i1];
@@ -150,7 +167,6 @@ pub fn fine_match(
         let Some(peak) = peaks.first() else {
             skipped += 1;
             reasons.no_peak += 1;
-            probe += options.hop_secs * rate;
             continue;
         };
 
@@ -161,19 +177,47 @@ pub fn fine_match(
 
         let (score, reason) = score_point(peak.ncc, peak.zscore, active, options);
         points.push(MatchPoint {
-            source_time: probe / rate,
+            source_time: p as f64 / rate,
             reference_time,
-            lag: reference_time - probe / rate,
+            lag: reference_time - p as f64 / rate,
             residual_ms: 0.0,
             confidence: Confidence::new(score, reason),
             method: MatchMethod::FineEnvelope,
             note: String::new(),
         });
-
-        probe += options.hop_secs * rate;
     }
 
-    finish(points, skipped, reasons)
+    finish(points, skipped, reasons, options)
+}
+
+/// The positions in the source that the fine stage probes.
+///
+/// The probes are evenly spaced, and each one's window has to lie **inside** the
+/// source. That last requirement means the final half-window of a recording is
+/// never reached: on a three-hour recording the tail is a rounding error, but on
+/// a ninety-second one it is a sixth of the material — and it is the material a
+/// listener hears last. The tail is therefore probed as well, clamped to the end
+/// of the recording, whenever the clamped probe is at least half a hop away from
+/// the last regular one. On a long recording the two are the same probe to
+/// within a fraction of a hop, and nothing changes.
+fn probe_positions(len: usize, half: usize, hop: f64) -> Vec<usize> {
+    let mut positions: Vec<usize> = Vec::new();
+    let mut probe = half as f64;
+    while (probe as usize) + half < len {
+        positions.push(probe as usize);
+        probe += hop;
+    }
+
+    let hop_frames = hop.round() as usize;
+    if hop_frames == 0 {
+        return positions;
+    }
+    let last = positions.last().copied().unwrap_or(0);
+    let tail = len.saturating_sub(half);
+    if tail > last && (tail - last) * 2 >= hop_frames {
+        positions.push(tail);
+    }
+    positions
 }
 
 /// Fuse the evidence for a single point into a confidence score.
@@ -205,7 +249,12 @@ fn score_point(
 }
 
 /// Fit the robust model to the measured points and compute residual statistics.
-fn finish(points: Vec<MatchPoint>, skipped: usize, skip_reasons: SkipReasons) -> FineResult {
+fn finish(
+    mut points: Vec<MatchPoint>,
+    skipped: usize,
+    skip_reasons: SkipReasons,
+    options: &FineOptions,
+) -> FineResult {
     let measured = points.len();
 
     // Fit using the confident points only. Falling back to *all* the points when there
@@ -225,10 +274,49 @@ fn finish(points: Vec<MatchPoint>, skipped: usize, skip_reasons: SkipReasons) ->
 
     // Three points is the minimum for a line to mean anything: two would fix the slope
     // exactly and could not survive a single wrong measurement.
-    let fit = if confident.len() >= 3 {
+    let raw_fit = if confident.len() >= 3 {
         robust_fit(&confident, 3.0, 6)
     } else {
         None
+    };
+
+    // A fit has to be **corroborated** before it may be applied. The robust fit
+    // rejects an outlier by measuring the median deviation from the line it has
+    // found — but with only three or four points the median of the pairwise slopes
+    // can itself be one of the outlier's own slopes, and the resulting line is then
+    // supported by the outlier and one good point rather than by the good points.
+    // That failure is silent: the fit looks perfectly ordinary, and the recording it
+    // describes sits seconds away from where it belongs.
+    //
+    // The test is therefore about *support* rather than about the estimator: the line
+    // has to be within the support tolerance of most of the measurements that
+    // produced it. At most a third of them may disagree.
+    let tolerance = options.support_tolerance_ms / 1000.0;
+    let mut fit_rejection: Option<String> = None;
+    let fit = match raw_fit {
+        None => None,
+        Some(f) => {
+            let (support, count) = corroboration_support(&confident, &f.model(), tolerance);
+            let allowed = confident.len().saturating_sub(1) / 3;
+            if count + allowed >= confident.len() {
+                Some(f)
+            } else {
+                fit_rejection = Some(format!(
+                    "only {count} of the {} confident measurements support the fitted line \
+                     (at most {allowed} of them may disagree); the line was refused and the \
+                     placement rests on the coarse lock alone",
+                    confident.len()
+                ));
+                // The measurements that do not support the line are not trustworthy:
+                // the line itself is what says so.
+                for (k, &i) in confident_indices.iter().enumerate() {
+                    if !support.get(k).copied().unwrap_or(true) {
+                        points_outlier(&mut points, i);
+                    }
+                }
+                None
+            }
+        }
     };
     let model = fit.as_ref().map(|f| f.model());
 
@@ -268,6 +356,32 @@ fn finish(points: Vec<MatchPoint>, skipped: usize, skip_reasons: SkipReasons) ->
         measured,
         skipped,
         skip_reasons,
+        fit_rejection,
+    }
+}
+
+/// Which measurements support a fitted line, and how many of them there are.
+///
+/// A measurement supports the line when it lies within `tolerance` of it. The
+/// tolerance is in seconds and is the same for every measurement.
+pub fn corroboration_support(
+    points: &[(f64, f64)],
+    fit: &LinearModel,
+    tolerance: f64,
+) -> (Vec<bool>, usize) {
+    let support: Vec<bool> = points
+        .iter()
+        .map(|(x, y)| (fit.reference_time(*x) - y).abs() <= tolerance)
+        .collect();
+    let count = support.iter().filter(|s| **s).count();
+    (support, count)
+}
+
+/// Mark one measurement as an outlier, so that it can no longer drive a correction.
+fn points_outlier(points: &mut [MatchPoint], index: usize) {
+    if let Some(point) = points.get_mut(index) {
+        point.confidence.score = point.confidence.score.min(0.3);
+        point.confidence.reason = UncertaintyReason::Outlier;
     }
 }
 

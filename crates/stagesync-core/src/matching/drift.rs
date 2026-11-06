@@ -127,12 +127,25 @@ pub fn fit_with_uncertainty(points: &[(f64, f64)]) -> Option<SlopeFit> {
 ///
 /// This is the offset-only correction: the material is moved in time but its rate is
 /// left alone. It is the honest fallback when the drift cannot be established.
+///
+/// The **median** of the measured lags is used, not their mean. A mean is not
+/// robust: one measurement that is seconds away drags it by `outlier / count`,
+/// and in the small-sample regime — three or four measurements — that is the
+/// whole offset. The median ignores the outliers instead, which is what an
+/// offset has to do before it is worth reporting.
 pub fn fit_offset_only(points: &[(f64, f64)]) -> Option<LinearModel> {
     if points.is_empty() {
         return None;
     }
-    let mean = points.iter().map(|(x, y)| y - x).sum::<f64>() / points.len() as f64;
-    Some(LinearModel::new(1.0, mean))
+    let mut lags: Vec<f64> = points.iter().map(|(x, y)| y - x).collect();
+    lags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = lags.len() / 2;
+    let median = if lags.len().is_multiple_of(2) {
+        (lags[mid - 1] + lags[mid]) / 2.0
+    } else {
+        lags[mid]
+    };
+    Some(LinearModel::new(1.0, median))
 }
 
 /// Which estimator produced a drift figure.
