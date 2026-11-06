@@ -91,8 +91,10 @@ jobs:
         run: |
           # eframe 0.37 (winit + wgpu) links against the system GL, X11, XCB,
           # XKB and Wayland client libraries, so their development headers have
-          # to be present before `cargo build` runs. The rest of the workspace
-          # has no system dependencies at all: symphonia decodes in pure Rust.
+          # to be present before `cargo build` runs. The audio output (cpal) links
+          # against ALSA, so its development headers have to be there too. The
+          # rest of the workspace has no system dependencies at all: symphonia
+          # decodes in pure Rust.
           #
           # This is the well-known set for eframe/winit on Ubuntu 22.04 and
           # later. It cannot be verified from a Windows development machine -
@@ -110,6 +112,7 @@ jobs:
             libxkbcommon-x11-dev \
             libwayland-dev \
             libssl-dev \
+            libasound2-dev \
             pkg-config
 
       - name: Install the Rust toolchain

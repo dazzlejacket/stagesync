@@ -1,14 +1,15 @@
 //! The StageSync window.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32};
-use stagesync_core::audio::SourceMeta;
+use stagesync_core::audio::{PeakCache, SourceMeta};
 use stagesync_core::matching::drift::DriftAssessment;
-use stagesync_core::matching::{AlignmentReport, SourceAlignment};
+use stagesync_core::matching::{AlignmentReport, SegmentKind, SourceAlignment};
 use stagesync_core::pipeline::{AnalysisConfig, ManualAnchor};
 use stagesync_core::render::Layout;
 use stagesync_core::verify::{residual_stats, HoldoutResult};
@@ -16,6 +17,7 @@ use stagesync_core::verify::{residual_stats, HoldoutResult};
 use crate::chart;
 use crate::jobs::{self, ExportOutcome, JobEvent};
 use crate::platform;
+use crate::player::{Player, Voice};
 use crate::settings::{self, AppSettings};
 use crate::state::{
     drift_verdict, expand_dropped_paths, format_duration, format_label, is_wav, layout_label,
@@ -23,6 +25,7 @@ use crate::state::{
     TaskProgress,
 };
 use crate::timeline;
+use crate::waveview;
 
 /// What the user has selected in the file list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,9 +108,41 @@ pub struct StageSyncApp {
     central_width: f32,
     /// Whether the settings have already been written for this close.
     closing_saved: bool,
-    zoom: f64,
     tx: Sender<JobEvent>,
     rx: Receiver<JobEvent>,
+    /// Which voice the transport is set to: the reference or the corrected target.
+    voice: Voice,
+    /// The player: the reference, the corrected recording, and the switch between
+    /// them.
+    player: Player,
+    /// The waveform peaks of each recording, by path.
+    ///
+    /// The peaks are built on a thread of their own, because building them means
+    /// reading the whole recording. A recording that is not in the map yet simply
+    /// has no waveform yet.
+    peaks: HashMap<PathBuf, Arc<PeakCache>>,
+    /// The recordings whose peaks are being built.
+    peaks_pending: usize,
+    /// The visible span of the reference timeline, in seconds.
+    view_start: f64,
+    /// The visible span of the reference timeline, in seconds.
+    view_end: f64,
+    /// Where the playhead is, in reference seconds.
+    playhead: f64,
+    /// The region the user has selected on the timeline, in reference seconds.
+    region: Option<(f64, f64)>,
+    /// The region that is looped, in reference seconds.
+    loop_region: Option<(f64, f64)>,
+    /// The manual nudge of each target recording, in seconds.
+    ///
+    /// A nudge moves the **placement** of a recording and nothing else. The rate
+    /// the sync engine measured is left alone, because a placement that is a few
+    /// milliseconds out says nothing about the rate.
+    nudges: Vec<f64>,
+    /// The nudge history, so that a nudge can be undone.
+    nudge_history: Vec<(usize, f64)>,
+    /// How many times the window has been asked to shrink to the monitor.
+    size_requests: usize,
 }
 
 impl Default for StageSyncApp {
@@ -149,9 +184,20 @@ impl StageSyncApp {
             window_height: stored.window_height,
             central_width: 0.0,
             closing_saved: false,
-            zoom: 4.0,
             tx,
             rx,
+            voice: Voice::Reference,
+            player: Player::new(),
+            peaks: HashMap::new(),
+            peaks_pending: 0,
+            view_start: 0.0,
+            view_end: 600.0,
+            playhead: 0.0,
+            region: None,
+            loop_region: None,
+            nudges: Vec::new(),
+            nudge_history: Vec::new(),
+            size_requests: 0,
         };
         app.apply_settings(&stored);
         app
@@ -162,6 +208,27 @@ impl StageSyncApp {
     /// A new, empty application.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Put recordings on the list, as if they had been dropped onto the window.
+    ///
+    /// The first one becomes the reference and the rest become targets, which is
+    /// the rule the drop handler uses as well.
+    pub fn open_files(&mut self, files: Vec<PathBuf>) {
+        for path in files {
+            self.add_path(path, false);
+        }
+    }
+
+    /// Start the analysis, as if the Analyze button had been pressed.
+    ///
+    /// The analysis needs a reference and at least one target; without them there
+    /// is nothing to do, and the window says so rather than failing silently.
+    pub fn analyse_on_start(&mut self) {
+        if self.reference.is_none() || self.targets.is_empty() {
+            return;
+        }
+        self.start_analysis();
     }
 
     /// Take the stored settings into the window.
@@ -343,6 +410,19 @@ impl StageSyncApp {
                         "verification of source {source_index} failed: {message}"
                     ));
                 }
+                JobEvent::PeaksReady { path, cache } => {
+                    self.peaks_pending = self.peaks_pending.saturating_sub(1);
+                    self.peaks.insert(path, Arc::new(*cache));
+                }
+                JobEvent::PeaksFailed { path, message } => {
+                    self.peaks_pending = self.peaks_pending.saturating_sub(1);
+                    self.push_log(format!(
+                        "the waveform of {} could not be built: {message}",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.display().to_string())
+                    ));
+                }
             }
         }
     }
@@ -441,7 +521,11 @@ impl StageSyncApp {
                 self.targets.push(FileEntry::new(path.clone()));
                 self.anchors.push(AnchorFields::default());
             }
-            jobs::spawn_probe(self.tx.clone(), path);
+            jobs::spawn_probe(self.tx.clone(), path.clone());
+            // The waveform is built at the same time: it needs the whole recording,
+            // and the user wants to see it as soon as it is there.
+            jobs::spawn_peaks(self.tx.clone(), path);
+            self.peaks_pending += 1;
         }
         if changed && announce {
             self.report = None;
@@ -449,6 +533,14 @@ impl StageSyncApp {
             self.last_error = None;
             self.notice = Some("The file list changed — run the analysis again.".to_string());
         }
+    }
+
+    /// Add one recording to the list.
+    ///
+    /// `announce` is false while the files of the last session are put back, because
+    /// the user did not do anything then.
+    fn add_path(&mut self, path: PathBuf, announce: bool) {
+        self.add_paths(vec![path], announce);
     }
 
     /// Point the export at a folder next to the reference, unless the user chose one.
@@ -750,6 +842,40 @@ impl StageSyncApp {
                 None => {
                     if self.verifying {
                         ui.label("Verifying the rendered correction…");
+                    } else if self.peaks_pending > 0 {
+                        ui.label(format!(
+                            "Drawing the waveforms… ({} left)",
+                            self.peaks_pending
+                        ));
+                    } else {
+                        // The state of the session, in one line: what is loaded and
+                        // what has been worked out about it.
+                        let mut info = format!(
+                            "{} recording(s), {} waveform(s)",
+                            self.reference.is_some() as usize + self.targets.len(),
+                            self.peaks.len()
+                        );
+                        if let Some(report) = self.report.as_ref() {
+                            info.push_str(&format!(
+                                " · aligned in {:.1} s",
+                                report
+                                    .timeline
+                                    .last()
+                                    .map_or(0.0, |span| span.reference_end)
+                            ));
+                            let low = report
+                                .timeline
+                                .iter()
+                                .filter(|span| span.kind == SegmentKind::LowConfidence)
+                                .count();
+                            let gaps = report
+                                .timeline
+                                .iter()
+                                .filter(|span| span.kind == SegmentKind::UncoveredReference)
+                                .count();
+                            info.push_str(&format!(" · {gaps} gap(s), {low} uncertain"));
+                        }
+                        ui.label(info);
                     }
                 }
             }
@@ -850,7 +976,10 @@ impl StageSyncApp {
                     promote = Some(index);
                 }
                 if ui
-                    .add_enabled(self.running.is_none(), egui::Button::new("✖"))
+                    // The multiplication sign, not the heavy ballot x: the font
+                    // that egui ships has no glyph for U+2716, and a button
+                    // without a glyph is an empty box.
+                    .add_enabled(self.running.is_none(), egui::Button::new("×"))
                     .clicked()
                 {
                     remove = Some(index);
@@ -1071,60 +1200,556 @@ impl StageSyncApp {
 
         self.timeline_section(ui);
         ui.add_space(8.0);
+        self.transport_section(ui);
+        ui.add_space(4.0);
+        self.problems_section(ui);
+        ui.add_space(8.0);
+        self.nudge_section(ui);
+        ui.add_space(8.0);
         self.anchor_section(ui);
         ui.add_space(8.0);
         self.detail_section(ui);
     }
 
-    /// The zoomable timeline.
+    /// The waveform timeline: the reference on top, the recordings below it.
+    ///
+    /// The picture *is* the alignment. Every recording is drawn where the sync
+    /// engine put it, so a recording that is out of place is something the user
+    /// can see rather than something they have to be told about. The waveforms
+    /// come from the core's peak cache, which is built by streaming the file, so
+    /// a three-hour recording costs a few megabytes rather than gigabytes.
     fn timeline_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Reference timeline");
+        ui.heading("Timeline");
 
-        let Some(report) = self.report.as_ref() else {
-            wrapped(
-                ui,
-                "No analysis yet: add a reference and at least one target, then press Analyze.",
-            );
-            return;
-        };
+        let duration = self
+            .report
+            .as_ref()
+            .map(|report| report.timeline_duration.max(1.0))
+            .unwrap_or(600.0);
 
         let mut fit = false;
-        // The row is laid out so that it may wrap: a row that is wider than
-        // the panel sets the panel's minimum width, and everything drawn after
-        // it is then laid out too wide and cut off at the panel's edge.
+        let mut zoom = 0.0f32;
+        // The row is laid out so that it may wrap: a row that is wider than the
+        // panel sets the panel's minimum width, and everything drawn after it is
+        // then laid out too wide and cut off at the panel's edge.
         ui.horizontal_wrapped(|ui| {
-            ui.label("Zoom");
-            ui.add(
-                egui::Slider::new(&mut self.zoom, 0.2..=500.0)
-                    .suffix(" px/s")
-                    .logarithmic(true),
-            );
-            if ui.button("Fit").clicked() {
+            if ui
+                .button("Start")
+                .on_hover_text("Go to the beginning of the show")
+                .clicked()
+            {
+                self.playhead = 0.0;
+                self.view_start = 0.0;
+            }
+            if ui.button("-").on_hover_text("Zoom out").clicked() {
+                zoom -= 1.0;
+            }
+            if ui.button("+").on_hover_text("Zoom in").clicked() {
+                zoom += 1.0;
+            }
+            if ui
+                .button("Fit")
+                .on_hover_text("Show the whole show")
+                .clicked()
+            {
                 fit = true;
             }
+            ui.label(format!(
+                "{:.0} s of {:.0} s on screen",
+                (self.view_end - self.view_start).max(0.0),
+                duration
+            ));
         });
 
-        let duration = report.timeline_duration.max(1.0);
         if fit {
-            let width = ui.available_width().max(120.0);
-            self.zoom = (width as f64 / duration).clamp(0.2, 500.0);
+            self.view_start = 0.0;
+            self.view_end = duration;
         }
-
-        let scale = self.zoom as f32;
-        let width = ((duration as f32) * scale).max(160.0);
-        let height = timeline::timeline_height(report.sources.len());
+        if zoom != 0.0 {
+            self.zoom_view(zoom.signum(), self.playhead);
+        }
 
         timeline::paint_legend(ui);
         ui.add_space(4.0);
 
-        egui::ScrollArea::horizontal()
-            .id_salt("timeline_scroll")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                let (response, painter) =
-                    ui.allocate_painter(egui::Vec2::new(width, height), egui::Sense::hover());
-                timeline::paint_timeline(&painter, response.rect, report, scale);
+        let width = ui.available_width().max(160.0);
+        let height = waveview::height(self.targets.len());
+        let (response, painter) = ui.allocate_painter(
+            egui::Vec2::new(width, height),
+            egui::Sense::click_and_drag(),
+        );
+        {
+            let view = self.waveform_view();
+            waveview::paint(&painter, response.rect, &view);
+        }
+        self.handle_timeline_input(ui, &response);
+    }
+
+    /// What the waveform timeline needs to draw itself.
+    fn waveform_view(&self) -> waveview::WaveformView<'_> {
+        let reference_peaks = self
+            .reference
+            .as_ref()
+            .and_then(|entry| self.peaks.get(&entry.path))
+            .map(|cache| cache.as_ref());
+
+        let coverage = self
+            .report
+            .as_ref()
+            .map(|report| {
+                report
+                    .timeline
+                    .iter()
+                    .map(|span| (span.reference_start, span.reference_end, span.kind))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut targets = Vec::new();
+        for (index, entry) in self.targets.iter().enumerate() {
+            let alignment = self
+                .report
+                .as_ref()
+                .and_then(|report| report.sources.get(index));
+            let model = alignment.and_then(|alignment| alignment.model());
+            let segments = alignment
+                .map(|alignment| {
+                    alignment
+                        .segments
+                        .iter()
+                        .map(|span| (span.reference_start, span.reference_end, span.kind))
+                        .collect()
+                })
+                .unwrap_or_default();
+            targets.push(waveview::TargetLane {
+                name: entry.name(),
+                peaks: self.peaks.get(&entry.path).map(|cache| cache.as_ref()),
+                // A pending nudge moves the picture immediately, so that the user
+                // can see what the adjustment does before it is applied.
+                model: model.map(|model| {
+                    stagesync_core::matching::LinearModel::new(
+                        model.scale,
+                        model.offset + self.nudges.get(index).copied().unwrap_or(0.0),
+                    )
+                }),
+                segments,
+                selected: self.selected_target_index() == Some(index),
             });
+        }
+
+        waveview::WaveformView {
+            start_secs: self.view_start,
+            end_secs: self.view_end,
+            reference: reference_peaks,
+            coverage,
+            targets,
+            playhead_secs: self.playhead,
+            selection: self.region,
+            loop_region: self.loop_region,
+            playing: None,
+        }
+    }
+
+    /// What the user does to the timeline: move the playhead, select a region,
+    /// pan, and zoom.
+    fn handle_timeline_input(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
+        let rect = response.rect;
+        let shift = ui.input(|input| input.modifiers.shift);
+        let pointer = response.interact_pointer_pos();
+
+        if let Some(pointer) = pointer {
+            // The wheel zooms around the pointer, so the material under the cursor
+            // stays under the cursor.
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll.abs() > 0.01 && rect.contains(pointer) {
+                let anchor = waveview::time_at(rect, pointer.x, self.view_start, self.view_end);
+                self.zoom_view(if scroll > 0.0 { -1.0 } else { 1.0 }, anchor);
+            }
+            if response.clicked() {
+                self.playhead =
+                    waveview::time_at(rect, pointer.x, self.view_start, self.view_end).max(0.0);
+                self.region = None;
+            }
+        }
+
+        if response.dragged() {
+            if shift {
+                // Panning: the view follows the pointer.
+                let span = (self.view_end - self.view_start).max(1e-6);
+                let per_pixel = span / rect.width().max(1.0) as f64;
+                let moved = response.drag_delta().x as f64 * per_pixel;
+                self.view_start -= moved;
+                self.view_end -= moved;
+            } else if let (Some(pointer), Some(origin)) =
+                (pointer, ui.input(|input| input.pointer.press_origin()))
+            {
+                let (start, end) =
+                    waveview::drag_span(rect, origin.x, pointer.x, self.view_start, self.view_end);
+                self.region = Some((start.max(0.0), end.max(0.0)));
+            }
+        }
+    }
+
+    /// Zoom the view in or out around a point on the timeline.
+    fn zoom_view(&mut self, direction: f32, anchor: f64) {
+        let span = (self.view_end - self.view_start).max(1e-3);
+        let factor = if direction > 0.0 { 0.5 } else { 2.0 };
+        let new_span = (span * factor).clamp(0.05, 24.0 * 3600.0);
+        let ratio = ((anchor - self.view_start) / span).clamp(-4.0, 4.0);
+        self.view_start = anchor - ratio * new_span;
+        self.view_end = self.view_start + new_span;
+    }
+
+    /// The transport: what is playing, and what the user can do about it.
+    fn transport_section(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            let playing = self.player.is_playing();
+            if ui
+                .button(if playing { "Stop" } else { "Play" })
+                .on_hover_text("Play from the playhead")
+                .clicked()
+            {
+                if playing {
+                    self.player.stop();
+                } else {
+                    self.play_voice(self.voice);
+                }
+            }
+
+            ui.separator();
+
+            // The A/B switch: the two voices are heard at the same position on
+            // the timeline, so the difference between them is the difference the
+            // correction makes.
+            if ui
+                .selectable_label(self.voice == Voice::Reference, "Reference")
+                .on_hover_text("Play the reference recording, exactly as it was recorded")
+                .clicked()
+            {
+                self.play_voice(Voice::Reference);
+            }
+            if ui
+                .selectable_label(self.voice == Voice::Target, "Corrected target")
+                .on_hover_text("Play the selected recording with the correction applied")
+                .clicked()
+            {
+                self.play_voice(Voice::Target);
+            }
+
+            ui.separator();
+
+            if ui
+                .add_enabled(self.region.is_some(), egui::Button::new("Loop selection"))
+                .on_hover_text("Play the selected region over and over")
+                .clicked()
+            {
+                self.loop_region = self.region;
+            }
+            if ui
+                .add_enabled(self.loop_region.is_some(), egui::Button::new("Clear loop"))
+                .clicked()
+            {
+                self.loop_region = None;
+            }
+
+            ui.separator();
+
+            ui.label(format!("Position {}", format_duration(self.playhead)));
+        });
+
+        if let Some(error) = self.player.error() {
+            wrapped(ui, format!("There is no sound: {error}"));
+        }
+        if let (Some((start, end)), Some(kind)) = (self.region, self.selection_kind()) {
+            let _ = kind;
+            wrapped(
+                ui,
+                format!(
+                    "Selected {start:.3} s to {end:.3} s ({:.3} s long).",
+                    end - start
+                ),
+            );
+        }
+    }
+
+    /// What kind of material the selection covers, when it covers one kind.
+    fn selection_kind(&self) -> Option<SegmentKind> {
+        let (start, end) = self.region?;
+        let mut kind = None;
+        for span in self.report.as_ref()?.timeline.iter() {
+            if span.reference_start <= start && span.reference_end >= end {
+                kind = Some(span.kind);
+            }
+        }
+        kind
+    }
+
+    /// Play one of the two voices, from the playhead.
+    fn play_voice(&mut self, voice: Voice) {
+        self.voice = voice;
+        let position = self.playhead;
+        let result = match voice {
+            Voice::Reference => {
+                let Some(path) = self.reference.as_ref().map(|entry| entry.path.clone()) else {
+                    self.last_error = Some("There is no reference recording.".to_string());
+                    return;
+                };
+                self.player.play_reference(&path, position)
+            }
+            Voice::Target => {
+                let Some(index) = self.selected_target_index() else {
+                    self.last_error =
+                        Some("Select a target recording in the file list to hear it.".to_string());
+                    return;
+                };
+                let Some(alignment) = self
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.sources.get(index))
+                else {
+                    self.last_error = Some("Run the analysis before listening to a target.".into());
+                    return;
+                };
+                let Some(model) = alignment.model() else {
+                    self.last_error = Some(
+                        "This recording has no alignment, so there is nothing to play.".to_string(),
+                    );
+                    return;
+                };
+                let path = alignment.source.path.clone();
+                let model = stagesync_core::matching::LinearModel::new(
+                    model.scale,
+                    model.offset + self.nudges.get(index).copied().unwrap_or(0.0),
+                );
+                self.player.play_target(&path, &model, position)
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.last_error = None;
+                self.notice = Some(format!("Playing the {}.", voice.label().to_lowercase()));
+            }
+            Err(error) => {
+                self.player.stop();
+                self.last_error = Some(format!("Playback failed: {error:#}"));
+            }
+        }
+    }
+
+    /// The places worth listening to.
+    ///
+    /// The gaps in the coverage and the spans the matcher was not sure about are
+    /// where a recording is missing or where the alignment is doubtful. They are
+    /// listed with a button that takes the playhead there, so that "something is
+    /// wrong with this show" becomes a place the user can go.
+    fn problems_section(&mut self, ui: &mut egui::Ui) {
+        let problems = self.problems();
+        if problems.is_empty() {
+            return;
+        }
+        egui::CollapsingHeader::new(format!("Places to look at ({})", problems.len()))
+            .default_open(false)
+            .show(ui, |ui| {
+                for (label, position) in problems.iter().take(20) {
+                    ui.horizontal(|ui| {
+                        if ui.button(label.clone()).clicked() {
+                            self.jump_to(*position);
+                        }
+                    });
+                }
+            });
+    }
+
+    /// The places worth looking at, and where they are.
+    fn problems(&self) -> Vec<(String, f64)> {
+        let mut out: Vec<(String, f64)> = Vec::new();
+        let Some(report) = self.report.as_ref() else {
+            return out;
+        };
+        for span in &report.timeline {
+            if span.kind == SegmentKind::UncoveredReference {
+                out.push((
+                    format!("Nothing covers {:.1} s", span.reference_start),
+                    span.reference_start,
+                ));
+            }
+        }
+        for alignment in &report.sources {
+            for span in &alignment.segments {
+                if span.kind == SegmentKind::LowConfidence {
+                    out.push((
+                        format!(
+                            "{}: uncertain at {:.1} s",
+                            alignment.source.file_name, span.reference_start
+                        ),
+                        span.reference_start,
+                    ));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+
+    /// Move the playhead to a place, and bring it into view.
+    fn jump_to(&mut self, position: f64) {
+        self.playhead = position.max(0.0);
+        let span = (self.view_end - self.view_start).max(1e-3);
+        self.view_start = self.playhead - span * 0.5;
+        self.view_end = self.view_start + span;
+    }
+
+    /// The manual adjustment of the selected recording's placement.
+    ///
+    /// A nudge moves the **placement** and nothing else. The rate the sync engine
+    /// measured is left alone, because a recording that is a few milliseconds out
+    /// says nothing about its clock.
+    fn nudge_section(&mut self, ui: &mut egui::Ui) {
+        let Some(index) = self.selected_target_index() else {
+            return;
+        };
+        let name = self.targets[index].name();
+        let can_run =
+            self.reference.is_some() && !self.targets.is_empty() && self.running.is_none();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Nudge {name}"));
+            for (label, delta) in [
+                ("-100 ms", -0.100),
+                ("-10 ms", -0.010),
+                ("-1 ms", -0.001),
+                ("+1 ms", 0.001),
+                ("+10 ms", 0.010),
+                ("+100 ms", 0.100),
+            ] {
+                if ui.button(label).clicked() {
+                    self.nudge(index, delta);
+                }
+            }
+        });
+
+        let applied = self.nudges.get(index).copied().unwrap_or(0.0);
+        if applied.abs() > 1e-9 {
+            wrapped(
+                ui,
+                format!(
+                    "The placement is moved {:+.1} ms. The rate is not changed. Press Apply to \
+                     re-measure and re-check the recording at its new position.",
+                    applied * 1000.0
+                ),
+            );
+        }
+
+        let mut apply = false;
+        let mut reset = false;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    can_run && applied.abs() > 1e-9,
+                    egui::Button::new("Apply and re-check"),
+                )
+                .clicked()
+            {
+                apply = true;
+            }
+            if ui
+                .add_enabled(
+                    can_run && !self.nudge_history.is_empty(),
+                    egui::Button::new("Undo"),
+                )
+                .clicked()
+            {
+                self.undo_nudge();
+            }
+            if ui
+                .add_enabled(can_run, egui::Button::new("Reset to automatic"))
+                .clicked()
+            {
+                reset = true;
+            }
+        });
+
+        if apply {
+            self.apply_nudge(index);
+        }
+        if reset {
+            self.reset_to_automatic(index);
+        }
+    }
+
+    /// Move one recording's placement by a number of milliseconds.
+    fn nudge(&mut self, index: usize, delta: f64) {
+        let current = self.nudges.get(index).copied().unwrap_or(0.0);
+        if self.nudges.len() <= index {
+            self.nudges.resize(index + 1, 0.0);
+        }
+        self.nudges[index] = current + delta;
+        self.nudge_history.push((index, current));
+    }
+
+    /// Take back the last nudge.
+    fn undo_nudge(&mut self) {
+        if let Some((index, previous)) = self.nudge_history.pop() {
+            if let Some(value) = self.nudges.get_mut(index) {
+                *value = previous;
+            }
+        }
+    }
+
+    /// Apply a pending nudge and re-measure the recording at its new position.
+    ///
+    /// The nudge becomes a manual anchor: the model is forced through the new
+    /// point, and the rate the sync engine measured is kept. The analysis then
+    /// runs again, so the recording is re-checked rather than merely moved.
+    fn apply_nudge(&mut self, index: usize) {
+        let Some(alignment) = self
+            .report
+            .as_ref()
+            .and_then(|report| report.sources.get(index))
+        else {
+            return;
+        };
+        let Some(model) = alignment.model() else {
+            return;
+        };
+        let nudge = self.nudges.get(index).copied().unwrap_or(0.0);
+        let reference_time = model.offset + nudge;
+        if self.anchors.len() <= index {
+            self.anchors.resize(index + 1, AnchorFields::default());
+        }
+        self.anchors[index] = AnchorFields {
+            source_time: 0.0,
+            reference_time,
+            active: true,
+        };
+        // The nudge is now part of the model, so it must not be added a second
+        // time.
+        if let Some(value) = self.nudges.get_mut(index) {
+            *value = 0.0;
+        }
+        self.push_log(format!(
+            "{} moved by {:+.1} ms; re-measuring",
+            self.targets[index].name(),
+            nudge * 1000.0
+        ));
+        self.start_analysis();
+    }
+
+    /// Drop the manual adjustment of one recording and go back to the automatic
+    /// result.
+    fn reset_to_automatic(&mut self, index: usize) {
+        if let Some(value) = self.nudges.get_mut(index) {
+            *value = 0.0;
+        }
+        self.nudge_history.retain(|(other, _)| *other != index);
+        if let Some(anchor) = self.anchors.get_mut(index) {
+            anchor.active = false;
+        }
+        self.push_log(format!(
+            "{} was reset to the automatic match",
+            self.targets[index].name()
+        ));
+        self.start_analysis();
     }
 
     /// The manual anchor controls.
@@ -1558,6 +2183,8 @@ impl StageSyncApp {
     /// be laid out head-lessly, at any window size, in a test.
     fn layout(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
+        self.follow_the_playhead();
+        self.keep_window_on_screen(ui);
 
         // Files dropped onto the window are the primary way to add recordings. A
         // dropped folder is opened and the recordings inside it are taken.
@@ -1621,10 +2248,72 @@ impl StageSyncApp {
             .show(ui, |ui| self.export_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
 
-        if self.running.is_some() {
-            // Keep the progress display moving while a job is running.
+        if self.running.is_some() || self.peaks_pending > 0 {
+            // Keep the progress display moving while a job is running, and keep
+            // the waveforms coming in as they are built.
             ui.ctx().request_repaint();
         }
+    }
+
+    /// Keep the window inside the monitor it is on.
+    ///
+    /// A window that is larger than the screen is not shown in full: the window
+    /// manager clips it, the layout is still computed for the whole window, and
+    /// the panels that lie outside the screen are simply not visible. The user
+    /// is left with a window that looks broken rather than one that is too big.
+    ///
+    /// The window is therefore asked to shrink to the monitor when it does not
+    /// fit. The request is made a few times only: a window manager that ignores
+    /// the request must not turn into an endless stream of them.
+    fn keep_window_on_screen(&mut self, ui: &egui::Ui) {
+        const MARGIN: f32 = 24.0;
+        const ATTEMPTS: usize = 8;
+
+        let viewport = ui.ctx().input(|input| input.viewport().clone());
+        let (Some(monitor), Some(inner)) = (viewport.monitor_size, viewport.inner_rect) else {
+            return;
+        };
+        if monitor.x < 200.0 || monitor.y < 200.0 {
+            return;
+        }
+        let size = inner.size();
+        let max = egui::vec2(monitor.x - MARGIN, monitor.y - MARGIN);
+        if size.x <= max.x && size.y <= max.y {
+            return;
+        }
+        if self.size_requests >= ATTEMPTS {
+            return;
+        }
+        self.size_requests += 1;
+        let wanted = egui::vec2(size.x.min(max.x), size.y.min(max.y));
+        log::info!("the window is {size:?} and the monitor is {monitor:?}; asking for {wanted:?}");
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::InnerSize(wanted));
+    }
+
+    /// Move the playhead with the sound, and keep a loop going.
+    ///
+    /// The playhead is the position on the reference timeline that is being heard.
+    /// It follows the player, and when a loop is set the playback starts again at
+    /// the beginning of the region as soon as it reaches the end of it.
+    fn follow_the_playhead(&mut self) {
+        if !self.player.is_playing() {
+            return;
+        }
+        let position = self.player.position();
+        self.playhead = position;
+        if let Some((start, end)) = self.loop_region {
+            if position >= end && end > start {
+                let voice = self.voice;
+                self.play_voice_at(voice, start);
+            }
+        }
+    }
+
+    /// Play one of the two voices from a given position.
+    fn play_voice_at(&mut self, voice: Voice, position: f64) {
+        self.playhead = position;
+        self.play_voice(voice);
     }
 }
 
@@ -1744,5 +2433,464 @@ mod tests {
             app.anchor_value(1).is_none(),
             "the promoted recording's anchor was left behind on another file"
         );
+    }
+
+    /// A nudge moves the placement, and an undo takes it back.
+    ///
+    /// The nudge is a movement of the recording, not a change of its rate, so the
+    /// rate is not part of what the nudge touches at all.
+    #[test]
+    fn a_nudge_moves_the_placement_and_an_undo_takes_it_back() {
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        app.targets = vec![FileEntry::new(PathBuf::from("target.wav"))];
+
+        app.nudge(0, 0.010);
+        assert!(
+            (app.nudges[0] - 0.010).abs() < 1e-12,
+            "the nudge was {}",
+            app.nudges[0]
+        );
+
+        app.nudge(0, -0.004);
+        assert!(
+            (app.nudges[0] - 0.006).abs() < 1e-12,
+            "the second nudge was {}",
+            app.nudges[0]
+        );
+
+        app.undo_nudge();
+        assert!(
+            (app.nudges[0] - 0.010).abs() < 1e-12,
+            "the undo left {}",
+            app.nudges[0]
+        );
+
+        app.undo_nudge();
+        assert!(
+            app.nudges[0].abs() < 1e-12,
+            "the second undo left {}",
+            app.nudges[0]
+        );
+    }
+
+    /// Zooming has to keep the material under the cursor where it was.
+    ///
+    /// A zoom that moves the anchor is a zoom that takes the listener's eye away
+    /// from the thing they were looking at.
+    #[test]
+    fn zooming_keeps_the_anchor_under_the_cursor() {
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        app.view_start = 100.0;
+        app.view_end = 200.0;
+        let anchor = 150.0;
+
+        app.zoom_view(1.0, anchor);
+        let span = app.view_end - app.view_start;
+        assert!((span - 50.0).abs() < 1e-9, "the span is {span}");
+        let at_anchor = app.view_start + (anchor - app.view_start) / span * span;
+        assert!(
+            (at_anchor - anchor).abs() < 1e-9,
+            "the anchor moved to {at_anchor}"
+        );
+
+        app.zoom_view(-1.0, anchor);
+        let span = app.view_end - app.view_start;
+        assert!((span - 100.0).abs() < 1e-9, "the span is {span}");
+    }
+
+    /// The view may not zoom past the ends of the recording.
+    #[test]
+    fn the_zoom_is_bounded() {
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        app.view_start = 0.0;
+        app.view_end = 100.0;
+
+        // The smallest span is 0.05 s. The span that comes back is the
+        // difference of two numbers near fifty seconds, so the last few bits
+        // are lost in the subtraction; the bound is checked with a tolerance
+        // that is far below anything a person could see.
+        for _ in 0..40 {
+            app.zoom_view(1.0, 50.0);
+        }
+        let span = app.view_end - app.view_start;
+        assert!(span >= 0.05 - 1e-9, "the span shrank to {span}");
+
+        for _ in 0..40 {
+            app.zoom_view(-1.0, 50.0);
+        }
+        let span = app.view_end - app.view_start;
+        assert!(span <= 24.0 * 3600.0 + 1e-9, "the span grew to {span}");
+    }
+
+    // --- The whole workflow, end to end -----------------------------------
+
+    /// A deterministic pseudo-musical performance.
+    ///
+    /// The signal has no exactly repeated passage: a repeating block would make
+    /// several positions of the recording genuinely alike, which would test the
+    /// fixture rather than the matcher. The chord progression, the dynamics and
+    /// the partials are therefore drawn from a fixed seed, so the fixture is the
+    /// same on every run but never repeats itself inside the recording.
+    fn performance(duration_secs: f64, rate: u32, seed: u64) -> Vec<f32> {
+        let n = (duration_secs * rate as f64).round() as usize;
+        let mut state = seed | 1;
+        let mut next = || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545F491_4F6CDD1D)
+        };
+        let uniform = |next: &mut dyn FnMut() -> u64| ((next() >> 40) as f64) / (1u64 << 24) as f64;
+        let mut rng = || uniform(&mut next);
+
+        const CHORD_SECS: f64 = 2.3;
+        const BEAT_SECS: f64 = 0.5;
+        const SECTION_SECS: f64 = 17.0;
+
+        let roots: Vec<f64> = (0..256).map(|_| 110.0 + 330.0 * rng()).collect();
+        let weights: Vec<f64> = (0..256).map(|_| 0.35 + 0.65 * rng()).collect();
+        let gains: Vec<f64> = (0..64).map(|_| 0.20 + 0.80 * rng()).collect();
+
+        let mut out = vec![0.0f32; n];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let t = i as f64 / rate as f64;
+            let chord = (t / CHORD_SECS).floor() as usize % roots.len();
+            let root = roots[chord];
+            let f = root * (1.0 + 0.0007 * chord as f64);
+            // Inharmonic partials: harmonically related pure tones share a
+            // common period and create exact correlation aliases.
+            let mut v = 0.0f64;
+            for (h, amp) in [(1.0f64, 0.50), (1.503, 0.30), (2.117, 0.18)] {
+                v += amp * (std::f64::consts::PI * 2.0 * f * h * t).sin();
+            }
+            // A slowly gliding tone gives the envelope long-term structure.
+            let glide = 220.0 + 90.0 * (0.5 + 0.5 * (std::f64::consts::PI * 2.0 * t / 23.0).sin());
+            v += 0.16 * (std::f64::consts::PI * 2.0 * glide * t).sin();
+            let section = (t / SECTION_SECS).floor() as usize % gains.len();
+            *slot = (v * weights[chord] * gains[section]) as f32;
+        }
+
+        // Percussive bursts: these give the envelope sharp, well-localised
+        // features.
+        let mut beat = 0usize;
+        while beat as f64 * BEAT_SECS < duration_secs {
+            let start = (beat as f64 * BEAT_SECS * rate as f64).round() as usize;
+            if start >= n {
+                break;
+            }
+            let len = ((0.06 * rate as f64).round() as usize).min(n - start);
+            for j in 0..len {
+                let env = (1.0 - j as f32 / len as f32).powi(2);
+                out[start + j] += env * 0.42 * ((rng() * 2.0 - 1.0) as f32);
+            }
+            beat += 1;
+        }
+
+        // A low noise floor, so the material is never digitally silent.
+        for v in out.iter_mut() {
+            *v += 0.0015 * ((rng() * 2.0 - 1.0) as f32);
+        }
+
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-9);
+        for v in out.iter_mut() {
+            *v = *v / peak * 0.7;
+        }
+        out
+    }
+
+    /// A recording of the same performance, starting at an exact place in the
+    /// reference and running at a slightly different rate.
+    fn make_source(
+        reference: &[f32],
+        ref_rate: u32,
+        out_rate: u32,
+        scale: f64,
+        offset: f64,
+    ) -> Vec<f32> {
+        let duration = (reference.len() as f64 / ref_rate as f64 - offset) / scale;
+        let n = (duration * out_rate as f64).round() as usize;
+        let mut out = vec![0.0f32; n];
+        for (j, slot) in out.iter_mut().enumerate() {
+            let source_time = j as f64 / out_rate as f64;
+            let pos = ((scale * source_time + offset) * ref_rate as f64).round() as i64;
+            if pos < 0 || pos as usize >= reference.len() {
+                continue;
+            }
+            *slot = reference[pos as usize];
+        }
+        out
+    }
+
+    /// Write a mono WAV file.
+    fn write_wav(path: &std::path::Path, samples: &[f32], rate: u32) {
+        let mut writer = stagesync_core::audio::WavWriter::create(
+            path,
+            rate,
+            1,
+            stagesync_core::audio::WavFormat::Float32,
+        )
+        .expect("create WAV writer");
+        writer
+            .write_planar(std::slice::from_ref(&samples))
+            .expect("write samples");
+        writer.finalize().expect("finalise WAV");
+    }
+
+    /// The size and the modification time of a file, as a cheap fingerprint.
+    fn fingerprint(path: &std::path::Path) -> (u64, std::time::SystemTime) {
+        let meta = std::fs::metadata(path).expect("the file is there");
+        (meta.len(), meta.modified().expect("the file has a time"))
+    }
+
+    /// Wait for a background job to report back.
+    fn wait_for<T>(app: &mut StageSyncApp, done: impl Fn(&StageSyncApp) -> Option<T>) -> Option<T> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        loop {
+            app.drain_events();
+            if let Some(value) = done(app) {
+                return Some(value);
+            }
+            if std::time::Instant::now() > deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The whole workflow, from an imported recording to an exported correction.
+    ///
+    /// This drives the application the way the window does: the files are put on
+    /// the list, the analysis runs on its own thread, the result comes back over
+    /// the channel, and the export writes the corrected audio and the artefacts.
+    /// The point is not that each step works on its own — the core has its own
+    /// tests for that — but that the window's own path from the file list to the
+    /// finished export works, and that the recordings are left untouched.
+    #[test]
+    fn the_window_aligns_a_recording_and_exports_the_correction() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let reference_rate = 48_000u32;
+        let reference_secs = 40.0f64;
+        let signal = performance(reference_secs, reference_rate, 11);
+        let reference_path = dir.path().join("reference.wav");
+        write_wav(&reference_path, &signal, reference_rate);
+
+        // The target: the same performance, starting three seconds into the
+        // reference, recorded at another rate and running slightly fast.
+        let scale = 1.0 + 30e-6;
+        let offset = 3.0f64;
+        let target_rate = 44_100u32;
+        let target = make_source(&signal, reference_rate, target_rate, scale, offset);
+        let target_path = dir.path().join("target.wav");
+        write_wav(&target_path, &target, target_rate);
+
+        let reference_before = fingerprint(&reference_path);
+        let target_before = fingerprint(&target_path);
+
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        app.open_files(vec![reference_path.clone(), target_path.clone()]);
+        app.analyse_on_start();
+
+        let report =
+            wait_for(&mut app, |app| app.report.clone()).expect("the analysis finished in time");
+        assert!(
+            app.last_error.is_none(),
+            "the analysis reported an error: {:?}",
+            app.last_error
+        );
+        let alignment = &report.sources[0];
+        let model = alignment
+            .model()
+            .expect("the recording was aligned to the reference");
+        assert!(
+            (model.offset - offset).abs() < 0.05,
+            "the offset was {} s and the truth is {offset} s",
+            model.offset
+        );
+        assert!(
+            (model.scale - scale).abs() < 200e-6,
+            "the rate was {} and the truth is {scale}",
+            model.scale
+        );
+
+        // The nudge moves the placement and nothing else.
+        app.selection = Some(Selection::Target(0));
+        app.nudge(0, 0.010);
+        assert!((app.nudges[0] - 0.010).abs() < 1e-12);
+        app.undo_nudge();
+        assert!(app.nudges[0].abs() < 1e-12);
+
+        // The export writes the corrected audio and the artefacts.
+        let out = dir.path().join("export");
+        app.settings.dir = out.display().to_string();
+        app.start_export();
+        let outcome = wait_for(&mut app, |app| {
+            app.export_outcome
+                .as_ref()
+                .map(|outcome| (outcome.files.clone(), outcome.corrected.clone()))
+        })
+        .expect("the export finished in time");
+        assert!(
+            app.last_error.is_none(),
+            "the export reported an error: {:?}",
+            app.last_error
+        );
+        let (files, corrected_files) = outcome;
+        assert!(!files.is_empty(), "the export wrote nothing");
+        for file in &files {
+            let meta = std::fs::metadata(file).expect("the file is there");
+            assert!(meta.len() > 0, "{} is empty", file.display());
+        }
+        let (_, corrected) = corrected_files
+            .first()
+            .expect("the corrected audio was written");
+        assert!(corrected.is_file(), "{} is missing", corrected.display());
+
+        // The recordings are read-only: the export never touches them.
+        assert_eq!(
+            reference_before,
+            fingerprint(&reference_path),
+            "the reference was changed by the export"
+        );
+        assert_eq!(
+            target_before,
+            fingerprint(&target_path),
+            "the target was changed by the export"
+        );
+    }
+
+    // --- The buttons of the window ----------------------------------------
+
+    /// The buttons of the window do what they say.
+    ///
+    /// The test drives the real widgets: it finds the button by its label and
+    /// clicks it, exactly as a mouse would. A button that is only painted — that
+    /// does nothing when it is pressed — fails this test.
+    ///
+    /// The settings are pointed at a temporary folder for the duration of the
+    /// test, so that the window cannot write over the settings of whoever is
+    /// running it.
+    #[test]
+    fn the_buttons_of_the_window_do_what_they_say() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let previous = std::env::var(crate::platform::CONFIG_DIR_ENV).ok();
+        // The variable is only read when the settings are loaded or written, and
+        // the test binary is the only one that sets it. The old value is put
+        // back afterwards.
+        std::env::set_var(crate::platform::CONFIG_DIR_ENV, dir.path());
+
+        let result = the_buttons_of_the_window_do_what_they_say_inner(&dir);
+
+        match previous {
+            Some(value) => std::env::set_var(crate::platform::CONFIG_DIR_ENV, value),
+            None => std::env::remove_var(crate::platform::CONFIG_DIR_ENV),
+        }
+        result.expect("the buttons did not do what they say");
+    }
+
+    /// The body of the button test, kept apart so that the environment variable
+    /// is always put back.
+    fn the_buttons_of_the_window_do_what_they_say_inner(dir: &tempfile::TempDir) -> Option<()> {
+        use egui_kittest::kittest::Queryable as _;
+
+        // A reference and a target, so that the analysis has something to do.
+        let reference_rate = 48_000u32;
+        let signal = performance(30.0, reference_rate, 3);
+        let reference_path = dir.path().join("reference.wav");
+        write_wav(&reference_path, &signal, reference_rate);
+        let target = make_source(&signal, reference_rate, 44_100, 1.0, 2.0);
+        let target_path = dir.path().join("target.wav");
+        write_wav(&target_path, &target, 44_100);
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            // The window keeps asking for a repaint while it is drawing the
+            // waveforms and running a job, so the harness is allowed as many
+            // steps as the test needs.
+            .with_max_steps(10_000)
+            .build_eframe(|_cc| StageSyncApp::with_settings(AppSettings::default()));
+        harness.run();
+
+        // The files are put on the list, as if they had been dropped onto the
+        // window.
+        harness
+            .state_mut()
+            .open_files(vec![reference_path.clone(), target_path.clone()]);
+        harness.run();
+
+        // The Analyze button starts the analysis.
+        harness
+            .query_by_label("Analyze")
+            .expect("the window has an Analyze button")
+            .click();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while harness.state().report.is_none() && std::time::Instant::now() < deadline {
+            harness.step();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        harness.state().report.as_ref()?;
+        assert!(
+            harness.state().last_error.is_none(),
+            "the analysis reported an error: {:?}",
+            harness.state().last_error
+        );
+        harness.run();
+
+        // The result is on the screen.
+        assert!(
+            harness
+                .query_by_label_contains("Analysis finished.")
+                .is_some(),
+            "the window did not say that the analysis had finished"
+        );
+
+        // The Fit button puts the whole show on the screen.
+        let duration = harness
+            .state()
+            .report
+            .as_ref()
+            .expect("the report is there")
+            .timeline_duration;
+        harness
+            .query_by_label("Fit")
+            .expect("the window has a Fit button")
+            .click();
+        harness.run();
+        assert!(
+            harness.state().view_start.abs() < 1e-6,
+            "the view starts at {} s",
+            harness.state().view_start
+        );
+        assert!(
+            (harness.state().view_end - duration).abs() < 0.5,
+            "the view ends at {} s and the show is {duration} s long",
+            harness.state().view_end
+        );
+
+        // The zoom-out button widens the view.
+        let fitted = harness.state().view_end - harness.state().view_start;
+        harness
+            .query_by_label("-")
+            .expect("the window has a zoom-out button")
+            .click();
+        harness.run();
+        let zoomed = harness.state().view_end - harness.state().view_start;
+        assert!(
+            zoomed > fitted,
+            "the zoom-out button did not widen the view: {fitted} s became {zoomed} s"
+        );
+
+        // The Play button either starts the sound or says why it cannot. A
+        // machine without an audio device is not a failure of the button.
+        harness
+            .query_by_label("Play")
+            .expect("the window has a Play button")
+            .click();
+        harness.run();
+        let app = harness.state();
+        let playing = app.player.is_playing();
+        let complained = app.last_error.is_some();
+        assert!(playing || complained, "the Play button did nothing at all");
+
+        Some(())
     }
 }

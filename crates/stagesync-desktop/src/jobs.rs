@@ -86,6 +86,42 @@ pub enum JobEvent {
         /// Why it failed.
         message: String,
     },
+    /// The peaks of a recording are ready.
+    PeaksReady {
+        /// The recording they belong to.
+        path: PathBuf,
+        /// The peaks.
+        cache: Box<stagesync_core::audio::PeakCache>,
+    },
+    /// The peaks of a recording could not be built.
+    PeaksFailed {
+        /// The recording they belong to.
+        path: PathBuf,
+        /// Why it failed.
+        message: String,
+    },
+}
+
+/// Build the waveform peaks of a recording in the background.
+///
+/// The peaks are what the waveform display draws, and building them means reading
+/// the whole recording once. That is far too slow for the window's thread, and for
+/// a three-hour recording it is far too slow for the user to wait for before the
+/// window opens, so it happens on a thread of its own.
+pub fn spawn_peaks(tx: Sender<JobEvent>, path: PathBuf) {
+    thread::spawn(move || {
+        let event = match stagesync_core::audio::PeakCache::build(&path, None) {
+            Ok(cache) => JobEvent::PeaksReady {
+                path,
+                cache: Box::new(cache),
+            },
+            Err(error) => JobEvent::PeaksFailed {
+                path,
+                message: format!("{error:#}"),
+            },
+        };
+        let _ = tx.send(event);
+    });
 }
 
 /// Install a panic hook that keeps the deliberate cancellation unwinds silent.

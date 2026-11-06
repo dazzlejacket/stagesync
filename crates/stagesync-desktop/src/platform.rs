@@ -10,6 +10,13 @@ use std::path::{Path, PathBuf};
 /// The folder the settings live in, under the platform's configuration directory.
 const APP_DIR: &str = "StageSync";
 
+/// An environment variable that says where the settings live.
+///
+/// A portable installation can point this at the folder it was unpacked into, so
+/// that the settings travel with it. A test points it at a temporary directory,
+/// so that a test never touches the settings of whoever is running it.
+pub const CONFIG_DIR_ENV: &str = "STAGESYNC_CONFIG_DIR";
+
 /// The longest file name the application will produce.
 ///
 /// Windows' own limit is 255 characters for the whole path, so a shorter cap leaves
@@ -28,11 +35,22 @@ const MAX_EXTENSION_CHARS: usize = 16;
 /// * Linux and the others: `$XDG_CONFIG_HOME/StageSync`, falling back to
 ///   `~/.config/StageSync`.
 ///
+/// `STAGESYNC_CONFIG_DIR` overrides all of them, which is what a portable
+/// installation and the tests use.
+///
 /// When neither the environment nor the home directory can be found, the settings go
 /// to a folder under the temporary directory. That is not a good place for settings,
 /// but it is better than refusing to start.
-#[cfg(target_os = "windows")]
 pub fn config_dir() -> PathBuf {
+    if let Some(dir) = absolute_env(CONFIG_DIR_ENV) {
+        return dir.join(APP_DIR);
+    }
+    platform_config_dir()
+}
+
+/// The platform's own configuration directory.
+#[cfg(target_os = "windows")]
+fn platform_config_dir() -> PathBuf {
     if let Some(dir) = absolute_env("APPDATA") {
         return dir.join(APP_DIR);
     }
@@ -42,9 +60,9 @@ pub fn config_dir() -> PathBuf {
     fallback_config_dir()
 }
 
-/// Where the settings live on this machine. See the Windows version above.
+/// The platform's own configuration directory.
 #[cfg(target_os = "macos")]
-pub fn config_dir() -> PathBuf {
+fn platform_config_dir() -> PathBuf {
     match home_dir() {
         Some(home) => home
             .join("Library")
@@ -54,9 +72,9 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
-/// Where the settings live on this machine. See the Windows version above.
+/// The platform's own configuration directory.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn config_dir() -> PathBuf {
+fn platform_config_dir() -> PathBuf {
     if let Some(dir) = absolute_env("XDG_CONFIG_HOME") {
         return dir.join(APP_DIR);
     }

@@ -21,6 +21,11 @@ serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true
+# Only the audio *output* is taken from rodio; the decoding is done by
+# `stagesync-core`, which already reads every format the pipeline supports. The
+# default features would pull a second, older copy of symphonia in for nothing.
+rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
 
 [dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe"] }
 tempfile = "3"

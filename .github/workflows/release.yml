@@ -122,6 +122,7 @@ jobs:
             libxkbcommon-x11-dev \
             libwayland-dev \
             libssl-dev \
+            libasound2-dev \
             pkg-config
 
       - name: Run the test suite
@@ -345,6 +346,7 @@ jobs:
             libxkbcommon-x11-dev \
             libwayland-dev \
             libssl-dev \
+            libasound2-dev \
             pkg-config \
             squashfs-tools \
             desktop-file-utils \
