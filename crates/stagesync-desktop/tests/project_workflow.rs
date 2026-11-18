@@ -231,3 +231,358 @@ fn crash_recovery_snapshot_saves_and_clears() {
     assert!(project::load_recovery_meta().is_none());
     let _ = Duration::from_secs(0);
 }
+
+#[test]
+fn p1_01_moved_project_rebinds_report_paths_and_exports_moved_audio() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _cfg = ConfigDirGuard::set(temp.path());
+
+    let orig = temp.path().join("orig");
+    let moved = temp.path().join("moved");
+    fs::create_dir_all(&orig).unwrap();
+    fs::create_dir_all(&moved).unwrap();
+
+    let rate = 8_000u32;
+    let ref_sig = make_signal(40.0, rate);
+    let src_sig: Vec<f32> = ref_sig[rate as usize * 2..].to_vec(); // +2.0 s offset
+
+    let orig_ref = orig.join("ref.wav");
+    let orig_src = orig.join("src.wav");
+    write_wav(&orig_ref, &ref_sig, rate);
+    write_wav(&orig_src, &src_sig, rate);
+
+    let config = AnalysisConfig {
+        compute_log_mel: false,
+        measure_waveform_drift: false,
+        ..AnalysisConfig::default()
+    };
+    let mut noop = |_: stagesync_core::pipeline::Progress| {};
+    let report = analyze(
+        &orig_ref,
+        std::slice::from_ref(&orig_src),
+        &config,
+        &mut noop,
+    )
+    .expect("analyze succeeds");
+
+    let orig_proj_path = orig.join("show.stagesync");
+    let mut app = StageSyncApp::new();
+    app.open_files(vec![orig_ref.clone(), orig_src.clone()]);
+    let mut proj = app.to_project(Some(&orig_proj_path));
+    proj.report = Some(report);
+    proj.export.layout = "reference_timeline_per_source".to_string();
+    proj.save_to(&orig_proj_path).unwrap();
+
+    // Copy project + audio to moved/.
+    let moved_ref = moved.join("ref.wav");
+    let moved_src = moved.join("src.wav");
+    let moved_proj_path = moved.join("show.stagesync");
+    fs::copy(&orig_ref, &moved_ref).unwrap();
+    fs::copy(&orig_src, &moved_src).unwrap();
+    fs::copy(&orig_proj_path, &moved_proj_path).unwrap();
+
+    // Replace orig/src.wav with constant 0.125 audio.
+    let bad_audio = vec![0.125f32; src_sig.len()];
+    write_wav(&orig_src, &bad_audio, rate);
+
+    let mut moved_app = StageSyncApp::new();
+    moved_app
+        .open_project_path(&moved_proj_path)
+        .expect("open moved project");
+    let snapped = moved_app.to_project(Some(&moved_proj_path));
+    let report_to_export = snapped.report.expect("moved report retained");
+    assert_eq!(
+        report_to_export.sources[0].source.path, moved_src,
+        "cached report path was not rebound to moved/src.wav"
+    );
+
+    let export_dir = temp.path().join("export_moved");
+    let mut export_settings = snapped
+        .export
+        .to_export_settings(&stagesync_desktop::mixer::MixerState::default());
+    export_settings.dir = export_dir.display().to_string();
+    let cancel = AtomicBool::new(false);
+    let outcome = jobs::export_report(&report_to_export, &export_settings, &cancel, &mut |_| {})
+        .expect("export of moved project succeeds");
+    let wav = out_file(&outcome.files);
+    let mut reader = WavReader::open(&wav).unwrap();
+    let samples = reader
+        .read_frames(rate as u64 * 5, rate as usize * 5)
+        .unwrap();
+    let interior = &samples[0];
+    let max_diff_from_0125 = interior
+        .iter()
+        .map(|s| (s - 0.125).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_diff_from_0125 > 0.05,
+        "export read stale orig/src.wav (constant 0.125) instead of moved/src.wav!"
+    );
+
+    // Also succeed when orig/ directory is completely deleted.
+    fs::remove_dir_all(&orig).unwrap();
+    let export_dir2 = temp.path().join("export_moved_no_orig");
+    export_settings.dir = export_dir2.display().to_string();
+    jobs::export_report(&report_to_export, &export_settings, &cancel, &mut |_| {})
+        .expect("export of moved project succeeds without orig/");
+}
+
+#[test]
+fn p1_02_project_save_refuses_to_overwrite_input_recording_or_wrong_extension() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _cfg = ConfigDirGuard::set(temp.path());
+
+    let wav_path = temp.path().join("save-collision.wav");
+    let original_bytes = b"RIFF_ORIGINAL_AUDIO_BYTES_DO_NOT_TOUCH".to_vec();
+    fs::write(&wav_path, &original_bytes).unwrap();
+
+    let mut app = StageSyncApp::new();
+    app.open_files(vec![wav_path.clone()]);
+
+    let err = app
+        .save_project_to(&wav_path)
+        .expect_err("saving project over input WAV must be refused");
+    assert!(
+        err.to_string().contains("stagesync") || err.to_string().contains("overwrite"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(
+        fs::read(&wav_path).unwrap(),
+        original_bytes,
+        "input WAV bytes were overwritten!"
+    );
+
+    // Relative alias pointing to the same WAV must also be refused.
+    let alias = temp
+        .path()
+        .join("sub")
+        .join("..")
+        .join("save-collision.wav");
+    fs::create_dir_all(temp.path().join("sub")).unwrap();
+    assert!(app.save_project_to(&alias).is_err());
+    assert_eq!(fs::read(&wav_path).unwrap(), original_bytes);
+
+    // Arbitrary non-.stagesync extension must also be refused.
+    let wrong_ext = temp.path().join("show.json");
+    assert!(app.save_project_to(&wrong_ext).is_err());
+    assert!(!wrong_ext.exists());
+}
+
+fn make_aperiodic_signal(secs: f64, rate: u32, seed: u64) -> Vec<f32> {
+    let n = (secs * rate as f64).round() as usize;
+    let mut state: u64 = seed | 1;
+    let mut rng = || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        ((state.wrapping_mul(0x2545F491_4F6CDD1D) >> 40) as f64) / (1u64 << 24) as f64
+    };
+    let mut out = vec![0.0f32; n];
+    let step = (rate as usize / 20).max(1); // 50 ms aperiodic amplitude steps
+    let mut env = 0.4;
+    let mut f1 = 173.0;
+    let mut f2 = 311.0;
+    for (i, s) in out.iter_mut().enumerate() {
+        if i % step == 0 {
+            env = 0.08 + 0.9 * rng();
+            f1 = 130.0 + 290.0 * rng();
+            f2 = 340.0 + 420.0 * rng();
+        }
+        let t = i as f64 / rate as f64;
+        let tone = (2.0 * std::f64::consts::PI * f1 * t).sin()
+            + 0.6 * (2.0 * std::f64::consts::PI * f2 * t).sin()
+            + 0.25 * (rng() * 2.0 - 1.0);
+        *s = (tone * env * 0.25) as f32;
+    }
+    out
+}
+
+#[test]
+fn p1_04_opening_project_b_isolates_background_analysis_from_project_a() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _cfg = ConfigDirGuard::set(temp.path());
+
+    let rate = 8_000u32;
+    let sig_a = make_aperiodic_signal(70.0, rate, 0xAAAA_5555);
+    let ref_a = temp.path().join("ref_a.wav");
+    let src_a = temp.path().join("src_a.wav");
+    write_wav(&ref_a, &sig_a, rate);
+    write_wav(&src_a, &sig_a[rate as usize..], rate);
+
+    let sig_b = make_aperiodic_signal(20.0, rate, 0xBBBB_6666);
+    let ref_b = temp.path().join("ref_b.wav");
+    let src_b = temp.path().join("src_b.wav");
+    write_wav(&ref_b, &sig_b, rate);
+    write_wav(&src_b, &sig_b[rate as usize..], rate);
+
+    // Control check: verify Project A's audio actually finishes analysis on its own.
+    {
+        let mut control = StageSyncApp::new();
+        control.open_files(vec![ref_a.clone(), src_a.clone()]);
+        control.analyse_on_start();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline && !control.has_report() {
+            control.poll_background();
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            control.has_report(),
+            "control run for Project A failed to produce a report"
+        );
+    }
+
+    // Create Project B on disk (same target count = 1, unanalyzed).
+    let proj_b_path = temp.path().join("proj_b.stagesync");
+    {
+        let mut setup_b = StageSyncApp::new();
+        setup_b.open_files(vec![ref_b.clone(), src_b.clone()]);
+        setup_b.save_project_to(&proj_b_path).unwrap();
+    }
+
+    // Start background analysis on Project A, then immediately open Project B.
+    let mut app = StageSyncApp::new();
+    app.open_files(vec![ref_a, src_a]);
+    app.analyse_on_start();
+    app.open_project_path(&proj_b_path)
+        .expect("open project B while A is analyzing");
+
+    // Pump background events long enough for A's worker to finish & deliver any stale event.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        app.poll_background();
+        if app.has_report() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    assert!(
+        !app.has_report(),
+        "stale analysis from Project A leaked into Project B: {:?}",
+        app.to_project(None)
+            .report
+            .map(|r| r.sources[0].source.path.clone())
+    );
+    assert!(!app.is_dirty(), "stale background event dirtied Project B");
+}
+
+#[test]
+fn p2_01_changed_or_missing_media_invalidate_manual_state_and_preserve_identity() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _cfg = ConfigDirGuard::set(temp.path());
+
+    let rate = 8_000u32;
+    let sig = make_signal(10.0, rate);
+    let ref_path = temp.path().join("ref.wav");
+    let tgt_path = temp.path().join("tgt.wav");
+    write_wav(&ref_path, &sig, rate);
+    write_wav(&tgt_path, &sig, rate);
+
+    let proj_path = temp.path().join("manual.stagesync");
+    let mut app = StageSyncApp::new();
+    app.open_files(vec![ref_path.clone(), tgt_path.clone()]);
+    let mut proj = app.to_project(Some(&proj_path));
+    let expected_hash = proj.targets[0].media.sha256.clone().expect("hash saved");
+    let expected_len = proj.targets[0].media.byte_len.expect("len saved");
+    proj.targets[0].anchor.source_time = 3.0;
+    proj.targets[0].anchor.reference_time = 5.0;
+    proj.targets[0].anchor.active = true;
+    proj.targets[0].pending_nudge_secs = 0.25;
+    proj.save_to(&proj_path).unwrap();
+
+    // Case 1: target missing -> opening & snapshotting MUST preserve expected SHA-256 and byte_len.
+    let backup = temp.path().join("tgt_backup.wav");
+    fs::rename(&tgt_path, &backup).unwrap();
+    let mut missing_app = StageSyncApp::new();
+    missing_app.open_project_path(&proj_path).unwrap();
+    let missing_snap = missing_app.to_project(Some(&proj_path));
+    assert_eq!(
+        missing_snap.targets[0].media.sha256.as_deref(),
+        Some(expected_hash.as_str()),
+        "saved SHA-256 was lost while target was missing"
+    );
+    assert_eq!(
+        missing_snap.targets[0].media.byte_len,
+        Some(expected_len),
+        "saved byte_len was lost while target was missing"
+    );
+
+    // Case 2: target audio modified on disk -> anchor and pending nudge must be cleared on load.
+    let changed_sig: Vec<f32> = sig.iter().map(|s| s * 0.5).collect();
+    write_wav(&tgt_path, &changed_sig, rate);
+    let mut mod_app = StageSyncApp::new();
+    mod_app.open_project_path(&proj_path).unwrap();
+    let mod_snap = mod_app.to_project(Some(&proj_path));
+    assert!(
+        !mod_snap.targets[0].anchor.active,
+        "stale manual anchor remained active after target audio changed"
+    );
+    assert!(
+        mod_snap.targets[0].pending_nudge_secs.abs() < 1e-12,
+        "stale pending nudge remained {} after target audio changed",
+        mod_snap.targets[0].pending_nudge_secs
+    );
+
+    // Case 3: restore target, modify reference -> all anchors & nudges must be cleared.
+    fs::rename(&backup, &tgt_path).unwrap();
+    write_wav(&ref_path, &changed_sig, rate);
+    let mut ref_mod_app = StageSyncApp::new();
+    ref_mod_app.open_project_path(&proj_path).unwrap();
+    let ref_mod_snap = ref_mod_app.to_project(Some(&proj_path));
+    assert!(
+        !ref_mod_snap.targets[0].anchor.active,
+        "stale manual anchor remained active after reference audio changed"
+    );
+    assert!(
+        ref_mod_snap.targets[0].pending_nudge_secs.abs() < 1e-12,
+        "stale pending nudge remained after reference audio changed"
+    );
+}
+
+#[test]
+fn p1_01_export_refuses_tampered_audio_before_render() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _cfg = ConfigDirGuard::set(temp.path());
+
+    let rate = 8_000u32;
+    let sig = make_signal(40.0, rate);
+    let ref_path = temp.path().join("ref.wav");
+    let src_path = temp.path().join("src.wav");
+    write_wav(&ref_path, &sig, rate);
+    write_wav(&src_path, &sig[rate as usize..], rate);
+
+    let config = AnalysisConfig {
+        compute_log_mel: false,
+        measure_waveform_drift: false,
+        ..AnalysisConfig::default()
+    };
+    let mut noop = |_: stagesync_core::pipeline::Progress| {};
+    let report = analyze(
+        &ref_path,
+        std::slice::from_ref(&src_path),
+        &config,
+        &mut noop,
+    )
+    .expect("analyze");
+
+    // Mutate bytes on disk WITHOUT changing file size so only SHA-256 reveals tampering.
+    let mut bytes = fs::read(&src_path).unwrap();
+    let idx = bytes.len() / 2;
+    bytes[idx] ^= 0xFF;
+    fs::write(&src_path, &bytes).unwrap();
+
+    let mut settings = stagesync_desktop::state::ExportSettings::default();
+    settings.dir = temp.path().join("out").display().to_string();
+    let cancel = AtomicBool::new(false);
+    let err = jobs::export_report(&report, &settings, &cancel, &mut |_| {})
+        .expect_err("export must refuse tampered audio file");
+    match err {
+        jobs::JobFailure::Failed(msg) => {
+            assert!(
+                msg.contains("SHA-256") || msg.contains("changed on disk"),
+                "unexpected error message: {msg}"
+            );
+        }
+        other => panic!("expected Failed error, got {other:?}"),
+    }
+}

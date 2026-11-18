@@ -298,14 +298,26 @@ impl ProjectMediaRef {
                     Some(meta.duration_secs),
                     Some(meta.frames),
                 )
-            } else {
-                let bytes = fs::metadata(&abs).ok().map(|m| m.len());
-                let digest = if abs.is_file() {
-                    sha256_file(&abs).ok()
-                } else {
-                    None
-                };
+            } else if abs.is_file() {
+                let bytes = fs::metadata(&abs)
+                    .ok()
+                    .map(|m| m.len())
+                    .or(entry.expected_byte_len);
+                let digest = sha256_file(&abs)
+                    .ok()
+                    .or_else(|| entry.expected_sha256.clone());
                 (digest, bytes, None, None, None, None)
+            } else {
+                // Keep the expected identity when a file is currently missing so a
+                // save/re-snapshot never wipes out relink verification.
+                (
+                    entry.expected_sha256.clone(),
+                    entry.expected_byte_len,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
             };
 
         Self {
@@ -322,9 +334,54 @@ impl ProjectMediaRef {
     }
 }
 
+/// Refuse to save a project without the `.stagesync` extension or over any input recording.
+pub fn ensure_safe_project_path(path: &Path, inputs: &[PathBuf]) -> Result<()> {
+    let ext_ok = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION));
+    if !ext_ok {
+        bail!(
+            "project files must use the .{PROJECT_EXTENSION} extension (got {})",
+            path.display()
+        );
+    }
+    if !inputs.is_empty() {
+        stagesync_core::render::ensure_output_does_not_overwrite(path, inputs).with_context(
+            || {
+                format!(
+                    "refusing to overwrite an input recording with project file {}",
+                    path.display()
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
 impl StageSyncProject {
+    /// Collect all input paths referenced by this project (relative paths resolved against `base_dir`).
+    fn referenced_paths(&self, base_dir: Option<&Path>) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut push_ref = |r: &ProjectMediaRef| {
+            out.push(r.absolute_path.clone());
+            if let (Some(dir), Some(rel)) = (base_dir, &r.relative_path) {
+                out.push(clean_path(&dir.join(rel)));
+            }
+        };
+        if let Some(r) = &self.reference {
+            push_ref(r);
+        }
+        for t in &self.targets {
+            push_ref(&t.media);
+        }
+        out
+    }
+
     /// Save the project atomically to `path` (`.tmp` write + atomic rename).
     pub fn save_to(&self, path: &Path) -> Result<()> {
+        let inputs = self.referenced_paths(path.parent());
+        ensure_safe_project_path(path, &inputs)?;
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)
@@ -374,9 +431,10 @@ impl StageSyncProject {
             targets.push(resolved);
         }
 
-        // Never reuse cached analysis results if any recording is missing or modified.
+        // Never reuse cached analysis results if any recording is missing, modified,
+        // or if the cached report's embedded digests disagree with the resolved files.
         let mut valid_report = project.report.clone();
-        if let Some(report) = &valid_report {
+        if let Some(report) = valid_report.as_mut() {
             if report.sources.len() != project.targets.len() {
                 valid_report = None;
                 notices.push(
@@ -389,6 +447,50 @@ impl StageSyncProject {
                     "Cached sync results were invalidated because source audio changed or is missing ({}). Re-run Auto Sync once files are ready.",
                     stale_reasons.join("; ")
                 ));
+            } else {
+                let mut report_mismatch: Option<String> = None;
+                if let Some(ref_res) = &reference {
+                    if let Some(saved_hash) = &ref_res.saved.sha256 {
+                        if !report.reference.sha256.is_empty()
+                            && &report.reference.sha256 != saved_hash
+                        {
+                            report_mismatch = Some(format!(
+                                "reference report digest does not match {}",
+                                ref_res.saved.file_name
+                            ));
+                        }
+                    }
+                }
+                if report_mismatch.is_none() {
+                    for (alignment, target_res) in report.sources.iter().zip(targets.iter()) {
+                        if let Some(saved_hash) = &target_res.saved.sha256 {
+                            if !alignment.source.sha256.is_empty()
+                                && &alignment.source.sha256 != saved_hash
+                            {
+                                report_mismatch = Some(format!(
+                                    "cached alignment digest does not match {}",
+                                    target_res.saved.file_name
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(reason) = report_mismatch {
+                    valid_report = None;
+                    notices.push(format!(
+                        "Cached sync results were invalidated ({reason}). Re-run Auto Sync."
+                    ));
+                } else {
+                    // Rebind cached report paths to the currently resolved project files so moved
+                    // or copied project folders never read from stale original directories.
+                    if let Some(ref_res) = &reference {
+                        report.reference.path = ref_res.resolved_path.clone();
+                    }
+                    for (alignment, target_res) in report.sources.iter_mut().zip(targets.iter()) {
+                        alignment.source.path = target_res.resolved_path.clone();
+                    }
+                }
             }
         }
 

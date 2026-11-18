@@ -15,7 +15,7 @@ use stagesync_core::render::Layout;
 use stagesync_core::verify::{residual_stats, HoldoutResult};
 
 use crate::chart;
-use crate::jobs::{self, ExportOutcome, JobEvent};
+use crate::jobs::{self, ExportOutcome, JobEvent, JobScope, ScopedJobEvent};
 use crate::platform;
 use crate::player::{Player, Voice};
 use crate::project::{
@@ -70,6 +70,7 @@ enum DockTab {
 /// A background job that is currently running.
 struct RunningJob {
     kind: JobKind,
+    job_id: u64,
     cancel: Arc<AtomicBool>,
 }
 
@@ -102,6 +103,10 @@ pub struct StageSyncApp {
     report: Option<AlignmentReport>,
     running: Option<RunningJob>,
     verifying: bool,
+    verifying_job: Option<u64>,
+    session_gen: u64,
+    next_job_id: u64,
+    latest_probe_jobs: HashMap<PathBuf, u64>,
     progress: Option<TaskProgress>,
     last_error: Option<String>,
     notice: Option<String>,
@@ -132,8 +137,8 @@ pub struct StageSyncApp {
     central_width: f32,
     /// Whether the settings have already been written for this close.
     closing_saved: bool,
-    tx: Sender<JobEvent>,
-    rx: Receiver<JobEvent>,
+    tx: Sender<ScopedJobEvent>,
+    rx: Receiver<ScopedJobEvent>,
     /// Which voice the transport is set to: the reference or the corrected target.
     voice: Voice,
     /// The player: the reference, the corrected recording, and the switch between
@@ -215,6 +220,10 @@ impl StageSyncApp {
             report: None,
             running: None,
             verifying: false,
+            verifying_job: None,
+            session_gen: 1,
+            next_job_id: 1,
+            latest_probe_jobs: HashMap::new(),
             progress: None,
             last_error: None,
             notice: None,
@@ -393,21 +402,132 @@ impl StageSyncApp {
         }
     }
 
+    /// Allocate a fresh [`JobScope`] for the current session.
+    fn next_scope(&mut self) -> JobScope {
+        let job_id = self.next_job_id;
+        self.next_job_id = self.next_job_id.wrapping_add(1).max(1);
+        JobScope {
+            session_gen: self.session_gen,
+            job_id,
+        }
+    }
+
+    /// Cancel any in-flight job without advancing `session_gen` (keeps valid per-path probes/peaks).
+    fn cancel_active_jobs(&mut self) {
+        if let Some(job) = self.running.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        self.progress = None;
+        self.verifying = false;
+        self.verifying_job = None;
+    }
+
+    /// Advance `session_gen` and cancel active jobs so stale workers from any prior
+    /// project or reset workspace can never write into the new session.
+    fn invalidate_session(&mut self) {
+        self.session_gen = self.session_gen.wrapping_add(1).max(1);
+        self.latest_probe_jobs.clear();
+        self.cancel_active_jobs();
+    }
+
+    /// Whether `path` belongs to the active reference or target list.
+    fn has_input_path(&self, path: &Path) -> bool {
+        self.reference.as_ref().is_some_and(|e| e.path == path)
+            || self.targets.iter().any(|e| e.path == path)
+    }
+
+    /// Collect all current recording paths for overwrite protection.
+    fn input_paths(&self) -> Vec<PathBuf> {
+        self.reference
+            .iter()
+            .chain(self.targets.iter())
+            .map(|e| e.path.clone())
+            .collect()
+    }
+
+    /// Spawn background probe + peak builds for `path` within the current session.
+    fn spawn_probe_and_peaks(&mut self, path: PathBuf) {
+        let probe_scope = self.next_scope();
+        self.latest_probe_jobs
+            .insert(path.clone(), probe_scope.job_id);
+        jobs::spawn_probe_scoped(self.tx.clone(), probe_scope, path.clone());
+        let peak_scope = self.next_scope();
+        jobs::spawn_peaks_scoped(self.tx.clone(), peak_scope, path);
+        self.peaks_pending += 1;
+    }
+
+    /// Whether a finished `AlignmentReport` still matches the active reference and target files.
+    fn report_matches_session(&self, report: &AlignmentReport) -> bool {
+        let Some(ref_entry) = &self.reference else {
+            return false;
+        };
+        if ref_entry.path != report.reference.path || report.sources.len() != self.targets.len() {
+            return false;
+        }
+        if let Some(meta) = &ref_entry.meta {
+            if !meta.sha256.is_empty()
+                && !report.reference.sha256.is_empty()
+                && meta.sha256 != report.reference.sha256
+            {
+                return false;
+            }
+        }
+        for (entry, alignment) in self.targets.iter().zip(report.sources.iter()) {
+            if entry.path != alignment.source.path {
+                return false;
+            }
+            if let Some(meta) = &entry.meta {
+                if !meta.sha256.is_empty()
+                    && !alignment.source.sha256.is_empty()
+                    && meta.sha256 != alignment.source.sha256
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Apply everything the background workers have reported since the last frame.
     fn drain_events(&mut self) {
-        while let Ok(event) = self.rx.try_recv() {
+        while let Ok(ScopedJobEvent { scope, event }) = self.rx.try_recv() {
+            if scope.session_gen != self.session_gen {
+                continue;
+            }
             match event {
-                JobEvent::Progress(progress) => self.progress = Some(progress),
-                JobEvent::Probed { path, meta, error } => self.apply_probe(path, meta, error),
+                JobEvent::Progress(progress) => {
+                    if self
+                        .running
+                        .as_ref()
+                        .is_some_and(|job| job.job_id == scope.job_id)
+                    {
+                        self.progress = Some(progress);
+                    }
+                }
+                JobEvent::Probed { path, meta, error } => {
+                    let is_latest = self
+                        .latest_probe_jobs
+                        .get(&path)
+                        .is_some_and(|id| *id == scope.job_id);
+                    if is_latest && self.has_input_path(&path) {
+                        self.apply_probe(path, meta, error);
+                    }
+                }
                 JobEvent::AnalysisFinished(report) => {
+                    let expected = self.running.as_ref().is_some_and(|job| {
+                        job.kind == JobKind::Analysis && job.job_id == scope.job_id
+                    });
+                    if !expected {
+                        continue;
+                    }
                     self.running = None;
                     self.progress = None;
                     // The report describes the recordings that were in the list
                     // when the analysis started. If the list has changed since,
-                    // its indices no longer line up with the file list, and
+                    // its indices or paths no longer line up with the file list, and
                     // showing it would put one recording's figures next to
                     // another recording's name.
-                    if report.sources.len() != self.targets.len() {
+                    if !self.report_matches_session(&report) {
                         self.report = None;
                         self.last_error = Some(
                             "The file list changed while the analysis was running, so its result \
@@ -430,12 +550,24 @@ impl StageSyncApp {
                     self.persist_settings();
                 }
                 JobEvent::AnalysisFailed(message) => {
+                    let expected = self.running.as_ref().is_some_and(|job| {
+                        job.kind == JobKind::Analysis && job.job_id == scope.job_id
+                    });
+                    if !expected {
+                        continue;
+                    }
                     self.running = None;
                     self.progress = None;
                     self.last_error = Some(format!("The analysis failed: {message}"));
                     self.push_log(format!("analysis failed: {message}"));
                 }
                 JobEvent::AnalysisCancelled => {
+                    let expected = self.running.as_ref().is_some_and(|job| {
+                        job.kind == JobKind::Analysis && job.job_id == scope.job_id
+                    });
+                    if !expected {
+                        continue;
+                    }
                     self.running = None;
                     self.progress = None;
                     self.last_error = None;
@@ -445,6 +577,12 @@ impl StageSyncApp {
                     self.push_log("analysis cancelled".to_string());
                 }
                 JobEvent::ExportFinished(outcome) => {
+                    let expected = self.running.as_ref().is_some_and(|job| {
+                        job.kind == JobKind::Export && job.job_id == scope.job_id
+                    });
+                    if !expected {
+                        continue;
+                    }
                     self.running = None;
                     self.progress = None;
                     self.export_outcome = Some(*outcome);
@@ -454,12 +592,24 @@ impl StageSyncApp {
                     self.persist_settings();
                 }
                 JobEvent::ExportFailed(message) => {
+                    let expected = self.running.as_ref().is_some_and(|job| {
+                        job.kind == JobKind::Export && job.job_id == scope.job_id
+                    });
+                    if !expected {
+                        continue;
+                    }
                     self.running = None;
                     self.progress = None;
                     self.last_error = Some(format!("The export failed: {message}"));
                     self.push_log(format!("export failed: {message}"));
                 }
                 JobEvent::ExportCancelled => {
+                    let expected = self.running.as_ref().is_some_and(|job| {
+                        job.kind == JobKind::Export && job.job_id == scope.job_id
+                    });
+                    if !expected {
+                        continue;
+                    }
                     self.running = None;
                     self.progress = None;
                     self.last_error = None;
@@ -472,7 +622,11 @@ impl StageSyncApp {
                     source_index,
                     result,
                 } => {
+                    if !self.verifying || self.verifying_job != Some(scope.job_id) {
+                        continue;
+                    }
                     self.verifying = false;
+                    self.verifying_job = None;
                     if let Some(alignment) = self
                         .report
                         .as_mut()
@@ -487,24 +641,32 @@ impl StageSyncApp {
                     source_index,
                     message,
                 } => {
+                    if !self.verifying || self.verifying_job != Some(scope.job_id) {
+                        continue;
+                    }
                     self.verifying = false;
+                    self.verifying_job = None;
                     self.last_error = Some(format!("The verification failed: {message}"));
                     self.push_log(format!(
                         "verification of source {source_index} failed: {message}"
                     ));
                 }
                 JobEvent::PeaksReady { path, cache } => {
-                    self.peaks_pending = self.peaks_pending.saturating_sub(1);
-                    self.peaks.insert(path, Arc::new(*cache));
+                    if self.has_input_path(&path) {
+                        self.peaks_pending = self.peaks_pending.saturating_sub(1);
+                        self.peaks.insert(path, Arc::new(*cache));
+                    }
                 }
                 JobEvent::PeaksFailed { path, message } => {
-                    self.peaks_pending = self.peaks_pending.saturating_sub(1);
-                    self.push_log(format!(
-                        "the waveform of {} could not be built: {message}",
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| path.display().to_string())
-                    ));
+                    if self.has_input_path(&path) {
+                        self.peaks_pending = self.peaks_pending.saturating_sub(1);
+                        self.push_log(format!(
+                            "the waveform of {} could not be built: {message}",
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| path.display().to_string())
+                        ));
+                    }
                 }
             }
         }
@@ -512,7 +674,8 @@ impl StageSyncApp {
 
     /// Store the result of a background probe.
     fn apply_probe(&mut self, path: PathBuf, meta: Option<SourceMeta>, error: Option<String>) {
-        let mut invalidated_by_modification = false;
+        let mut invalidated_ref = false;
+        let mut invalidated_target: Option<usize> = None;
         let check_entry = |entry: &mut FileEntry,
                            is_ref: bool,
                            view_end: &mut f64,
@@ -555,19 +718,44 @@ impl StageSyncApp {
         let view_start = self.view_start;
         let mut view_end = self.view_end;
         if let Some(entry) = self.reference.as_mut().filter(|entry| entry.path == path) {
-            invalidated_by_modification =
-                check_entry(entry, true, &mut view_end, report_none, view_start);
+            invalidated_ref = check_entry(entry, true, &mut view_end, report_none, view_start);
             self.view_end = view_end;
-        } else if let Some(entry) = self.targets.iter_mut().find(|entry| entry.path == path) {
-            invalidated_by_modification =
-                check_entry(entry, false, &mut view_end, report_none, view_start);
+        } else if let Some((idx, entry)) = self
+            .targets
+            .iter_mut()
+            .enumerate()
+            .find(|(_, entry)| entry.path == path)
+        {
+            if check_entry(entry, false, &mut view_end, report_none, view_start) {
+                invalidated_target = Some(idx);
+            }
         }
 
-        if invalidated_by_modification && self.report.is_some() {
+        if invalidated_ref {
+            self.cancel_active_jobs();
             self.report = None;
             self.export_outcome = None;
+            self.anchors.fill(AnchorFields::default());
+            self.nudges.fill(0.0);
+            self.nudge_history.clear();
             self.notice = Some(
-                "Cached alignment was cleared because a recording changed on disk.".to_string(),
+                "Cached alignment, manual anchors, and pending nudges were cleared because the reference changed on disk."
+                    .to_string(),
+            );
+        } else if let Some(idx) = invalidated_target {
+            self.cancel_active_jobs();
+            self.report = None;
+            self.export_outcome = None;
+            if let Some(anchor) = self.anchors.get_mut(idx) {
+                *anchor = AnchorFields::default();
+            }
+            if let Some(nudge) = self.nudges.get_mut(idx) {
+                *nudge = 0.0;
+            }
+            self.nudge_history.retain(|(other, _)| *other != idx);
+            self.notice = Some(
+                "Cached alignment, manual anchor, and pending nudge were cleared because a source recording changed on disk."
+                    .to_string(),
             );
         }
     }
@@ -655,13 +843,10 @@ impl StageSyncApp {
                 self.nudges.push(0.0);
                 self.mixer.sync_to(self.targets.len());
             }
-            jobs::spawn_probe(self.tx.clone(), path.clone());
-            // The waveform is built at the same time: it needs the whole recording,
-            // and the user wants to see it as soon as it is there.
-            jobs::spawn_peaks(self.tx.clone(), path);
-            self.peaks_pending += 1;
+            self.spawn_probe_and_peaks(path);
         }
         if changed && announce {
+            self.cancel_active_jobs();
             self.report = None;
             self.export_outcome = None;
             self.last_error = None;
@@ -716,11 +901,13 @@ impl StageSyncApp {
 
     /// Drop the reference recording.
     fn clear_reference(&mut self) {
+        self.cancel_active_jobs();
         self.reference = None;
         self.report = None;
         self.export_outcome = None;
         self.selection = None;
-        self.nudges.clear();
+        self.anchors.fill(AnchorFields::default());
+        self.nudges.fill(0.0);
         self.nudge_history.clear();
         self.mixer.sync_to(self.targets.len());
         self.mark_dirty();
@@ -732,6 +919,7 @@ impl StageSyncApp {
         if index >= self.targets.len() {
             return;
         }
+        self.cancel_active_jobs();
         let name = self.targets[index].name();
         self.targets.remove(index);
         if index < self.anchors.len() {
@@ -771,6 +959,7 @@ impl StageSyncApp {
         if index >= self.targets.len() {
             return;
         }
+        self.cancel_active_jobs();
         let entry = self.targets.remove(index);
         // The promoted recording's own anchor goes with it. An anchor belongs to
         // the recording it was set for, and the reference is not a target: leaving
@@ -894,6 +1083,7 @@ impl StageSyncApp {
 
     /// Save the active session atomically to `path` and update recent projects.
     pub fn save_project_to(&mut self, path: &Path) -> Result<(), anyhow::Error> {
+        project::ensure_safe_project_path(path, &self.input_paths())?;
         let snapshot = self.to_project(Some(path));
         snapshot.save_to(path)?;
         self.project_path = Some(path.to_path_buf());
@@ -919,6 +1109,7 @@ impl StageSyncApp {
         loaded: project::LoadedProject,
         source_path: Option<PathBuf>,
     ) {
+        self.invalidate_session();
         self.player.stop();
         self.peaks.clear();
         self.peaks_pending = 0;
@@ -932,14 +1123,41 @@ impl StageSyncApp {
         self.measure_waveform_drift = proj.analysis.measure_waveform_drift;
         self.force_offset_only = proj.analysis.force_offset_only;
 
+        let ref_modified = loaded
+            .reference
+            .as_ref()
+            .is_some_and(|r| matches!(r.status, MediaStatus::ModifiedOnDisk { .. }));
+
         self.reference = loaded.reference.as_ref().map(entry_from_resolved);
         self.targets = loaded.targets.iter().map(entry_from_resolved).collect();
+
+        // Preserve manual anchors/nudges for missing files so relinking can restore
+        // the session verbatim, but clear stale manual edits when audio bytes on
+        // disk actually changed (or when the reference itself changed).
         self.anchors = proj
             .targets
             .iter()
-            .map(|t| AnchorFields::from(t.anchor))
+            .zip(loaded.targets.iter())
+            .map(|(t, resolved)| {
+                if ref_modified || matches!(resolved.status, MediaStatus::ModifiedOnDisk { .. }) {
+                    AnchorFields::default()
+                } else {
+                    AnchorFields::from(t.anchor)
+                }
+            })
             .collect();
-        self.nudges = proj.targets.iter().map(|t| t.pending_nudge_secs).collect();
+        self.nudges = proj
+            .targets
+            .iter()
+            .zip(loaded.targets.iter())
+            .map(|(t, resolved)| {
+                if ref_modified || matches!(resolved.status, MediaStatus::ModifiedOnDisk { .. }) {
+                    0.0
+                } else {
+                    t.pending_nudge_secs
+                }
+            })
+            .collect();
 
         self.mixer.mode = proj.mixer.mode;
         self.mixer.master_gain = proj.mixer.master_gain;
@@ -964,19 +1182,22 @@ impl StageSyncApp {
         self.dirty = false;
 
         // Kick off background metadata verification + streaming PeakCache builds for present files.
-        if let Some(ref_entry) = &self.reference {
-            if !ref_entry.missing {
-                jobs::spawn_probe(self.tx.clone(), ref_entry.path.clone());
-                jobs::spawn_peaks(self.tx.clone(), ref_entry.path.clone());
-                self.peaks_pending += 1;
-            }
+        let ref_probe_path = self
+            .reference
+            .as_ref()
+            .filter(|r| !r.missing)
+            .map(|r| r.path.clone());
+        if let Some(p) = ref_probe_path {
+            self.spawn_probe_and_peaks(p);
         }
-        for tgt in &self.targets {
-            if !tgt.missing {
-                jobs::spawn_probe(self.tx.clone(), tgt.path.clone());
-                jobs::spawn_peaks(self.tx.clone(), tgt.path.clone());
-                self.peaks_pending += 1;
-            }
+        let target_probe_paths: Vec<PathBuf> = self
+            .targets
+            .iter()
+            .filter(|t| !t.missing)
+            .map(|t| t.path.clone())
+            .collect();
+        for p in target_probe_paths {
+            self.spawn_probe_and_peaks(p);
         }
 
         for msg in &loaded.notices {
@@ -991,6 +1212,7 @@ impl StageSyncApp {
 
     /// Reset to a blank project.
     pub fn new_project(&mut self) {
+        self.invalidate_session();
         self.player.stop();
         self.reference = None;
         self.targets.clear();
@@ -1018,17 +1240,21 @@ impl StageSyncApp {
 
     /// Relocate a missing or moved reference recording to `new_path`.
     pub fn relocate_reference(&mut self, new_path: PathBuf) {
-        let Some(ref mut entry) = self.reference else {
+        let Some(entry) = self.reference.as_mut() else {
             return;
         };
         let changed = relocate_entry(entry, new_path.clone());
-        if changed && self.report.is_some() {
+        self.cancel_active_jobs();
+        if changed {
             self.report = None;
             self.export_outcome = None;
+            self.anchors.fill(AnchorFields::default());
+            self.nudges.fill(0.0);
+            self.nudge_history.clear();
+        } else if let Some(report) = self.report.as_mut() {
+            report.reference.path = new_path.clone();
         }
-        jobs::spawn_probe(self.tx.clone(), new_path.clone());
-        jobs::spawn_peaks(self.tx.clone(), new_path);
-        self.peaks_pending += 1;
+        self.spawn_probe_and_peaks(new_path);
         self.mark_dirty();
         self.last_error = None;
         self.notice = Some(if changed {
@@ -1044,13 +1270,25 @@ impl StageSyncApp {
             return;
         };
         let changed = relocate_entry(entry, new_path.clone());
-        if changed && self.report.is_some() {
+        self.cancel_active_jobs();
+        if changed {
             self.report = None;
             self.export_outcome = None;
+            if let Some(anchor) = self.anchors.get_mut(index) {
+                *anchor = AnchorFields::default();
+            }
+            if let Some(nudge) = self.nudges.get_mut(index) {
+                *nudge = 0.0;
+            }
+            self.nudge_history.retain(|(other, _)| *other != index);
+        } else if let Some(alignment) = self
+            .report
+            .as_mut()
+            .and_then(|report| report.sources.get_mut(index))
+        {
+            alignment.source.path = new_path.clone();
         }
-        jobs::spawn_probe(self.tx.clone(), new_path.clone());
-        jobs::spawn_peaks(self.tx.clone(), new_path);
-        self.peaks_pending += 1;
+        self.spawn_probe_and_peaks(new_path);
         self.mark_dirty();
         self.last_error = None;
         self.notice = Some(if changed {
@@ -1227,16 +1465,18 @@ impl StageSyncApp {
             config.fine.search_secs = 10.0;
         }
 
+        let scope = self.next_scope();
         let cancel = Arc::new(AtomicBool::new(false));
         self.running = Some(RunningJob {
             kind: JobKind::Analysis,
+            job_id: scope.job_id,
             cancel: cancel.clone(),
         });
         self.progress = None;
         self.last_error = None;
         self.notice = None;
         self.push_log("analysis started".to_string());
-        jobs::spawn_analysis(self.tx.clone(), reference, sources, config, cancel);
+        jobs::spawn_analysis_scoped(self.tx.clone(), scope, reference, sources, config, cancel);
     }
 
     /// Start the export of the corrected audio and the artefacts.
@@ -1255,9 +1495,11 @@ impl StageSyncApp {
             self.last_error = Some("Choose an export folder first.".to_string());
             return;
         }
+        let scope = self.next_scope();
         let cancel = Arc::new(AtomicBool::new(false));
         self.running = Some(RunningJob {
             kind: JobKind::Export,
+            job_id: scope.job_id,
             cancel: cancel.clone(),
         });
         self.progress = None;
@@ -1267,7 +1509,13 @@ impl StageSyncApp {
         // The mixer's settings travel with the export, so that the file the window
         // writes is the mix the user can hear.
         self.settings.mix = self.mixer.settings();
-        jobs::spawn_export(self.tx.clone(), report, self.settings.clone(), cancel);
+        jobs::spawn_export_scoped(
+            self.tx.clone(),
+            scope,
+            report,
+            self.settings.clone(),
+            cancel,
+        );
     }
 
     /// Verify a rendered correction against the reference, independently of the fit.
@@ -1307,11 +1555,14 @@ impl StageSyncApp {
             return;
         }
 
+        let scope = self.next_scope();
         self.verifying = true;
+        self.verifying_job = Some(scope.job_id);
         self.last_error = None;
         self.push_log(format!("verifying source {index}"));
-        jobs::spawn_verification(
+        jobs::spawn_verification_scoped(
             self.tx.clone(),
+            scope,
             index,
             corrected,
             reference,
@@ -4344,5 +4595,64 @@ mod tests {
         assert_eq!(app.nudges, vec![0.03, 0.0]);
         assert!((app.mixer.tracks[0].gain - 0.75).abs() < 1e-6);
         assert!((app.mixer.tracks[1].gain - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn p1_04_stale_export_verification_and_probe_events_are_ignored() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let _settings = SettingsGuard::new(&dir);
+        let p_ref = dir.path().join("ref.wav");
+        let p_tgt = dir.path().join("tgt.wav");
+        std::fs::write(&p_ref, b"REF").unwrap();
+        std::fs::write(&p_tgt, b"TGT").unwrap();
+
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        app.open_files(vec![p_ref.clone(), p_tgt.clone()]);
+        let old_scope = app.next_scope();
+
+        // Simulate switching to a new blank session (or another project).
+        app.new_project();
+        let wrong_job = JobScope {
+            session_gen: app.session_gen,
+            job_id: old_scope.job_id + 999,
+        };
+
+        // Inject stale events from old session_gen AND wrong job_id in current session_gen.
+        let _ = app.tx.send(ScopedJobEvent {
+            scope: old_scope,
+            event: JobEvent::ExportFinished(Box::new(ExportOutcome {
+                files: vec![dir.path().join("stale.wav")],
+                corrected: vec![],
+            })),
+        });
+        let _ = app.tx.send(ScopedJobEvent {
+            scope: old_scope,
+            event: JobEvent::VerificationFailed {
+                source_index: 0,
+                message: "stale verify".to_string(),
+            },
+        });
+        let _ = app.tx.send(ScopedJobEvent {
+            scope: wrong_job,
+            event: JobEvent::VerificationFailed {
+                source_index: 0,
+                message: "wrong job verify".to_string(),
+            },
+        });
+        let _ = app.tx.send(ScopedJobEvent {
+            scope: wrong_job,
+            event: JobEvent::Probed {
+                path: p_tgt.clone(),
+                meta: None,
+                error: Some("stale probe error".to_string()),
+            },
+        });
+
+        app.drain_events();
+
+        assert!(app.export_outcome.is_none());
+        assert!(app.last_error.is_none());
+        assert!(!app.is_dirty());
+        assert!(!app.verifying);
     }
 }

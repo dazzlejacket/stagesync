@@ -103,6 +103,48 @@ pub enum JobEvent {
     },
 }
 
+/// Session generation and job identifier attached to every background message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobScope {
+    /// Monotonic counter incremented whenever a project/session is replaced.
+    pub session_gen: u64,
+    /// Monotonic counter identifying one specific background task.
+    pub job_id: u64,
+}
+
+/// Envelope tagging a [`JobEvent`] with the session and job that emitted it.
+pub struct ScopedJobEvent {
+    /// Session generation and job ID when this task was spawned.
+    pub scope: JobScope,
+    /// The underlying background worker event.
+    pub event: JobEvent,
+}
+
+trait EventSink: Send + Clone + 'static {
+    fn emit(&self, event: JobEvent);
+}
+
+impl EventSink for Sender<JobEvent> {
+    fn emit(&self, event: JobEvent) {
+        let _ = self.send(event);
+    }
+}
+
+#[derive(Clone)]
+struct ScopedSink {
+    tx: Sender<ScopedJobEvent>,
+    scope: JobScope,
+}
+
+impl EventSink for ScopedSink {
+    fn emit(&self, event: JobEvent) {
+        let _ = self.tx.send(ScopedJobEvent {
+            scope: self.scope,
+            event,
+        });
+    }
+}
+
 /// Build the waveform peaks of a recording in the background.
 ///
 /// The peaks are what the waveform display draws, and building them means reading
@@ -110,6 +152,15 @@ pub enum JobEvent {
 /// a three-hour recording it is far too slow for the user to wait for before the
 /// window opens, so it happens on a thread of its own.
 pub fn spawn_peaks(tx: Sender<JobEvent>, path: PathBuf) {
+    spawn_peaks_impl(tx, path);
+}
+
+/// Build the waveform peaks on a background thread, tagging results with `scope`.
+pub fn spawn_peaks_scoped(tx: Sender<ScopedJobEvent>, scope: JobScope, path: PathBuf) {
+    spawn_peaks_impl(ScopedSink { tx, scope }, path);
+}
+
+fn spawn_peaks_impl<S: EventSink>(sink: S, path: PathBuf) {
     thread::spawn(move || {
         let event = match stagesync_core::audio::PeakCache::build(&path, None) {
             Ok(cache) => JobEvent::PeaksReady {
@@ -121,7 +172,7 @@ pub fn spawn_peaks(tx: Sender<JobEvent>, path: PathBuf) {
                 message: format!("{error:#}"),
             },
         };
-        let _ = tx.send(event);
+        sink.emit(event);
     });
 }
 
@@ -144,6 +195,15 @@ pub fn install_panic_hook() {
 /// Probing hashes the whole file, which is far too slow to do on the UI thread for a
 /// multi-hour recording.
 pub fn spawn_probe(tx: Sender<JobEvent>, path: PathBuf) {
+    spawn_probe_impl(tx, path);
+}
+
+/// Probe a file in the background, tagging results with `scope`.
+pub fn spawn_probe_scoped(tx: Sender<ScopedJobEvent>, scope: JobScope, path: PathBuf) {
+    spawn_probe_impl(ScopedSink { tx, scope }, path);
+}
+
+fn spawn_probe_impl<S: EventSink>(sink: S, path: PathBuf) {
     thread::spawn(move || {
         let event = match AudioDecoder::open(&path) {
             Ok(decoder) => JobEvent::Probed {
@@ -157,7 +217,7 @@ pub fn spawn_probe(tx: Sender<JobEvent>, path: PathBuf) {
                 error: Some(format!("{error:#}")),
             },
         };
-        let _ = tx.send(event);
+        sink.emit(event);
     });
 }
 
@@ -170,15 +230,37 @@ pub fn spawn_analysis(
     tx: Sender<JobEvent>,
     reference: PathBuf,
     sources: Vec<PathBuf>,
+    config: AnalysisConfig,
+    cancel: Arc<AtomicBool>,
+) {
+    spawn_analysis_impl(tx, reference, sources, config, cancel);
+}
+
+/// Start background analysis, tagging all emitted events with `scope`.
+pub fn spawn_analysis_scoped(
+    tx: Sender<ScopedJobEvent>,
+    scope: JobScope,
+    reference: PathBuf,
+    sources: Vec<PathBuf>,
+    config: AnalysisConfig,
+    cancel: Arc<AtomicBool>,
+) {
+    spawn_analysis_impl(ScopedSink { tx, scope }, reference, sources, config, cancel);
+}
+
+fn spawn_analysis_impl<S: EventSink>(
+    sink: S,
+    reference: PathBuf,
+    sources: Vec<PathBuf>,
     mut config: AnalysisConfig,
     cancel: Arc<AtomicBool>,
 ) {
     thread::spawn(move || {
         config.cancel = Some(CancelToken::from_flag(cancel.clone()));
-        let sender = tx.clone();
+        let sender = sink.clone();
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(move || {
             let mut progress = |p: Progress| {
-                let _ = sender.send(JobEvent::Progress(TaskProgress {
+                sender.emit(JobEvent::Progress(TaskProgress {
                     label: p.stage.label().to_string(),
                     message: p.message,
                     fraction: p.fraction,
@@ -215,7 +297,7 @@ pub fn spawn_analysis(
                 }
             }
         };
-        let _ = tx.send(event);
+        sink.emit(event);
     });
 }
 
@@ -226,10 +308,30 @@ pub fn spawn_export(
     settings: ExportSettings,
     cancel: Arc<AtomicBool>,
 ) {
+    spawn_export_impl(tx, report, settings, cancel);
+}
+
+/// Start background export, tagging all emitted events with `scope`.
+pub fn spawn_export_scoped(
+    tx: Sender<ScopedJobEvent>,
+    scope: JobScope,
+    report: AlignmentReport,
+    settings: ExportSettings,
+    cancel: Arc<AtomicBool>,
+) {
+    spawn_export_impl(ScopedSink { tx, scope }, report, settings, cancel);
+}
+
+fn spawn_export_impl<S: EventSink>(
+    sink: S,
+    report: AlignmentReport,
+    settings: ExportSettings,
+    cancel: Arc<AtomicBool>,
+) {
     thread::spawn(move || {
         let event = {
             let mut progress = |update: TaskProgress| {
-                let _ = tx.send(JobEvent::Progress(update));
+                sink.emit(JobEvent::Progress(update));
             };
             match export_report(&report, &settings, &cancel, &mut progress) {
                 Ok(outcome) => {
@@ -246,7 +348,7 @@ pub fn spawn_export(
                 }
             }
         };
-        let _ = tx.send(event);
+        sink.emit(event);
     });
 }
 
@@ -256,6 +358,44 @@ pub fn spawn_export(
 /// fitted the model, so it is an independent check rather than a restatement.
 pub fn spawn_verification(
     tx: Sender<JobEvent>,
+    source_index: usize,
+    corrected: PathBuf,
+    reference: PathBuf,
+    model: LinearModel,
+    source_duration: f64,
+) {
+    spawn_verification_impl(
+        tx,
+        source_index,
+        corrected,
+        reference,
+        model,
+        source_duration,
+    );
+}
+
+/// Verify a rendered correction in the background, tagging the result with `scope`.
+pub fn spawn_verification_scoped(
+    tx: Sender<ScopedJobEvent>,
+    scope: JobScope,
+    source_index: usize,
+    corrected: PathBuf,
+    reference: PathBuf,
+    model: LinearModel,
+    source_duration: f64,
+) {
+    spawn_verification_impl(
+        ScopedSink { tx, scope },
+        source_index,
+        corrected,
+        reference,
+        model,
+        source_duration,
+    );
+}
+
+fn spawn_verification_impl<S: EventSink>(
+    sink: S,
     source_index: usize,
     corrected: PathBuf,
     reference: PathBuf,
@@ -279,7 +419,7 @@ pub fn spawn_verification(
                 message: format!("{error:#}"),
             },
         };
-        let _ = tx.send(event);
+        sink.emit(event);
     });
 }
 
@@ -356,6 +496,13 @@ pub fn export_report(
     // recordings are in.
     render::ensure_outputs_avoid_inputs(&planned, &inputs)
         .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+
+    // Re-verify that every recording actually opened for export still exists and
+    // matches the report's recorded byte length / SHA-256 fingerprint before rendering.
+    verify_meta_unchanged("reference", &report.reference)?;
+    for alignment in &report.sources {
+        verify_meta_unchanged("source", &alignment.source)?;
+    }
 
     // The export is written into a staging directory and moved into place in one
     // step at the end, so a failure leaves the output directory exactly as it was
@@ -767,4 +914,44 @@ fn planned_outputs(
             .map(|a| out.join(format!("{}_stem.wav", stem(&a.source.file_name))))
             .collect(),
     }
+}
+
+/// Re-verify that a recording path about to be exported still exists and matches the
+/// size and SHA-256 fingerprint recorded in `meta`.
+fn verify_meta_unchanged(role: &str, meta: &SourceMeta) -> Result<(), JobFailure> {
+    let fs_meta = std::fs::metadata(&meta.path).map_err(|error| {
+        JobFailure::Failed(format!(
+            "{role} recording {} could not be read before export: {error}",
+            meta.path.display()
+        ))
+    })?;
+    if !fs_meta.is_file() {
+        return Err(JobFailure::Failed(format!(
+            "{role} recording {} is not a file",
+            meta.path.display()
+        )));
+    }
+    if meta.byte_len > 0 && fs_meta.len() != meta.byte_len {
+        return Err(JobFailure::Failed(format!(
+            "{role} recording {} changed on disk ({} bytes vs expected {} bytes) — re-run analysis before exporting",
+            meta.path.display(),
+            fs_meta.len(),
+            meta.byte_len
+        )));
+    }
+    if !meta.sha256.is_empty() {
+        let actual = stagesync_core::audio::hash::sha256_file(&meta.path).map_err(|error| {
+            JobFailure::Failed(format!(
+                "failed to hash {role} recording {}: {error}",
+                meta.path.display()
+            ))
+        })?;
+        if actual != meta.sha256 {
+            return Err(JobFailure::Failed(format!(
+                "{role} recording {} changed on disk (SHA-256 mismatch) — re-run analysis before exporting",
+                meta.path.display()
+            )));
+        }
+    }
+    Ok(())
 }
