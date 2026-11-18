@@ -83,37 +83,107 @@ function Invoke-NativeCommand {
     }
 }
 
+function Test-PythonExecutable {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [string[]]$Arguments = @('--version')
+    )
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $ExePath
+        $psi.Arguments = ($Arguments -join ' ')
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if (-not $proc) {
+            return $false
+        }
+        $proc.StandardInput.Close()
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        if (-not $proc.WaitForExit(3000)) {
+            try { $proc.Kill() } catch {}
+            return $false
+        }
+        $combined = ($stdout + "`n" + $stderr).Trim()
+        return ($proc.ExitCode -eq 0 -and $combined -match 'Python 3\.')
+    }
+    catch {
+        return $false
+    }
+}
+
 function Resolve-PythonCommand {
     <#
         Find a Python 3 interpreter. The notices generator needs one; the
         packaging step must not silently ship a stale notices bundle, so the
         script fails loudly when there is none.
 
-        The candidates are tried in turn and each one has to answer with its
-        own version. On Windows `python3` is often the Microsoft Store alias
-        stub, which prints "Python was not found" and exits with an error
-        code: that is not an interpreter, and the search carries on.
+        Every candidate on PATH (not just the first) is probed with a bounded
+        timeout and closed stdin so broken Microsoft Store WindowsApps alias
+        stubs never throw or stall the search before a real Python is tried.
     #>
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        foreach ($name in @('python3', 'python', 'py')) {
-            $found = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if (-not $found) {
+    if ($env:STAGESYNC_PYTHON -and (Test-Path -LiteralPath $env:STAGESYNC_PYTHON)) {
+        if (Test-PythonExecutable -ExePath $env:STAGESYNC_PYTHON) {
+            return $env:STAGESYNC_PYTHON
+        }
+    }
+
+    $storeCandidates = @()
+    foreach ($name in @('python3', 'python', 'py')) {
+        $candidates = Get-Command $name -All -CommandType Application -ErrorAction SilentlyContinue
+        foreach ($found in $candidates) {
+            $src = $found.Source
+            if (-not $src) {
                 continue
             }
-            $output = & $found.Source --version 2>&1
-            $code = $LASTEXITCODE
-            $version = ($output | Out-String).Trim()
-            if ($code -eq 0 -and $version -match 'Python 3\.') {
-                return $found.Source
+            $isStoreAlias = $src -match '\\Microsoft\\WindowsApps\\python3?\.exe$'
+            if ($isStoreAlias) {
+                $storeCandidates += $src
+                continue
+            }
+            $argsList = if ($name -eq 'py') { @('-3', '--version') } else { @('--version') }
+            if (Test-PythonExecutable -ExePath $src -Arguments $argsList) {
+                if ($name -eq 'py') {
+                    try {
+                        $realExe = (& $src -3 -c "import sys; print(sys.executable)" 2>$null | Out-String).Trim()
+                        if ($LASTEXITCODE -eq 0 -and $realExe -and (Test-Path -LiteralPath $realExe)) {
+                            return $realExe
+                        }
+                    }
+                    catch {}
+                }
+                return $src
             }
         }
     }
-    finally {
-        $ErrorActionPreference = $previous
+
+    foreach ($root in @(
+            (Join-Path $env:LOCALAPPDATA 'Programs\Python'),
+            (Join-Path $env:ProgramFiles 'Python*')
+        )) {
+        foreach ($dir in (Get-Item -Path $root -ErrorAction SilentlyContinue)) {
+            $exes = Get-ChildItem -Path $dir -Filter 'python.exe' -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending
+            foreach ($exe in $exes) {
+                if (Test-PythonExecutable -ExePath $exe.FullName) {
+                    return $exe.FullName
+                }
+            }
+        }
     }
+
+    # Try WindowsApps aliases only if no standalone Python installation succeeded.
+    foreach ($src in $storeCandidates) {
+        if (Test-PythonExecutable -ExePath $src) {
+            return $src
+        }
+    }
+
     return $null
 }
 
