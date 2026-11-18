@@ -19,8 +19,8 @@
 use std::collections::VecDeque;
 use std::num::NonZero;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player as RodioPlayer, Source};
@@ -100,6 +100,27 @@ impl MixMember {
     }
 }
 
+/// Live mixer parameters updated atomically from the UI while playing a mix.
+#[derive(Debug, Clone)]
+pub struct LiveTrackUpdate {
+    /// Combined effective linear gain (trim * fader, zero when muted or inactive by solo).
+    pub gain: f32,
+    /// Pan position in `[-1.0, 1.0]`.
+    pub pan: f32,
+    /// Mono pan law.
+    pub pan_law: stagesync_core::mixer::PanLaw,
+    /// Stereo pan mode.
+    pub stereo_pan: stagesync_core::mixer::StereoPan,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LiveMixUpdate {
+    master_gain: f32,
+    tracks: Vec<LiveTrackUpdate>,
+}
+
+type LiveMixShared = Arc<(AtomicU64, Mutex<LiveMixUpdate>)>;
+
 /// What is playing, and where it started.
 struct Playing {
     voice: Voice,
@@ -107,6 +128,8 @@ struct Playing {
     start_secs: f64,
     /// When it started.
     started: Instant,
+    /// Shared live-update state when playing `Voice::Mix`.
+    live_mix: Option<LiveMixShared>,
 }
 
 /// The player.
@@ -202,9 +225,47 @@ impl Player {
         self.playing.as_ref().map(|playing| playing.voice)
     }
 
-    /// Whether something is playing.
+    /// Whether something is playing right now.
     pub fn is_playing(&self) -> bool {
-        self.playing.is_some()
+        let Some(_) = self.playing else {
+            return false;
+        };
+        match &self.player {
+            Some(player) => !player.empty(),
+            None => false,
+        }
+    }
+
+    /// Reconcile local state with the audio backend; returns `true` if playback just ended.
+    pub fn poll(&mut self) -> bool {
+        if self.playing.is_some() && !self.is_playing() {
+            self.playing = None;
+            return true;
+        }
+        false
+    }
+
+    /// Push live master/track mix parameter updates without restarting the stream.
+    pub fn update_live_mix(&self, master_gain: f32, members: &[MixMember]) {
+        let Some(playing) = &self.playing else {
+            return;
+        };
+        let Some(shared) = &playing.live_mix else {
+            return;
+        };
+        if let Ok(mut guard) = shared.1.lock() {
+            guard.master_gain = master_gain;
+            guard.tracks = members
+                .iter()
+                .map(|m| LiveTrackUpdate {
+                    gain: m.gain,
+                    pan: m.pan,
+                    pan_law: m.pan_law,
+                    stereo_pan: m.stereo_pan,
+                })
+                .collect();
+            shared.0.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// The loudest sample the mix that is playing has produced.
@@ -276,6 +337,7 @@ impl Player {
             voice,
             start_secs: from_secs,
             started: Instant::now(),
+            live_mix: None,
         });
         Ok(())
     }
@@ -299,7 +361,29 @@ impl Player {
         let published_peak = Arc::clone(&self.mix_peak);
         // The peak of the new mix starts from nothing.
         published_peak.store(0.0f32.to_bits(), Ordering::Relaxed);
-        let source = MixSource::open(members, master_gain, from_secs, rate, published_peak)?;
+        let live_mix: LiveMixShared = Arc::new((
+            AtomicU64::new(0),
+            Mutex::new(LiveMixUpdate {
+                master_gain,
+                tracks: members
+                    .iter()
+                    .map(|m| LiveTrackUpdate {
+                        gain: m.gain,
+                        pan: m.pan,
+                        pan_law: m.pan_law,
+                        stereo_pan: m.stereo_pan,
+                    })
+                    .collect(),
+            }),
+        ));
+        let source = MixSource::open_with_live(
+            members,
+            master_gain,
+            from_secs,
+            rate,
+            published_peak,
+            Some(Arc::clone(&live_mix)),
+        )?;
         let Some(player) = &self.player else {
             return Err(anyhow::anyhow!(
                 "there is no audio output device: {}",
@@ -314,6 +398,7 @@ impl Player {
             voice: Voice::Mix,
             start_secs: from_secs,
             started: Instant::now(),
+            live_mix: Some(live_mix),
         });
         Ok(())
     }
@@ -382,6 +467,23 @@ impl ResampledSource {
 
         // The position in the recording that the given reference position falls on.
         let position = alpha * (from_secs * out_rate as f64) + gamma;
+        let total_frames = decoder.meta().frames;
+        if total_frames > 0 && position >= total_frames as f64 {
+            // Seeking past EOF must yield silence immediately rather than clamping to
+            // the final packet and repeating tail samples.
+            let resamplers = (0..channels)
+                .map(|_| StreamingResampler::new(alpha, 0.0, TAPS, PHASES))
+                .collect();
+            return Ok(Self {
+                decoder,
+                resamplers,
+                ready: VecDeque::new(),
+                channels: channels as u16,
+                rate: out_rate,
+                finished: true,
+                delay: 0,
+            });
+        }
         let (start_frame, fraction, delay) = match model {
             None => {
                 let start = position.floor().max(0.0);
@@ -545,6 +647,8 @@ impl Source for ResampledSource {
 struct MixMemberSource {
     /// The recording itself.
     source: ResampledSource,
+    /// Native channels of this recording.
+    channels: usize,
     /// The matrix that places the recording in the field.
     matrix: PanMatrix,
     /// The fader.
@@ -573,16 +677,40 @@ struct MixSource {
     overs: u64,
     /// Where the peak is published for the interface to read.
     published_peak: Arc<AtomicU32>,
+    /// Shared live-update handle from `Player`.
+    live_mix: Option<LiveMixShared>,
+    /// Last applied live-update generation.
+    applied_version: u64,
 }
 
 impl MixSource {
     /// Open the recordings of the mix at a position on the reference timeline.
+    #[allow(dead_code)]
     fn open(
         members: &[MixMember],
         master_gain: f32,
         from_secs: f64,
         out_rate: u32,
         published_peak: Arc<AtomicU32>,
+    ) -> Result<Self, anyhow::Error> {
+        Self::open_with_live(
+            members,
+            master_gain,
+            from_secs,
+            out_rate,
+            published_peak,
+            None,
+        )
+    }
+
+    /// Open the mix with an optional shared live-parameter update handle.
+    fn open_with_live(
+        members: &[MixMember],
+        master_gain: f32,
+        from_secs: f64,
+        out_rate: u32,
+        published_peak: Arc<AtomicU32>,
+        live_mix: Option<LiveMixShared>,
     ) -> Result<Self, anyhow::Error> {
         let mut sources = Vec::with_capacity(members.len());
         for member in members {
@@ -595,11 +723,16 @@ impl MixSource {
                 PanMatrix::for_source(channels, member.pan, member.pan_law, member.stereo_pan);
             sources.push(MixMemberSource {
                 source,
+                channels,
                 matrix,
                 gain: member.gain,
                 frame: vec![0.0; channels.max(1)],
             });
         }
+        let applied_version = live_mix
+            .as_ref()
+            .map(|s| s.0.load(Ordering::Acquire))
+            .unwrap_or(0);
         Ok(Self {
             members: sources,
             ready: VecDeque::new(),
@@ -608,11 +741,31 @@ impl MixSource {
             peak: 0.0,
             overs: 0,
             published_peak,
+            live_mix,
+            applied_version,
         })
     }
 
     /// Produce the next output frame.
     fn fill(&mut self) -> bool {
+        if let Some(shared) = &self.live_mix {
+            let ver = shared.0.load(Ordering::Acquire);
+            if ver != self.applied_version {
+                if let Ok(guard) = shared.1.try_lock() {
+                    self.master_gain = guard.master_gain;
+                    for (member, upd) in self.members.iter_mut().zip(guard.tracks.iter()) {
+                        member.gain = upd.gain;
+                        member.matrix = PanMatrix::for_source(
+                            member.channels,
+                            upd.pan,
+                            upd.pan_law,
+                            upd.stereo_pan,
+                        );
+                    }
+                    self.applied_version = ver;
+                }
+            }
+        }
         let mut left = 0f32;
         let mut right = 0f32;
         let mut any = false;
@@ -901,5 +1054,62 @@ mod tests {
             samples += 1;
         }
         assert!(samples > rate as usize / 4, "the recording was cut short");
+    }
+
+    #[test]
+    fn seeking_past_eof_produces_silence_not_tail_repeat() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("short.wav");
+        let rate = 8000u32;
+        tone(&path, rate, 1.0, 220.0);
+
+        let source = ResampledSource::open(&path, 5.0, rate, None).expect("open");
+        assert_eq!(source.count(), 0, "seeking past EOF must emit 0 samples");
+    }
+
+    #[test]
+    fn live_mix_parameters_update_gain_without_reopening() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let rate = 8000u32;
+        let a = dir.path().join("a.wav");
+        constant(&a, 0.4, rate as usize, rate);
+
+        let members = vec![MixMember::new(a, LinearModel::new(1.0, 0.0))];
+        let shared: LiveMixShared = Arc::new((
+            AtomicU64::new(0),
+            Mutex::new(LiveMixUpdate {
+                master_gain: 1.0,
+                tracks: vec![LiveTrackUpdate {
+                    gain: 1.0,
+                    pan: 0.0,
+                    pan_law: stagesync_core::mixer::PanLaw::EqualPower,
+                    stereo_pan: stagesync_core::mixer::StereoPan::Balance,
+                }],
+            }),
+        ));
+        let mut source = MixSource::open_with_live(
+            &members,
+            1.0,
+            0.0,
+            rate,
+            Arc::new(AtomicU32::new(0)),
+            Some(Arc::clone(&shared)),
+        )
+        .expect("open");
+        let initial = source.next().expect("sample");
+        assert!((initial - 0.4 * 0.5f32.sqrt()).abs() < 1e-4);
+        let _ = source.next(); // consume R
+
+        {
+            let mut guard = shared.1.lock().unwrap();
+            guard.master_gain = 0.5;
+            guard.tracks[0].gain = 0.5;
+            shared.0.fetch_add(1, Ordering::Release);
+        }
+        let updated = source.next().expect("sample");
+        assert!(
+            (updated - 0.1 * 0.5f32.sqrt()).abs() < 1e-4,
+            "live update should reduce sample to 0.25x, got {updated}"
+        );
     }
 }

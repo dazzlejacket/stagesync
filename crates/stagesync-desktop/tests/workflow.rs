@@ -141,6 +141,7 @@ fn export_writes_every_artefact_and_reports_real_paths() {
         format: WavFormat::Float32,
         mix: MixSettings::default(),
         protection: ClippingProtection::None,
+        ..ExportSettings::default()
     };
 
     let mut progress: Vec<TaskProgress> = Vec::new();
@@ -274,6 +275,7 @@ fn export_stops_when_it_is_cancelled() {
         format: WavFormat::Int16,
         mix: MixSettings::default(),
         protection: ClippingProtection::None,
+        ..ExportSettings::default()
     };
 
     // The flag is already set, so the export must refuse to start.

@@ -280,3 +280,51 @@ fn the_applied_model_is_one_the_measurements_support() {
         );
     }
 }
+
+/// Clips between 8 s and 30 s (shorter than the default 30 s fine window)
+/// must still lock and produce fine probes within 15 ms of the true offset.
+#[test]
+fn very_short_twelve_second_and_twenty_second_clips_are_aligned() {
+    let dir = TempDir::new().expect("temp dir");
+    let samples = reference_signal(RATE, REFERENCE_SECS, 0xBEEF02);
+    let reference = dir.path().join("reference.wav");
+    common::write_wav(&reference, &samples, RATE, WavFormat::Float32);
+
+    for (label, clip_secs) in [("12s", 12.0_f64), ("20s", 20.0_f64)] {
+        let n = (clip_secs * RATE as f64).round() as usize;
+        let offset = 42.25;
+        let mut src = vec![0.0f32; n];
+        let mut rng = common::Rng::new(0x51A7C0DF);
+        for (j, slot) in src.iter_mut().enumerate() {
+            let pos = (j as f64 / RATE as f64 + offset) * RATE as f64;
+            let i = pos.floor() as usize;
+            let frac = (pos - i as f64) as f32;
+            let a = samples[i];
+            let b = samples.get(i + 1).copied().unwrap_or(a);
+            *slot = (a * (1.0 - frac) + b * frac) * 0.5 + 0.0005 * rng.next_f32();
+        }
+        let source = dir.path().join(format!("clip_{label}.wav"));
+        common::write_wav(&source, &src, RATE, WavFormat::Float32);
+
+        let report = analyse(&reference, std::slice::from_ref(&source), &config());
+        let alignment = &report.sources[0];
+        assert!(
+            alignment.coarse.as_ref().is_some_and(|c| c.locked),
+            "{label} clip did not coarse-lock"
+        );
+        assert!(
+            alignment.fine_measured >= 3,
+            "{label} clip should produce at least 3 fine probes, got {}",
+            alignment.fine_measured
+        );
+        let model = alignment
+            .calibrated_model
+            .as_ref()
+            .expect("calibrated model");
+        let err_ms = (model.offset - offset).abs() * 1000.0;
+        assert!(
+            err_ms < 15.0,
+            "{label} clip offset error {err_ms:.2} ms exceeded 15 ms"
+        );
+    }
+}

@@ -20,9 +20,9 @@ use crate::platform;
 use crate::player::{Player, Voice};
 use crate::settings::{self, AppSettings};
 use crate::state::{
-    drift_verdict, expand_dropped_paths, format_duration, format_label, is_wav, layout_label,
-    metrics_for, protection_label, status_for, verification_for, AnchorFields, ExportSettings,
-    FileEntry, TaskProgress,
+    container_label, drift_verdict, expand_dropped_paths, format_duration, format_label, is_wav,
+    layout_label, loudness_label, metrics_for, protection_label, status_for, verification_for,
+    AnchorFields, ExportSettings, FileEntry, TaskProgress,
 };
 use crate::timeline;
 use crate::waveview;
@@ -247,6 +247,8 @@ impl StageSyncApp {
         self.settings.layout = settings::layout_from_name(&stored.layout);
         self.settings.sample_rate = stored.sample_rate;
         self.settings.format = settings::format_from_name(&stored.format);
+        self.settings.loudness = settings::loudness_from_name(&stored.loudness);
+        self.settings.container = settings::container_from_name(&stored.container);
         self.use_spectral_check = stored.use_spectral_check;
         self.measure_waveform_drift = stored.measure_waveform_drift;
         self.force_offset_only = stored.force_offset_only;
@@ -312,6 +314,10 @@ impl StageSyncApp {
                 .collect(),
             window_width: self.window_width,
             window_height: self.window_height,
+            loudness: settings::loudness_name(self.settings.loudness).to_string(),
+            container: settings::container_name(self.settings.container).to_string(),
+            theme: "dark".to_string(),
+            recent_projects: Vec::new(),
         };
         if let Err(error) = stored.save() {
             log::warn!("could not write the settings: {error}");
@@ -589,6 +595,9 @@ impl StageSyncApp {
         self.report = None;
         self.export_outcome = None;
         self.selection = None;
+        self.nudges.clear();
+        self.nudge_history.clear();
+        self.mixer.sync_to(self.targets.len());
         self.notice = Some("The reference was cleared.".to_string());
     }
 
@@ -602,6 +611,19 @@ impl StageSyncApp {
         if index < self.anchors.len() {
             self.anchors.remove(index);
         }
+        if index < self.nudges.len() {
+            self.nudges.remove(index);
+        }
+        self.nudge_history = self
+            .nudge_history
+            .drain(..)
+            .filter_map(|(other, prev)| match other.cmp(&index) {
+                std::cmp::Ordering::Less => Some((other, prev)),
+                std::cmp::Ordering::Equal => None,
+                std::cmp::Ordering::Greater => Some((other - 1, prev)),
+            })
+            .collect();
+        self.mixer.remove_target(index);
         self.report = None;
         self.export_outcome = None;
         self.selection = None;
@@ -629,6 +651,19 @@ impl StageSyncApp {
         if index < self.anchors.len() {
             self.anchors.remove(index);
         }
+        if index < self.nudges.len() {
+            self.nudges.remove(index);
+        }
+        self.nudge_history = self
+            .nudge_history
+            .drain(..)
+            .filter_map(|(other, prev)| match other.cmp(&index) {
+                std::cmp::Ordering::Less => Some((other, prev)),
+                std::cmp::Ordering::Equal => None,
+                std::cmp::Ordering::Greater => Some((other - 1, prev)),
+            })
+            .collect();
+        self.mixer.remove_target(index);
         let name = entry.name();
         let previous = self.reference.take();
         self.reference = Some(entry);
@@ -636,7 +671,9 @@ impl StageSyncApp {
             // The old reference becomes a target, with no anchor of its own.
             self.targets.push(previous);
             self.anchors.push(AnchorFields::default());
+            self.nudges.push(0.0);
         }
+        self.mixer.sync_to(self.targets.len());
         self.report = None;
         self.export_outcome = None;
         self.selection = Some(Selection::Reference);
@@ -1178,6 +1215,42 @@ impl StageSyncApp {
                     }
                 },
             );
+
+            egui::ComboBox::from_label("Loudness")
+                .selected_text(loudness_label(self.settings.loudness))
+                .show_ui(ui, |ui| {
+                    for loudness in [
+                        stagesync_core::mixer::LoudnessMatch::None,
+                        stagesync_core::mixer::LoudnessMatch::MatchToLoudest,
+                    ] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.settings.loudness,
+                                loudness,
+                                loudness_label(loudness),
+                            )
+                            .changed();
+                    }
+                });
+
+            egui::ComboBox::from_label("Container")
+                .selected_text(container_label(self.settings.container))
+                .show_ui(ui, |ui| {
+                    for container in [
+                        stagesync_core::mixer::ContainerChoice::Auto,
+                        stagesync_core::mixer::ContainerChoice::Riff,
+                        stagesync_core::mixer::ContainerChoice::Rf64,
+                        stagesync_core::mixer::ContainerChoice::Bw64,
+                    ] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.settings.container,
+                                container,
+                                container_label(container),
+                            )
+                            .changed();
+                    }
+                });
         }
 
         ui.add_space(6.0);
@@ -1314,6 +1387,7 @@ impl StageSyncApp {
                     .as_ref()
                     .and_then(|report| report.sources.get(index))
                     .map(|alignment| alignment.source.channels)
+                    .or_else(|| entry.meta.as_ref().map(|meta| meta.channels))
                     .unwrap_or(1);
                 crate::mixer::TrackInfo {
                     name: entry.name(),
@@ -1325,6 +1399,11 @@ impl StageSyncApp {
             .collect();
 
         crate::mixer::panel(ui, &mut self.mixer, &infos);
+        if self.player.is_playing() && self.player.voice() == Some(crate::player::Voice::Mix) {
+            let live_members = self.mix_members();
+            self.player
+                .update_live_mix(self.mixer.master_gain, &live_members);
+        }
     }
 
     /// The waveform timeline: the reference on top, the recordings below it.
@@ -1691,6 +1770,7 @@ impl StageSyncApp {
             return Vec::new();
         };
         let monitored = self.mixer.monitored();
+        let solo_active = monitored.iter().any(|t| t.enabled && t.solo);
         let mut members = Vec::with_capacity(monitored.len());
         for track in monitored {
             let Some(alignment) = report.sources.get(track.source_index) else {
@@ -1699,11 +1779,6 @@ impl StageSyncApp {
             let Some(model) = alignment.model() else {
                 continue;
             };
-            // A muted recording is not played at all: multiplying by zero would
-            // still decode the file.
-            if track.mute {
-                continue;
-            }
             // A pending nudge moves the recording immediately, so that the mix is
             // heard the way the picture shows it.
             let model = stagesync_core::matching::LinearModel::new(
@@ -1712,7 +1787,7 @@ impl StageSyncApp {
             );
             let mut member =
                 crate::player::MixMember::from_track(alignment.source.path.clone(), model, &track);
-            member.gain *= track.trim;
+            member.gain = track.effective_gain(solo_active);
             members.push(member);
         }
         members
@@ -2479,6 +2554,7 @@ impl StageSyncApp {
     /// It follows the player, and when a loop is set the playback starts again at
     /// the beginning of the region as soon as it reaches the end of it.
     fn follow_the_playhead(&mut self) {
+        self.player.poll();
         if !self.player.is_playing() {
             return;
         }
@@ -3109,5 +3185,46 @@ mod tests {
         assert!(playing || complained, "the Play button did nothing at all");
 
         Some(())
+    }
+
+    #[test]
+    fn remove_target_and_make_reference_keep_nudges_and_mixer_aligned() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let paths: Vec<PathBuf> = ["ref.wav", "t0.wav", "t1.wav", "t2.wav"]
+            .iter()
+            .map(|name| {
+                let p = dir.path().join(name);
+                std::fs::write(&p, b"").unwrap();
+                p
+            })
+            .collect();
+
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        app.open_files(paths.clone());
+        assert_eq!(app.targets.len(), 3);
+        app.mixer.sync_to(3);
+        app.mixer.tracks[0].gain = 0.25;
+        app.mixer.tracks[1].gain = 0.50;
+        app.mixer.tracks[2].gain = 0.75;
+        app.nudges = vec![0.01, 0.02, 0.03];
+        app.nudge_history = vec![(0, 0.0), (1, 0.0), (2, 0.0)];
+
+        app.remove_target(1);
+        assert_eq!(app.targets.len(), 2);
+        assert_eq!(app.nudges, vec![0.01, 0.03]);
+        assert_eq!(app.nudge_history, vec![(0, 0.0), (1, 0.0)]);
+        assert_eq!(app.mixer.tracks.len(), 2);
+        assert!((app.mixer.tracks[0].gain - 0.25).abs() < 1e-6);
+        assert!((app.mixer.tracks[1].gain - 0.75).abs() < 1e-6);
+        assert_eq!(app.mixer.tracks[1].source_index, 1);
+
+        app.make_reference(0);
+        assert_eq!(app.reference.as_ref().unwrap().path, paths[1]);
+        assert_eq!(app.targets.len(), 2);
+        assert_eq!(app.targets[0].path, paths[3]);
+        assert_eq!(app.targets[1].path, paths[0]);
+        assert_eq!(app.nudges, vec![0.03, 0.0]);
+        assert!((app.mixer.tracks[0].gain - 0.75).abs() < 1e-6);
+        assert!((app.mixer.tracks[1].gain - 1.0).abs() < 1e-6);
     }
 }

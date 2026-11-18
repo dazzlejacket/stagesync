@@ -232,6 +232,7 @@ fn the_mix_export_writes_a_mixed_file() {
         format: WavFormat::Float32,
         mix: stagesync_core::mixer::MixSettings::of_sources(&[0]),
         protection: stagesync_core::mixer::ClippingProtection::None,
+        ..ExportSettings::default()
     };
 
     let mut progress_log: Vec<TaskProgress> = Vec::new();

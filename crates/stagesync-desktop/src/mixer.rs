@@ -83,6 +83,19 @@ impl MixerState {
             self.tracks.push(MixTrack::new(index));
         }
         self.tracks.truncate(count);
+        for (i, track) in self.tracks.iter_mut().enumerate() {
+            track.source_index = i;
+        }
+    }
+
+    /// Remove the track for target `index` and re-index subsequent tracks.
+    pub fn remove_target(&mut self, index: usize) {
+        if index < self.tracks.len() {
+            self.tracks.remove(index);
+        }
+        for (i, track) in self.tracks.iter_mut().enumerate() {
+            track.source_index = i;
+        }
     }
 
     /// The settings of the whole mix, for the exporter.
@@ -124,9 +137,8 @@ impl MixerState {
                 track.pan_law,
                 track.stereo_pan,
             );
-            let (gl, gr) = matrix
-                .diagonal()
-                .unwrap_or((matrix.gain(0, 0), matrix.gain(1, 1)));
+            let gl = matrix.gain(0, 0).abs() + matrix.gain(0, 1).abs();
+            let gr = matrix.gain(1, 0).abs() + matrix.gain(1, 1).abs();
             left += peak * gain * gl;
             right += peak * gain * gr;
         }
@@ -232,75 +244,137 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
         return;
     }
 
+    let solo_active = state.tracks.iter().any(|t| t.enabled && t.solo);
     for (index, track) in state.tracks.iter_mut().enumerate() {
         let info = infos.get(index);
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(8, 4))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let name = info
-                        .map(|i| i.name.clone())
-                        .unwrap_or_else(|| format!("Recording {}", index + 1));
-                    ui.label(name);
-                    if let Some(info) = info {
-                        if !info.aligned {
-                            ui.colored_label(
-                                ui.visuals().warn_fg_color,
-                                "no alignment: it will not be mixed in",
-                            );
+        let channels = info.map(|i| i.channels).unwrap_or(1);
+        ui.push_id(index, |ui| {
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut track.enabled, "In mix")
+                            .on_hover_text("Include this recording in the mix");
+                        let name = info
+                            .map(|i| i.name.clone())
+                            .unwrap_or_else(|| format!("Recording {}", index + 1));
+                        ui.label(name);
+                        if let Some(info) = info {
+                            if !info.aligned {
+                                ui.colored_label(
+                                    ui.visuals().warn_fg_color,
+                                    "no alignment: it will not be mixed in",
+                                );
+                            }
                         }
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .selectable_label(track.solo, "S")
+                                .on_hover_text("Solo: hear this recording on its own")
+                                .clicked()
+                            {
+                                track.solo = !track.solo;
+                            }
+                            if ui
+                                .selectable_label(track.mute, "M")
+                                .on_hover_text("Mute this recording")
+                                .clicked()
+                            {
+                                track.mute = !track.mute;
+                            }
+                        });
+                    });
+
+                    ui.horizontal_wrapped(|ui| {
+                        let mut gain_db = linear_to_db(track.gain);
                         if ui
-                            .selectable_label(track.solo, "S")
-                            .on_hover_text("Solo: hear this recording on its own")
-                            .clicked()
+                            .add(
+                                egui::Slider::new(&mut gain_db, -60.0..=12.0)
+                                    .suffix(" dB")
+                                    .text("Level"),
+                            )
+                            .changed()
                         {
-                            track.solo = !track.solo;
+                            track.gain = db_to_linear(gain_db);
                         }
+                        let mut trim_db = linear_to_db(track.trim);
                         if ui
-                            .selectable_label(track.mute, "M")
-                            .on_hover_text("Mute this recording")
-                            .clicked()
+                            .add(
+                                egui::Slider::new(&mut trim_db, -24.0..=24.0)
+                                    .suffix(" dB")
+                                    .text("Trim"),
+                            )
+                            .changed()
                         {
-                            track.mute = !track.mute;
+                            track.trim = db_to_linear(trim_db);
+                        }
+                        let mut pan = track.pan;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut pan, -1.0..=1.0)
+                                    .suffix(" pan")
+                                    .text("Pan"),
+                            )
+                            .changed()
+                        {
+                            track.pan = pan;
+                        }
+                        if channels <= 1 {
+                            egui::ComboBox::from_label("Pan law")
+                                .width(105.0)
+                                .selected_text(match track.pan_law {
+                                    stagesync_core::mixer::PanLaw::EqualPower => "Equal power",
+                                    stagesync_core::mixer::PanLaw::ConstantGain => "Constant gain",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut track.pan_law,
+                                        stagesync_core::mixer::PanLaw::EqualPower,
+                                        "Equal power",
+                                    );
+                                    ui.selectable_value(
+                                        &mut track.pan_law,
+                                        stagesync_core::mixer::PanLaw::ConstantGain,
+                                        "Constant gain",
+                                    );
+                                });
+                        } else {
+                            egui::ComboBox::from_label("Stereo")
+                                .width(105.0)
+                                .selected_text(match track.stereo_pan {
+                                    stagesync_core::mixer::StereoPan::Balance => "Balance",
+                                    stagesync_core::mixer::StereoPan::StereoAware => "Stereo-aware",
+                                    stagesync_core::mixer::StereoPan::MonoFold => "Mono fold",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut track.stereo_pan,
+                                        stagesync_core::mixer::StereoPan::Balance,
+                                        "Balance",
+                                    );
+                                    ui.selectable_value(
+                                        &mut track.stereo_pan,
+                                        stagesync_core::mixer::StereoPan::StereoAware,
+                                        "Stereo-aware",
+                                    );
+                                    ui.selectable_value(
+                                        &mut track.stereo_pan,
+                                        stagesync_core::mixer::StereoPan::MonoFold,
+                                        "Mono fold",
+                                    );
+                                });
                         }
                     });
-                });
 
-                ui.horizontal(|ui| {
-                    let mut gain_db = linear_to_db(track.gain);
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut gain_db, -60.0..=12.0)
-                                .suffix(" dB")
-                                .text("Level"),
-                        )
-                        .changed()
-                    {
-                        track.gain = db_to_linear(gain_db);
-                    }
-                    let mut pan = track.pan;
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut pan, -1.0..=1.0)
-                                .suffix(" pan")
-                                .text("Pan"),
-                        )
-                        .changed()
-                    {
-                        track.pan = pan;
-                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Meter");
+                        let peak = info.and_then(|i| i.peak).unwrap_or(0.0);
+                        let contribution = peak * track.effective_gain(solo_active);
+                        meter(ui, contribution);
+                        ui.label(format!("{:.1} dBFS", linear_to_db(contribution)));
+                    });
                 });
-
-                ui.horizontal(|ui| {
-                    ui.label("Meter");
-                    let peak = info.and_then(|i| i.peak).unwrap_or(0.0);
-                    let contribution = peak * track.gain;
-                    meter(ui, contribution);
-                    ui.label(format!("{:.1} dBFS", linear_to_db(contribution)));
-                });
-            });
+        });
     }
 }
 

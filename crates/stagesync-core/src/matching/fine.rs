@@ -106,9 +106,10 @@ pub fn fine_match(
     let mut reasons = SkipReasons::default();
 
     let rate = source.rate_hz;
-    let win = (options.window_secs * rate).round() as usize;
+    let default_win = (options.window_secs * rate).round() as usize;
+    let min_short_frames = (8.0 * rate).round() as usize;
 
-    if win < 8 || source.len() < win {
+    if default_win < 8 || source.len() < min_short_frames.min(default_win) {
         return FineResult {
             points,
             model: Some(*model),
@@ -123,8 +124,22 @@ pub fn fine_match(
         };
     }
 
+    // Recordings between 8 s and the 30 s default window would yield zero fine
+    // probes at the full window size. Scale the probe window to half the source
+    // (at least 4 s) with a 40% hop so short clips still produce several
+    // overlapping probes while sub-8 s fragments continue to report no fine points.
+    let (win, hop) = if source.len() < default_win {
+        let short_win = (source.len() / 3)
+            .max((4.0 * rate).round() as usize)
+            .min(source.len())
+            .max(8);
+        let short_hop = ((short_win as f64) * 0.4).max(1.0);
+        (short_win, short_hop)
+    } else {
+        (default_win, (options.hop_secs * rate).max(1.0))
+    };
+
     let half = win / 2;
-    let hop = (options.hop_secs * rate).max(1.0);
     for p in probe_positions(source.len(), half, hop) {
         let window = &source.norm[p - half..p + half];
 

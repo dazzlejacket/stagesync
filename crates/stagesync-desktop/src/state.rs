@@ -363,6 +363,10 @@ pub struct ExportSettings {
     pub mix: stagesync_core::mixer::MixSettings,
     /// How the mix protects itself against clipping.
     pub protection: stagesync_core::mixer::ClippingProtection,
+    /// Whether tracks in the mix are loudness-matched before mixing.
+    pub loudness: stagesync_core::mixer::LoudnessMatch,
+    /// WAV container format for mixdown exports (`Auto`, `Riff`, `Rf64`, `Bw64`).
+    pub container: stagesync_core::mixer::ContainerChoice,
 }
 
 impl Default for ExportSettings {
@@ -377,6 +381,8 @@ impl Default for ExportSettings {
                 master_gain: 1.0,
             },
             protection: stagesync_core::mixer::ClippingProtection::None,
+            loudness: stagesync_core::mixer::LoudnessMatch::None,
+            container: stagesync_core::mixer::ContainerChoice::Auto,
         }
     }
 }
@@ -428,6 +434,26 @@ pub fn protection_label(protection: stagesync_core::mixer::ClippingProtection) -
         ClippingProtection::None => "None",
         ClippingProtection::SoftClip { .. } => "Soft knee",
         ClippingProtection::AutoGain { .. } => "Automatic gain",
+    }
+}
+
+/// A short label for a loudness matching mode.
+pub fn loudness_label(loudness: stagesync_core::mixer::LoudnessMatch) -> &'static str {
+    use stagesync_core::mixer::LoudnessMatch;
+    match loudness {
+        LoudnessMatch::None => "Keep original levels",
+        LoudnessMatch::MatchToLoudest => "Match RMS to loudest",
+    }
+}
+
+/// A short label for a mix container choice.
+pub fn container_label(container: stagesync_core::mixer::ContainerChoice) -> &'static str {
+    use stagesync_core::mixer::ContainerChoice;
+    match container {
+        ContainerChoice::Auto => "Auto (RIFF or RF64)",
+        ContainerChoice::Riff => "Standard RIFF/WAV",
+        ContainerChoice::Rf64 => "RF64 (>4 GiB)",
+        ContainerChoice::Bw64 => "BW64 (Broadcast)",
     }
 }
 

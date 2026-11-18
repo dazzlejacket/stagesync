@@ -157,6 +157,7 @@ fn the_settings_survive_a_round_trip() {
         last_sources: vec!["/music/a.wav".to_string(), "/music/b.wav".to_string()],
         window_width: 1234.0,
         window_height: 567.0,
+        ..AppSettings::default()
     };
     settings.save_to(&path).expect("the settings were written");
     assert!(path.exists(), "the settings file was not written");

@@ -41,6 +41,14 @@ pub struct AppSettings {
     pub window_width: f32,
     /// The height of the window.
     pub window_height: f32,
+    /// Mix loudness matching (`none` or `match_to_loudest`).
+    pub loudness: String,
+    /// Mix WAV container choice (`auto`, `riff`, `rf64`, or `bw64`).
+    pub container: String,
+    /// Theme preference (`dark`, `light`, or `system`).
+    pub theme: String,
+    /// Recently opened or saved `.stagesync` project files, newest first.
+    pub recent_projects: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -57,6 +65,10 @@ impl Default for AppSettings {
             last_sources: Vec::new(),
             window_width: 1400.0,
             window_height: 900.0,
+            loudness: "none".to_string(),
+            container: "auto".to_string(),
+            theme: "dark".to_string(),
+            recent_projects: Vec::new(),
         }
     }
 }
@@ -137,6 +149,42 @@ pub fn format_from_name(name: &str) -> WavFormat {
     match name {
         "int16" => WavFormat::Int16,
         _ => WavFormat::Float32,
+    }
+}
+
+/// The name of a loudness matching option, as written to settings.
+pub fn loudness_name(loudness: stagesync_core::mixer::LoudnessMatch) -> &'static str {
+    match loudness {
+        stagesync_core::mixer::LoudnessMatch::None => "none",
+        stagesync_core::mixer::LoudnessMatch::MatchToLoudest => "match_to_loudest",
+    }
+}
+
+/// Parse a loudness matching option from settings text.
+pub fn loudness_from_name(name: &str) -> stagesync_core::mixer::LoudnessMatch {
+    match name {
+        "match_to_loudest" => stagesync_core::mixer::LoudnessMatch::MatchToLoudest,
+        _ => stagesync_core::mixer::LoudnessMatch::None,
+    }
+}
+
+/// The name of a container choice, as written to settings.
+pub fn container_name(container: stagesync_core::mixer::ContainerChoice) -> &'static str {
+    match container {
+        stagesync_core::mixer::ContainerChoice::Auto => "auto",
+        stagesync_core::mixer::ContainerChoice::Riff => "riff",
+        stagesync_core::mixer::ContainerChoice::Rf64 => "rf64",
+        stagesync_core::mixer::ContainerChoice::Bw64 => "bw64",
+    }
+}
+
+/// Parse a container choice from settings text.
+pub fn container_from_name(name: &str) -> stagesync_core::mixer::ContainerChoice {
+    match name {
+        "riff" => stagesync_core::mixer::ContainerChoice::Riff,
+        "rf64" => stagesync_core::mixer::ContainerChoice::Rf64,
+        "bw64" => stagesync_core::mixer::ContainerChoice::Bw64,
+        _ => stagesync_core::mixer::ContainerChoice::Auto,
     }
 }
 

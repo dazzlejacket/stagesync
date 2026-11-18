@@ -494,6 +494,8 @@ pub fn export_report(
                 channels: 2,
                 format: options.format,
                 protection: settings.protection,
+                loudness: settings.loudness,
+                container: settings.container,
                 ..stagesync_core::mixer::MixOptions::default()
             };
             let result =
