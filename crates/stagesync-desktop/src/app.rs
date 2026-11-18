@@ -67,6 +67,18 @@ enum DockTab {
     Manual,
 }
 
+/// Deferred manual state mutation committed only when re-analysis finishes cleanly.
+#[derive(Debug, Clone, Copy)]
+enum PendingAnalysisCommit {
+    ApplyNudge {
+        target_index: usize,
+        proposed_anchor: AnchorFields,
+    },
+    ResetToAutomatic {
+        target_index: usize,
+    },
+}
+
 /// A background job that is currently running.
 struct RunningJob {
     kind: JobKind,
@@ -102,6 +114,7 @@ pub struct StageSyncApp {
     selection: Option<Selection>,
     report: Option<AlignmentReport>,
     running: Option<RunningJob>,
+    pending_analysis_commit: Option<PendingAnalysisCommit>,
     verifying: bool,
     verifying_job: Option<u64>,
     session_gen: u64,
@@ -219,6 +232,7 @@ impl StageSyncApp {
             selection: None,
             report: None,
             running: None,
+            pending_analysis_commit: None,
             verifying: false,
             verifying_job: None,
             session_gen: 1,
@@ -417,6 +431,7 @@ impl StageSyncApp {
         if let Some(job) = self.running.take() {
             job.cancel.store(true, Ordering::Relaxed);
         }
+        self.pending_analysis_commit = None;
         self.progress = None;
         self.verifying = false;
         self.verifying_job = None;
@@ -528,6 +543,7 @@ impl StageSyncApp {
                     // showing it would put one recording's figures next to
                     // another recording's name.
                     if !self.report_matches_session(&report) {
+                        self.pending_analysis_commit = None;
                         self.report = None;
                         self.last_error = Some(
                             "The file list changed while the analysis was running, so its result \
@@ -538,6 +554,35 @@ impl StageSyncApp {
                             "analysis result discarded: the file list changed".to_string(),
                         );
                         continue;
+                    }
+                    if let Some(commit) = self.pending_analysis_commit.take() {
+                        match commit {
+                            PendingAnalysisCommit::ApplyNudge {
+                                target_index,
+                                proposed_anchor,
+                            } => {
+                                if self.anchors.len() <= target_index {
+                                    self.anchors
+                                        .resize(target_index + 1, AnchorFields::default());
+                                }
+                                self.anchors[target_index] = proposed_anchor;
+                                if let Some(n) = self.nudges.get_mut(target_index) {
+                                    *n = 0.0;
+                                }
+                                self.nudge_history
+                                    .retain(|(other, _)| *other != target_index);
+                            }
+                            PendingAnalysisCommit::ResetToAutomatic { target_index } => {
+                                if let Some(anchor) = self.anchors.get_mut(target_index) {
+                                    anchor.active = false;
+                                }
+                                if let Some(n) = self.nudges.get_mut(target_index) {
+                                    *n = 0.0;
+                                }
+                                self.nudge_history
+                                    .retain(|(other, _)| *other != target_index);
+                            }
+                        }
                     }
                     if self.view_start == 0.0 && (self.view_end - 600.0).abs() < 1e-6 {
                         self.view_end = report.timeline_duration.max(1.0);
@@ -556,6 +601,7 @@ impl StageSyncApp {
                     if !expected {
                         continue;
                     }
+                    self.pending_analysis_commit = None;
                     self.running = None;
                     self.progress = None;
                     self.last_error = Some(format!("The analysis failed: {message}"));
@@ -568,6 +614,7 @@ impl StageSyncApp {
                     if !expected {
                         continue;
                     }
+                    self.pending_analysis_commit = None;
                     self.running = None;
                     self.progress = None;
                     self.last_error = None;
@@ -1456,7 +1503,21 @@ impl StageSyncApp {
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                let anchor = self.anchor_value(index)?;
+                let anchor = match self.pending_analysis_commit {
+                    Some(PendingAnalysisCommit::ApplyNudge {
+                        target_index,
+                        proposed_anchor,
+                    }) if target_index == index => ManualAnchor {
+                        source_time: proposed_anchor.source_time,
+                        reference_time: proposed_anchor.reference_time,
+                    },
+                    Some(PendingAnalysisCommit::ResetToAutomatic { target_index })
+                        if target_index == index =>
+                    {
+                        return None;
+                    }
+                    _ => self.anchor_value(index)?,
+                };
                 Some((self.anchor_key(entry), anchor))
             })
             .collect();
@@ -1479,6 +1540,104 @@ impl StageSyncApp {
         jobs::spawn_analysis_scoped(self.tx.clone(), scope, reference, sources, config, cancel);
     }
 
+    /// Whether target `index` has a manual anchor toggle or time edit not yet applied by `Apply anchor`.
+    fn has_unapplied_anchor(&self, index: usize) -> bool {
+        let Some(anchor) = self.anchors.get(index) else {
+            return false;
+        };
+        let Some(alignment) = self.report.as_ref().and_then(|r| r.sources.get(index)) else {
+            return anchor.active;
+        };
+        match (anchor.active, alignment.override_state) {
+            (false, None) => false,
+            (true, Some(ov)) => {
+                (ov.anchor_source_time - anchor.source_time).abs() > 1e-5
+                    || (ov.anchor_reference_time - anchor.reference_time).abs() > 1e-5
+            }
+            _ => true,
+        }
+    }
+
+    /// Name of the first target with an un-applied manual anchor edit, if any.
+    fn first_unapplied_anchor_target(&self) -> Option<String> {
+        (0..self.targets.len())
+            .find(|&i| self.has_unapplied_anchor(i))
+            .map(|i| self.targets[i].name())
+    }
+
+    /// Whether any target has a non-zero un-applied manual nudge.
+    fn has_pending_nudges(&self) -> bool {
+        self.nudges.iter().any(|n| n.abs() > 1e-9)
+    }
+
+    /// Build a snapshot of `report` with every pending manual nudge baked into its
+    /// linear model, `TimeMap`, shifted segments, merged timeline, and `OverrideState`,
+    /// so exports match the live preview sample-for-sample.
+    fn effective_report_for_export(&self, report: &AlignmentReport) -> AlignmentReport {
+        let mut out = report.clone();
+        let mut any_nudged = false;
+        for (i, alignment) in out.sources.iter_mut().enumerate() {
+            let nudge = self.nudges.get(i).copied().unwrap_or(0.0);
+            if nudge.abs() <= 1e-12 {
+                continue;
+            }
+            let Some(old_model) = alignment.model() else {
+                continue;
+            };
+            any_nudged = true;
+            let new_offset = old_model.offset + nudge;
+            let new_model = stagesync_core::matching::LinearModel::new(old_model.scale, new_offset);
+            if let Some(d) = alignment.drift.as_mut() {
+                d.model = new_model;
+            }
+            alignment.calibrated_model = Some(new_model);
+            if alignment.direct_model.is_some() && alignment.drift.is_none() {
+                alignment.direct_model = Some(new_model);
+            }
+            for seg in &mut alignment.map.segments {
+                seg.reference_start += nudge;
+            }
+            for seg in &mut alignment.segments {
+                if !matches!(
+                    seg.kind,
+                    SegmentKind::UncoveredReference | SegmentKind::BeyondReference
+                ) {
+                    seg.reference_start += nudge;
+                    seg.reference_end += nudge;
+                }
+            }
+            for pt in &mut alignment.points {
+                pt.residual_ms =
+                    (pt.reference_time - new_model.reference_time(pt.source_time)) * 1000.0;
+            }
+            let auto_offset = alignment
+                .override_state
+                .map(|o| o.automatic_offset)
+                .unwrap_or(old_model.offset);
+            alignment.override_state = Some(stagesync_core::matching::OverrideState {
+                anchor_source_time: 0.0,
+                anchor_reference_time: new_offset,
+                automatic_offset: auto_offset,
+                applied_offset: new_offset,
+                shift_ms: (new_offset - auto_offset) * 1000.0,
+            });
+            alignment.holdout = None;
+            alignment.warnings.push(format!(
+                "Exported with an un-applied manual nudge of {:+.1} ms; alignment was not re-measured at this offset.",
+                nudge * 1000.0
+            ));
+        }
+        if any_nudged {
+            let per_source: Vec<Vec<stagesync_core::matching::Segment>> =
+                out.sources.iter().map(|s| s.segments.clone()).collect();
+            out.timeline = stagesync_core::matching::segments::merge_timeline(
+                &per_source,
+                out.timeline_duration,
+            );
+        }
+        out
+    }
+
     /// Start the export of the corrected audio and the artefacts.
     fn start_export(&mut self) {
         if self.running.is_some() {
@@ -1487,14 +1646,21 @@ impl StageSyncApp {
             );
             return;
         }
-        let Some(report) = self.report.clone() else {
+        let Some(base_report) = self.report.clone() else {
             self.last_error = Some("Run the analysis before exporting.".to_string());
             return;
         };
+        if let Some(target_name) = self.first_unapplied_anchor_target() {
+            self.last_error = Some(format!(
+                "Manual anchor for {target_name} was edited but not applied. Click \"Apply anchor\" before exporting."
+            ));
+            return;
+        }
         if self.settings.dir.trim().is_empty() {
             self.last_error = Some("Choose an export folder first.".to_string());
             return;
         }
+        let report = self.effective_report_for_export(&base_report);
         let scope = self.next_scope();
         let cancel = Arc::new(AtomicBool::new(false));
         self.running = Some(RunningJob {
@@ -1523,7 +1689,11 @@ impl StageSyncApp {
         let model_and_duration = self.report.as_ref().and_then(|report| {
             let alignment = report.sources.get(index)?;
             let model = alignment.model()?;
-            Some((model, alignment.source.duration_secs))
+            let nudge = self.nudges.get(index).copied().unwrap_or(0.0);
+            Some((
+                stagesync_core::matching::LinearModel::new(model.scale, model.offset + nudge),
+                alignment.source.duration_secs,
+            ))
         });
         let Some((model, duration)) = model_and_duration else {
             self.last_error =
@@ -1872,7 +2042,7 @@ impl StageSyncApp {
                     .on_hover_text("Jump to 0:00:00 (Home)")
                     .clicked()
                 {
-                    self.playhead = 0.0;
+                    self.seek_playhead(0.0);
                     self.view_start = 0.0;
                 }
                 ui.colored_label(
@@ -2320,10 +2490,24 @@ impl StageSyncApp {
                 }
 
                 ui.add_space(6.0);
+                if let Some(target_name) = self.first_unapplied_anchor_target() {
+                    ui.colored_label(
+                        self.palette.error,
+                        format!(
+                            "Unapplied manual anchor on {target_name}: click \"Apply anchor\" before exporting."
+                        ),
+                    );
+                } else if self.has_pending_nudges() {
+                    ui.colored_label(
+                        self.palette.warn,
+                        "Pending manual nudge(s) will be baked into exported audio and plan.json.",
+                    );
+                }
                 let can_export = self.report.is_some()
                     && !self.settings.dir.trim().is_empty()
                     && self.running.is_none()
-                    && !self.verifying;
+                    && !self.verifying
+                    && self.first_unapplied_anchor_target().is_none();
                 let exp_btn = egui::Button::new(egui::RichText::new("Export").strong().color(
                     if can_export {
                         Color32::WHITE
@@ -2657,7 +2841,7 @@ impl StageSyncApp {
                 self.view_start = (center - half_span).max(0.0);
                 self.view_end = self.view_start + half_span * 2.0;
                 if ov_response.clicked() {
-                    self.playhead = center;
+                    self.seek_playhead(center);
                 }
             }
         }
@@ -2774,8 +2958,9 @@ impl StageSyncApp {
 
         if let Some(pointer) = pointer {
             if response.clicked() {
-                self.playhead =
+                let target_pos =
                     waveview::time_at(rect, pointer.x, self.view_start, self.view_end).max(0.0);
+                self.seek_playhead(target_pos);
                 self.region = None;
             }
         }
@@ -2970,9 +3155,9 @@ impl StageSyncApp {
         out
     }
 
-    /// Move the playhead to a place, and bring it into view.
+    /// Move the playhead to a place, bring it into view, and seek active playback.
     fn jump_to(&mut self, position: f64) {
-        self.playhead = position.max(0.0);
+        self.seek_playhead(position);
         let span = (self.view_end - self.view_start).max(1e-3);
         self.view_start = self.playhead - span * 0.5;
         self.view_end = self.view_start + span;
@@ -3094,20 +3279,17 @@ impl StageSyncApp {
             return;
         };
         let nudge = self.nudges.get(index).copied().unwrap_or(0.0);
-        let reference_time = model.offset + nudge;
-        if self.anchors.len() <= index {
-            self.anchors.resize(index + 1, AnchorFields::default());
-        }
-        self.anchors[index] = AnchorFields {
+        let proposed_anchor = AnchorFields {
             source_time: 0.0,
-            reference_time,
+            reference_time: model.offset + nudge,
             active: true,
         };
-        // The nudge is now part of the model, so it must not be added a second
-        // time.
-        if let Some(value) = self.nudges.get_mut(index) {
-            *value = 0.0;
-        }
+        // Stage the anchor & zero-nudge commit until AnalysisFinished succeeds so a
+        // cancelled or failed re-analysis never drops the user's pending nudge.
+        self.pending_analysis_commit = Some(PendingAnalysisCommit::ApplyNudge {
+            target_index: index,
+            proposed_anchor,
+        });
         self.push_log(format!(
             "{} moved by {:+.1} ms; re-measuring",
             self.targets[index].name(),
@@ -3119,15 +3301,11 @@ impl StageSyncApp {
     /// Drop the manual adjustment of one recording and go back to the automatic
     /// result.
     fn reset_to_automatic(&mut self, index: usize) {
-        if let Some(value) = self.nudges.get_mut(index) {
-            *value = 0.0;
-        }
-        self.nudge_history.retain(|(other, _)| *other != index);
-        if let Some(anchor) = self.anchors.get_mut(index) {
-            anchor.active = false;
-        }
+        self.pending_analysis_commit = Some(PendingAnalysisCommit::ResetToAutomatic {
+            target_index: index,
+        });
         self.push_log(format!(
-            "{} was reset to the automatic match",
+            "{} resetting to the automatic match",
             self.targets[index].name()
         ));
         self.start_analysis();
@@ -3760,8 +3938,11 @@ impl StageSyncApp {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
-        if self.running.is_some() || self.peaks_pending > 0 {
+        if self.running.is_some() || self.peaks_pending > 0 || self.verifying {
             ui.ctx().request_repaint();
+        } else if self.player.is_playing() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 
@@ -3828,7 +4009,7 @@ impl StageSyncApp {
             self.view_start = 0.0;
             self.view_end = duration;
         } else if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
-            self.playhead = 0.0;
+            self.seek_playhead(0.0);
             self.view_start = 0.0;
         } else if ctx.input(|i| i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
         {
@@ -3874,12 +4055,25 @@ impl StageSyncApp {
             .send_viewport_cmd(egui::ViewportCommand::InnerSize(wanted));
     }
 
-    /// Move the playhead with the sound, and keep a loop going.
+    /// Seek the playhead and restart active audio playback at the new position.
+    fn seek_playhead(&mut self, position: f64) {
+        self.playhead = position.max(0.0);
+        if self.player.is_playing() {
+            let voice = self.voice;
+            self.play_voice(voice);
+        }
+    }
+
+    /// Move the playhead with the sound, surface backend stalls/errors, and keep a loop going.
     ///
     /// The playhead is the position on the reference timeline that is being heard.
     /// It follows the player, and when a loop is set the playback starts again at
     /// the beginning of the region as soon as it reaches the end of it.
     fn follow_the_playhead(&mut self) {
+        if let Some(err) = self.player.take_error() {
+            self.last_error = Some(err.clone());
+            self.push_log(format!("audio error: {err}"));
+        }
         self.player.poll();
         if !self.player.is_playing() {
             return;
@@ -4654,5 +4848,135 @@ mod tests {
         assert!(app.last_error.is_none());
         assert!(!app.is_dirty());
         assert!(!app.verifying);
+    }
+
+    #[test]
+    fn p1_06_pending_nudge_exports_in_audio_and_plan_and_unapplied_anchor_blocks_export() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let _settings = SettingsGuard::new(&dir);
+        let rate = 8_000u32;
+        let signal = performance(25.0, rate, 7);
+        let ref_path = dir.path().join("ref.wav");
+        write_wav(&ref_path, &signal, rate);
+        // Target is delayed by +1.0 s relative to reference.
+        let src_offset = 1.0;
+        let tgt_samples: Vec<f32> = signal[rate as usize..].to_vec();
+        let tgt_path = dir.path().join("tgt.wav");
+        write_wav(&tgt_path, &tgt_samples, rate);
+
+        let config = stagesync_core::pipeline::AnalysisConfig {
+            compute_log_mel: false,
+            measure_waveform_drift: false,
+            ..stagesync_core::pipeline::AnalysisConfig::default()
+        };
+        let mut noop = |_: stagesync_core::pipeline::Progress| {};
+        let report = stagesync_core::pipeline::analyze(
+            &ref_path,
+            std::slice::from_ref(&tgt_path),
+            &config,
+            &mut noop,
+        )
+        .expect("analyze");
+        let orig_offset = report.sources[0].model().expect("matched").offset;
+
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        app.open_files(vec![ref_path.clone(), tgt_path.clone()]);
+        app.report = Some(report);
+
+        // Apply a +0.500 s pending nudge WITHOUT running "Apply and re-check", and export.
+        let nudge_secs = 0.500;
+        app.nudge(0, nudge_secs);
+        let out_dir = dir.path().join("out_nudge");
+        app.settings.dir = out_dir.display().to_string();
+        app.settings.layout = Layout::ReferenceTimelinePerSource;
+        app.start_export();
+        let outcome = wait_for(&mut app, |a| {
+            a.export_outcome.as_ref().map(|o| o.files.clone())
+        })
+        .expect("export finishes");
+        assert!(
+            app.last_error.is_none(),
+            "export failed: {:?}",
+            app.last_error
+        );
+
+        let plan_json = std::fs::read_to_string(out_dir.join("plan.json")).expect("read plan.json");
+        let exported_report: AlignmentReport =
+            serde_json::from_str(&plan_json).expect("parse plan.json");
+        let exported_offset = exported_report.sources[0]
+            .model()
+            .expect("exported model")
+            .offset;
+        assert!(
+            (exported_offset - (orig_offset + nudge_secs)).abs() < 1e-4,
+            "pending nudge was dropped on export: got {exported_offset}, expected {}",
+            orig_offset + nudge_secs
+        );
+        // Verify rendered timeline WAV is silent before orig_offset + nudge_secs and active after.
+        let timeline_wav = out_dir.join("tgt_timeline.wav");
+        let mut reader = stagesync_core::audio::WavReader::open(&timeline_wav).expect("open wav");
+        let pre_nudge = reader
+            .read_frames((orig_offset * rate as f64) as u64 + 400, 1600)
+            .expect("read pre-nudge frames");
+        let pre_peak = pre_nudge[0].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(
+            pre_peak < 1e-3,
+            "expected silence in nudged gap [{orig_offset}..{}], got peak {pre_peak}",
+            orig_offset + nudge_secs
+        );
+        let post_nudge = reader
+            .read_frames(
+                ((orig_offset + nudge_secs) * rate as f64) as u64 + 800,
+                3200,
+            )
+            .expect("read post-nudge frames");
+        let post_peak = post_nudge[0].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(
+            post_peak > 0.05,
+            "expected shifted audio after orig_offset + nudge_secs, got peak {post_peak}"
+        );
+
+        // Unapplied manual anchor edit must block export instead of silently exporting stale alignment.
+        app.anchors[0].active = true;
+        app.anchors[0].source_time = 2.0;
+        app.anchors[0].reference_time = 5.0;
+        let blocked_dir = dir.path().join("blocked_out");
+        app.settings.dir = blocked_dir.display().to_string();
+        app.export_outcome = None;
+        app.start_export();
+        assert!(
+            app.running.is_none(),
+            "export started with unapplied anchor"
+        );
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("Apply anchor")),
+            "expected Apply anchor refusal error, got {:?}",
+            app.last_error
+        );
+        app.anchors[0].active = false;
+
+        // Staging Apply & Cancel preserves pending nudge and prior anchor intact.
+        app.apply_nudge(0);
+        if let Some(job) = app.running.as_ref() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.running.is_some() && std::time::Instant::now() < deadline {
+            app.drain_events();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            (app.nudges[0] - nudge_secs).abs() < 1e-12,
+            "cancelled apply_nudge wiped out pending nudge: {}",
+            app.nudges[0]
+        );
+        assert!(
+            !app.anchors[0].active,
+            "cancelled apply_nudge mutated anchor prematurely"
+        );
+        let _ = outcome;
+        let _ = src_offset;
     }
 }

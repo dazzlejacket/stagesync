@@ -19,11 +19,12 @@
 use std::collections::VecDeque;
 use std::num::NonZero;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player as RodioPlayer, Source};
+use rodio::{DeviceSinkBuilder, Player as RodioPlayer, Source};
 use stagesync_core::audio::AudioDecoder;
 use stagesync_core::matching::LinearModel;
 use stagesync_core::mixer::{MixTrack, PanMatrix};
@@ -121,39 +122,243 @@ struct LiveMixUpdate {
 
 type LiveMixShared = Arc<(AtomicU64, Mutex<LiveMixUpdate>)>;
 
+/// Output backend abstraction so audio device work runs off the UI thread and can be
+/// substituted with stalled or simulated devices in tests.
+pub trait AudioBackend: Send + 'static {
+    /// Output device sample rate in Hz.
+    fn sample_rate(&self) -> u32;
+    /// Whether an output device is open and ready to accept audio.
+    fn is_available(&self) -> bool;
+    /// Error from opening the device, if unavailable.
+    fn init_error(&self) -> Option<&str>;
+    /// Start playing `source` at `volume`, replacing any previous stream.
+    fn play(
+        &mut self,
+        source: Box<dyn Source<Item = f32> + Send>,
+        volume: f32,
+    ) -> Result<(), String>;
+    /// Halt playback immediately without blocking indefinitely on device drain.
+    fn stop(&mut self);
+    /// Adjust master monitor volume (`0.0..=1.0`).
+    fn set_volume(&mut self, volume: f32);
+    /// Return any runtime device error detected by the backend.
+    fn poll_error(&mut self) -> Option<String> {
+        None
+    }
+}
+
+/// Real `rodio` audio backend that creates a fresh `RodioPlayer` per stream and never
+/// calls `RodioPlayer::clear()` (which blocks in `sleep_until_end()` if a device stalls).
+struct RodioBackend {
+    sink: Option<rodio::MixerDeviceSink>,
+    player: Option<RodioPlayer>,
+    rate: u32,
+    init_error: Option<String>,
+}
+
+impl RodioBackend {
+    fn open_default() -> Self {
+        match DeviceSinkBuilder::open_default_sink() {
+            Ok(mut sink) => {
+                sink.log_on_drop(false);
+                let rate = sink.config().sample_rate().get();
+                Self {
+                    sink: Some(sink),
+                    player: None,
+                    rate,
+                    init_error: None,
+                }
+            }
+            Err(error) => Self {
+                sink: None,
+                player: None,
+                rate: 48_000,
+                init_error: Some(format!("no audio output device: {error}")),
+            },
+        }
+    }
+}
+
+impl AudioBackend for RodioBackend {
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+
+    fn is_available(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    fn init_error(&self) -> Option<&str> {
+        self.init_error.as_deref()
+    }
+
+    fn play(
+        &mut self,
+        source: Box<dyn Source<Item = f32> + Send>,
+        volume: f32,
+    ) -> Result<(), String> {
+        let Some(sink) = &self.sink else {
+            return Err(self
+                .init_error
+                .clone()
+                .unwrap_or_else(|| "no audio output device".to_string()));
+        };
+        if let Some(prev) = self.player.take() {
+            prev.stop();
+            drop(prev);
+        }
+        let player = RodioPlayer::connect_new(sink.mixer());
+        player.set_volume(volume);
+        player.append(source);
+        player.play();
+        self.player = Some(player);
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        if let Some(prev) = self.player.take() {
+            prev.stop();
+            drop(prev);
+        }
+    }
+
+    fn set_volume(&mut self, volume: f32) {
+        if let Some(player) = &self.player {
+            player.set_volume(volume);
+        }
+    }
+}
+
+/// Source wrapper enabling wait-free UI cancellation, accurate consumed-frame counting,
+/// and reliable end-of-stream / drop completion tracking.
+struct StoppableSource {
+    inner: Box<dyn Source<Item = f32> + Send>,
+    channels: u16,
+    sample_in_frame: u16,
+    cancelled: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+    frames_played: Arc<AtomicU64>,
+}
+
+impl StoppableSource {
+    fn wrap(
+        inner: Box<dyn Source<Item = f32> + Send>,
+        cancelled: Arc<AtomicBool>,
+        finished: Arc<AtomicBool>,
+        frames_played: Arc<AtomicU64>,
+    ) -> Self {
+        let channels = inner.channels().get().max(1);
+        Self {
+            inner,
+            channels,
+            sample_in_frame: 0,
+            cancelled,
+            finished,
+            frames_played,
+        }
+    }
+}
+
+impl Iterator for StoppableSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.cancelled.load(Ordering::Acquire) {
+            self.finished.store(true, Ordering::Release);
+            return None;
+        }
+        match self.inner.next() {
+            Some(sample) => {
+                self.sample_in_frame += 1;
+                if self.sample_in_frame >= self.channels {
+                    self.sample_in_frame = 0;
+                    self.frames_played.fetch_add(1, Ordering::Relaxed);
+                }
+                Some(sample)
+            }
+            None => {
+                self.finished.store(true, Ordering::Release);
+                None
+            }
+        }
+    }
+}
+
+impl Source for StoppableSource {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+}
+
+impl Drop for StoppableSource {
+    fn drop(&mut self) {
+        self.finished.store(true, Ordering::Release);
+    }
+}
+
+enum BackendCmd {
+    Play {
+        cmd_id: u64,
+        source: Box<dyn Source<Item = f32> + Send>,
+        volume: f32,
+    },
+    Stop {
+        cmd_id: u64,
+    },
+    SetVolume {
+        cmd_id: u64,
+        volume: f32,
+    },
+    Shutdown,
+}
+
 /// What is playing, and where it started.
 struct Playing {
     voice: Voice,
     /// The position on the reference timeline the playback started at.
     start_secs: f64,
-    /// When it started.
-    started: Instant,
+    /// Atomic frames already consumed by the audio output backend.
+    frames_played: Arc<AtomicU64>,
+    /// Wait-free cancellation flag read on the audio thread.
+    cancelled: Arc<AtomicBool>,
+    /// Set to `true` once the audio source exhausts or is stopped/dropped.
+    finished: Arc<AtomicBool>,
     /// Shared live-update state when playing `Voice::Mix`.
     live_mix: Option<LiveMixShared>,
 }
 
 /// The player.
 ///
-/// A machine without an audio device is not an error: the application still works,
-/// it simply cannot make a sound, and it says so.
+/// Audio device control executes on a dedicated background worker so stop, voice switch,
+/// seek, and loop jumps never block the GUI thread even if an audio driver stalls.
 pub struct Player {
-    /// The device, kept alive for as long as the player is.
-    ///
-    /// The sink owns the audio stream; dropping it closes the device. It is never
-    /// read, but it must not be dropped.
-    #[allow(dead_code)]
-    sink: Option<MixerDeviceSink>,
-    player: Option<RodioPlayer>,
+    cmd_tx: Option<Sender<BackendCmd>>,
+    available: bool,
     playing: Option<Playing>,
-    /// Why there is no output, when there is none.
+    /// Why there is no output, when there is none or a backend failure occurred.
     error: Option<String>,
+    /// Asynchronous runtime error published by the backend worker thread.
+    runtime_error: Arc<Mutex<Option<String>>>,
+    next_cmd_id: u64,
+    last_sent_cmd: Option<(u64, Instant)>,
+    ack_cmd: Arc<AtomicU64>,
+    stall_reported: bool,
     /// The rate the output device runs at.
     rate: u32,
     volume: f32,
     /// The loudest sample the mix has produced, shared with the playing source.
-    ///
-    /// The source is handed to the sound device, so the peak it measures is
-    /// published through a shared cell rather than read back from it.
     mix_peak: Arc<AtomicU32>,
 }
 
@@ -163,43 +368,77 @@ impl Default for Player {
     }
 }
 
+impl Drop for Player {
+    fn drop(&mut self) {
+        if let Some(playing) = self.playing.take() {
+            playing.cancelled.store(true, Ordering::Release);
+        }
+        if let Some(tx) = self.cmd_tx.take() {
+            let _ = tx.send(BackendCmd::Shutdown);
+        }
+    }
+}
+
 impl Player {
     /// Open the audio output, if the machine has one.
     pub fn new() -> Self {
-        match DeviceSinkBuilder::open_default_sink() {
-            Ok(sink) => {
-                let rate = sink.config().sample_rate().get();
-                let player = RodioPlayer::connect_new(sink.mixer());
-                Self {
-                    sink: Some(sink),
-                    player: Some(player),
-                    playing: None,
-                    error: None,
-                    rate,
-                    volume: 1.0,
-                    mix_peak: Arc::new(AtomicU32::new(0)),
-                }
-            }
-            Err(error) => Self {
-                sink: None,
-                player: None,
-                playing: None,
-                error: Some(format!("no audio output device: {error}")),
-                rate: 48_000,
-                volume: 1.0,
-                mix_peak: Arc::new(AtomicU32::new(0)),
-            },
+        Self::spawn_with_factory(RodioBackend::open_default)
+    }
+
+    /// Build a `Player` backed by a custom [`AudioBackend`] (used for stalled/mock device tests).
+    pub fn with_backend<B: AudioBackend>(backend: B) -> Self {
+        Self::spawn_with_factory(move || backend)
+    }
+
+    fn spawn_with_factory<B: AudioBackend, F: FnOnce() -> B + Send + 'static>(factory: F) -> Self {
+        let (init_tx, init_rx) = mpsc::channel::<(bool, u32, Option<String>)>();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCmd>();
+        let ack_cmd = Arc::new(AtomicU64::new(0));
+        let runtime_error = Arc::new(Mutex::new(None));
+        let ack_worker = Arc::clone(&ack_cmd);
+        let err_worker = Arc::clone(&runtime_error);
+
+        thread_spawn_worker(factory, init_tx, cmd_rx, ack_worker, err_worker);
+
+        let (available, rate, error) = init_rx.recv_timeout(Duration::from_secs(2)).unwrap_or((
+            false,
+            48_000,
+            Some("audio output initialisation timed out".to_string()),
+        ));
+
+        Self {
+            cmd_tx: Some(cmd_tx),
+            available,
+            playing: None,
+            error,
+            runtime_error,
+            next_cmd_id: 1,
+            last_sent_cmd: None,
+            ack_cmd,
+            stall_reported: false,
+            rate: rate.max(1),
+            volume: 1.0,
+            mix_peak: Arc::new(AtomicU32::new(0)),
         }
     }
 
     /// Whether the machine can make a sound.
     pub fn is_available(&self) -> bool {
-        self.player.is_some()
+        self.available
     }
 
     /// Why there is no sound, when there is none.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// Take and clear any runtime error reported asynchronously by the audio backend.
+    pub fn take_error(&mut self) -> Option<String> {
+        let err = self.runtime_error.lock().ok().and_then(|mut g| g.take());
+        if let Some(ref e) = err {
+            self.error = Some(e.clone());
+        }
+        err
     }
 
     /// The rate the output device runs at.
@@ -212,12 +451,26 @@ impl Player {
         self.volume
     }
 
+    fn send_cmd(&mut self, build: impl FnOnce(u64) -> BackendCmd) {
+        let Some(tx) = &self.cmd_tx else {
+            return;
+        };
+        let id = self.next_cmd_id;
+        self.next_cmd_id += 1;
+        if tx.send(build(id)).is_ok() {
+            self.last_sent_cmd = Some((id, Instant::now()));
+            self.stall_reported = false;
+        }
+    }
+
     /// Set the volume, between zero and one.
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
-        if let Some(player) = &self.player {
-            player.set_volume(self.volume);
-        }
+        let vol = self.volume;
+        self.send_cmd(|cmd_id| BackendCmd::SetVolume {
+            cmd_id,
+            volume: vol,
+        });
     }
 
     /// What is playing, if anything.
@@ -227,17 +480,27 @@ impl Player {
 
     /// Whether something is playing right now.
     pub fn is_playing(&self) -> bool {
-        let Some(_) = self.playing else {
+        let Some(playing) = &self.playing else {
             return false;
         };
-        match &self.player {
-            Some(player) => !player.empty(),
-            None => false,
-        }
+        !playing.cancelled.load(Ordering::Acquire) && !playing.finished.load(Ordering::Acquire)
     }
 
     /// Reconcile local state with the audio backend; returns `true` if playback just ended.
     pub fn poll(&mut self) -> bool {
+        if let Some((sent_id, sent_at)) = self.last_sent_cmd {
+            if self.ack_cmd.load(Ordering::Acquire) >= sent_id {
+                self.last_sent_cmd = None;
+                self.stall_reported = false;
+            } else if !self.stall_reported && sent_at.elapsed() >= Duration::from_secs(2) {
+                self.stall_reported = true;
+                if let Ok(mut guard) = self.runtime_error.lock() {
+                    if guard.is_none() {
+                        *guard = Some("audio output device stalled or disconnected".to_string());
+                    }
+                }
+            }
+        }
         if self.playing.is_some() && !self.is_playing() {
             self.playing = None;
             return true;
@@ -275,27 +538,28 @@ impl Player {
         f32::from_bits(self.mix_peak.load(Ordering::Relaxed))
     }
 
-    /// The position on the reference timeline, in seconds.
+    /// The position on the reference timeline, in seconds, derived from actual audio
+    /// frames consumed by the output device rather than a free-running wall clock.
     pub fn position(&self) -> f64 {
         self.playing.as_ref().map_or(0.0, |playing| {
-            playing.start_secs + playing.started.elapsed().as_secs_f64()
+            let frames = playing.frames_played.load(Ordering::Relaxed);
+            playing.start_secs + frames as f64 / self.rate.max(1) as f64
         })
     }
 
-    /// Stop playing.
+    /// Stop playing immediately without blocking on the audio device.
     pub fn stop(&mut self) {
-        if let Some(player) = &self.player {
-            player.stop();
-            player.clear();
+        if let Some(playing) = self.playing.take() {
+            playing.cancelled.store(true, Ordering::Release);
         }
-        self.playing = None;
+        self.send_cmd(|cmd_id| BackendCmd::Stop { cmd_id });
     }
 
     /// Play the reference recording from a position on the reference timeline.
     pub fn play_reference(&mut self, path: &Path, from_secs: f64) -> Result<(), anyhow::Error> {
         let rate = self.rate;
         let source = ResampledSource::open(path, from_secs.max(0.0), rate, None)?;
-        self.start(Voice::Reference, from_secs.max(0.0), source)
+        self.start(Voice::Reference, from_secs.max(0.0), Box::new(source), None)
     }
 
     /// Play a target recording with the correction applied, from a position on the
@@ -313,43 +577,53 @@ impl Player {
         let rate = self.rate;
         let from_secs = from_secs.max(0.0);
         let source = ResampledSource::open(path, from_secs, rate, Some(model))?;
-        self.start(Voice::Target, from_secs, source)
+        self.start(Voice::Target, from_secs, Box::new(source), None)
     }
 
-    /// Put a source on the player and start the clock.
+    /// Put a source on the player backend and start tracking consumed frames.
     fn start(
         &mut self,
         voice: Voice,
         from_secs: f64,
-        source: ResampledSource,
+        source: Box<dyn Source<Item = f32> + Send>,
+        live_mix: Option<LiveMixShared>,
     ) -> Result<(), anyhow::Error> {
-        let Some(player) = &self.player else {
+        if !self.available {
             return Err(anyhow::anyhow!(
                 "there is no audio output device: {}",
                 self.error.as_deref().unwrap_or("unknown reason")
             ));
-        };
-        player.stop();
-        player.clear();
-        player.append(source);
-        player.play();
+        }
+        if let Some(prev) = self.playing.take() {
+            prev.cancelled.store(true, Ordering::Release);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let frames_played = Arc::new(AtomicU64::new(0));
+        let wrapped = StoppableSource::wrap(
+            source,
+            Arc::clone(&cancelled),
+            Arc::clone(&finished),
+            Arc::clone(&frames_played),
+        );
+        let volume = self.volume;
+        self.send_cmd(move |cmd_id| BackendCmd::Play {
+            cmd_id,
+            source: Box::new(wrapped),
+            volume,
+        });
         self.playing = Some(Playing {
             voice,
             start_secs: from_secs,
-            started: Instant::now(),
-            live_mix: None,
+            frames_played,
+            cancelled,
+            finished,
+            live_mix,
         });
         Ok(())
     }
 
     /// Play several recordings at once, mixed.
-    ///
-    /// Every recording is read through its own position map, so each one is at the
-    /// place its alignment says it belongs at, and the mix is the core's own: the
-    /// same pan matrices and the same gains the export uses.
-    ///
-    /// The mix is **streamed**: only a block of each recording is ever held in
-    /// memory, so a three-hour concert costs a few tens of megabytes.
     pub fn play_mix(
         &mut self,
         members: &[MixMember],
@@ -359,7 +633,6 @@ impl Player {
         let rate = self.rate;
         let from_secs = from_secs.max(0.0);
         let published_peak = Arc::clone(&self.mix_peak);
-        // The peak of the new mix starts from nothing.
         published_peak.store(0.0f32.to_bits(), Ordering::Relaxed);
         let live_mix: LiveMixShared = Arc::new((
             AtomicU64::new(0),
@@ -384,24 +657,98 @@ impl Player {
             published_peak,
             Some(Arc::clone(&live_mix)),
         )?;
-        let Some(player) = &self.player else {
-            return Err(anyhow::anyhow!(
-                "there is no audio output device: {}",
-                self.error.as_deref().unwrap_or("unknown reason")
-            ));
-        };
-        player.stop();
-        player.clear();
-        player.append(source);
-        player.play();
-        self.playing = Some(Playing {
-            voice: Voice::Mix,
-            start_secs: from_secs,
-            started: Instant::now(),
-            live_mix: Some(live_mix),
-        });
-        Ok(())
+        self.start(Voice::Mix, from_secs, Box::new(source), Some(live_mix))
     }
+}
+
+fn thread_spawn_worker<B: AudioBackend, F: FnOnce() -> B + Send + 'static>(
+    factory: F,
+    init_tx: Sender<(bool, u32, Option<String>)>,
+    cmd_rx: Receiver<BackendCmd>,
+    ack_cmd: Arc<AtomicU64>,
+    runtime_error: Arc<Mutex<Option<String>>>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("stagesync-audio".to_string())
+        .spawn(move || {
+            let mut backend = factory();
+            let _ = init_tx.send((
+                backend.is_available(),
+                backend.sample_rate().max(1),
+                backend.init_error().map(str::to_string),
+            ));
+
+            while let Ok(first) = cmd_rx.recv() {
+                // Coalesce queued commands so rapid seeks / A-B switches skip stale streams.
+                let mut latest_cmd = Some(first);
+                let mut latest_volume: Option<(u64, f32)> = None;
+                let mut max_cmd_id = 0u64;
+                let record_id = |cmd: &BackendCmd, max_id: &mut u64| match cmd {
+                    BackendCmd::Play { cmd_id, .. }
+                    | BackendCmd::Stop { cmd_id }
+                    | BackendCmd::SetVolume { cmd_id, .. } => {
+                        *max_id = (*max_id).max(*cmd_id);
+                    }
+                    BackendCmd::Shutdown => {}
+                };
+                if let Some(ref c) = latest_cmd {
+                    record_id(c, &mut max_cmd_id);
+                    if let BackendCmd::SetVolume { cmd_id, volume } = c {
+                        latest_volume = Some((*cmd_id, *volume));
+                        latest_cmd = None;
+                    }
+                }
+                while let Ok(next_cmd) = cmd_rx.try_recv() {
+                    record_id(&next_cmd, &mut max_cmd_id);
+                    match next_cmd {
+                        BackendCmd::Shutdown => {
+                            backend.stop();
+                            return;
+                        }
+                        BackendCmd::SetVolume { cmd_id, volume } => {
+                            latest_volume = Some((cmd_id, volume));
+                        }
+                        other => {
+                            latest_cmd = Some(other);
+                        }
+                    }
+                }
+
+                if let Some((_, vol)) = latest_volume {
+                    backend.set_volume(vol);
+                }
+                if let Some(cmd) = latest_cmd {
+                    match cmd {
+                        BackendCmd::Play { source, volume, .. } => {
+                            if let Err(err) = backend.play(source, volume) {
+                                if let Ok(mut guard) = runtime_error.lock() {
+                                    *guard = Some(err);
+                                }
+                            }
+                        }
+                        BackendCmd::Stop { .. } => {
+                            backend.stop();
+                        }
+                        BackendCmd::SetVolume { volume, .. } => {
+                            backend.set_volume(volume);
+                        }
+                        BackendCmd::Shutdown => {
+                            backend.stop();
+                            return;
+                        }
+                    }
+                }
+                if let Some(err) = backend.poll_error() {
+                    if let Ok(mut guard) = runtime_error.lock() {
+                        *guard = Some(err);
+                    }
+                }
+                if max_cmd_id > 0 {
+                    ack_cmd.fetch_max(max_cmd_id, Ordering::Release);
+                }
+            }
+            backend.stop();
+        });
 }
 
 /// A recording, read from a position and resampled to the output rate.
@@ -526,6 +873,18 @@ impl ResampledSource {
     ///
     /// Returns `false` when the recording has nothing more to give.
     fn fill(&mut self) -> bool {
+        if self.delay > 0 {
+            // Emit leading reference-timeline silence inside fill() so both
+            // Iterator::next (solo playback) and next_frame (mix) align identically.
+            let emit_frames = self.delay.min(BLOCK as u64) as usize;
+            self.delay -= emit_frames as u64;
+            let zeros = emit_frames * self.channels as usize;
+            self.ready.reserve(zeros);
+            for _ in 0..zeros {
+                self.ready.push_back(0.0);
+            }
+            return true;
+        }
         if self.finished {
             return false;
         }
@@ -584,16 +943,6 @@ impl ResampledSource {
     fn next_frame(&mut self, out: &mut [f32]) -> bool {
         let channels = self.channels as usize;
         loop {
-            // The recording has not started yet on the reference timeline: the frame
-            // is silence, and it is silence that the mix adds to the other
-            // recordings rather than the end of this one.
-            if self.delay > 0 {
-                self.delay -= 1;
-                for sample in out.iter_mut().take(channels) {
-                    *sample = 0.0;
-                }
-                return true;
-            }
             if self.ready.len() >= channels {
                 for sample in out.iter_mut().take(channels) {
                     *sample = self.ready.pop_front().unwrap_or(0.0);
@@ -1111,5 +1460,170 @@ mod tests {
             (updated - 0.1 * 0.5f32.sqrt()).abs() < 1e-4,
             "live update should reduce sample to 0.25x, got {updated}"
         );
+    }
+
+    #[test]
+    fn p1_05_resampled_source_iterator_emits_leading_silence_before_target_start() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let rate = 8000u32;
+        let a = dir.path().join("target.wav");
+        constant(&a, 0.5, rate as usize, rate);
+
+        let offset = 0.25;
+        let model = LinearModel::new(1.0, offset);
+        let mut source = ResampledSource::open(&a, 0.0, rate, Some(&model)).expect("open");
+
+        let expected_silence = (offset * rate as f64).round() as usize;
+        for frame in 0..expected_silence {
+            let sample = source.next().expect("leading silence sample");
+            assert!(
+                sample.abs() < 1e-6,
+                "ResampledSource skipped leading silence at frame {frame}: got {sample}"
+            );
+        }
+        let first_audio = source.next().expect("audio sample after delay");
+        assert!(
+            (first_audio - 0.5).abs() < 0.05,
+            "expected ~0.5 after delay, got {first_audio}"
+        );
+    }
+
+    #[test]
+    fn p1_07_stalled_backend_never_blocks_stop_seek_or_voice_switch() {
+        struct StalledBackend {
+            gate: Arc<Mutex<()>>,
+        }
+        impl AudioBackend for StalledBackend {
+            fn sample_rate(&self) -> u32 {
+                8_000
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn init_error(&self) -> Option<&str> {
+                None
+            }
+            fn play(
+                &mut self,
+                _source: Box<dyn Source<Item = f32> + Send>,
+                _volume: f32,
+            ) -> Result<(), String> {
+                let _hold = self.gate.lock();
+                Ok(())
+            }
+            fn stop(&mut self) {
+                let _hold = self.gate.lock();
+            }
+            fn set_volume(&mut self, _volume: f32) {}
+        }
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let a = dir.path().join("a.wav");
+        tone(&a, 8_000, 2.0, 220.0);
+
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.lock().unwrap();
+        let mut player = Player::with_backend(StalledBackend {
+            gate: Arc::clone(&gate),
+        });
+
+        let started = Instant::now();
+        player
+            .play_reference(&a, 0.0)
+            .expect("play succeeds non-blocking");
+        assert!(player.is_playing());
+        // Switch voice & stop while the backend is completely deadlocked on `gate`.
+        player
+            .play_reference(&a, 0.5)
+            .expect("seek/switch non-blocking");
+        player.stop();
+        assert!(!player.is_playing());
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "stop/switch blocked GUI thread for {:?}",
+            started.elapsed()
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn p1_07_position_follows_consumed_frames_not_wall_clock() {
+        struct PullingBackend {
+            held: Arc<Mutex<Option<Box<dyn Source<Item = f32> + Send>>>>,
+        }
+        impl AudioBackend for PullingBackend {
+            fn sample_rate(&self) -> u32 {
+                8_000
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn init_error(&self) -> Option<&str> {
+                None
+            }
+            fn play(
+                &mut self,
+                mut source: Box<dyn Source<Item = f32> + Send>,
+                _volume: f32,
+            ) -> Result<(), String> {
+                // Consume exactly 2,000 mono frames (= 0.25 s at 8 kHz), then hold without draining.
+                for _ in 0..2_000 {
+                    let _ = source.next();
+                }
+                *self.held.lock().unwrap() = Some(source);
+                Ok(())
+            }
+            fn stop(&mut self) {
+                *self.held.lock().unwrap() = None;
+            }
+            fn set_volume(&mut self, _volume: f32) {}
+        }
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let a = dir.path().join("a.wav");
+        tone(&a, 8_000, 2.0, 220.0);
+
+        let held = Arc::new(Mutex::new(None));
+        let mut player = Player::with_backend(PullingBackend {
+            held: Arc::clone(&held),
+        });
+        player.play_reference(&a, 1.0).expect("play");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && player.position() < 1.24 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Sleep 120 ms with zero additional frames consumed: position MUST stay pinned at 1.25 s.
+        std::thread::sleep(Duration::from_millis(120));
+        let pos = player.position();
+        assert!(
+            (pos - 1.25).abs() < 1e-3,
+            "position drifted away from consumed frames (got {pos}, expected 1.25)"
+        );
+        player.stop();
+    }
+
+    #[test]
+    fn live_audio_device_stop_and_switch_do_not_freeze() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let a = dir.path().join("a.wav");
+        tone(&a, 48_000, 2.0, 220.0);
+
+        let mut player = Player::new();
+        if !player.is_available() {
+            return;
+        }
+        let t0 = Instant::now();
+        player.play_reference(&a, 0.0).expect("start play");
+        std::thread::sleep(Duration::from_millis(40));
+        player.play_reference(&a, 0.5).expect("voice/seek switch");
+        std::thread::sleep(Duration::from_millis(20));
+        player.stop();
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "live device switch/stop took too long: {:?}",
+            t0.elapsed()
+        );
+        assert!(!player.is_playing());
     }
 }
