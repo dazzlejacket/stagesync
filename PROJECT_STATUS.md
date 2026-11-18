@@ -376,13 +376,20 @@ construction. No Python, no network, no checked-in media.
 | `tests/alignment_tests.rs` | 12 | offsets (positive, negative, multi-hour), drift (+10, +35, −35, +1000 ppm), sample-rate mismatch, level difference, EQ + noise, repeated choruses, head/tail silence, the log-mel cross-check as an independent method. |
 | `tests/drift_tests.rs` | 6 | the drift verdict: the waveform estimator on a short recording, the waveform correcting an envelope estimate that looks precise but is not, offset-only on request, the hold-out probes being genuine hold-out positions, the applied model agreeing with the waveform measurements, and the hold-out drift-error measurement having **no systematic bias**. |
 | `tests/dsp_tests.rs` | 18 | the correlation, the peak finding, the model and the masking. |
+| `tests/gap_alignment_tests.rs` | 4 | a recording with a hole in it, and the hole being reported rather than filled. |
+| `tests/merged_timeline_tests.rs` | 6 | the merged reference timeline, its ownership plan and its gaps. |
+| `tests/mixer_tests.rs` | **27** | the mixer: the levels, the stereo channels, the pan laws, the faders, the mute and the solo, the clipping protection, the loudness match, the containers, the monitoring modes, the placement of a recording on the timeline and the immutability of the recordings. See §12.4. |
 | `tests/render_tests.rs` | 21 | render determinism, no NaNs, no clipping, stereo channel relationship, int16 level, beyond-reference tails, input immutability, the merged timeline, the pitch shift, WAV round trip, timeline silence, the recorder gap, the **atomic write** (an unfinished write leaves nothing behind) and **two recordings with the same name being refused**. |
+| `tests/repair_regressions.rs` | 21 | the defects the earlier audits found, one test each, so that they stay found. |
 | `tests/robustness_tests.rs` | 12 | non-audio / empty / missing file rejected, truncated WAV, too-short source, cancellation before and during analysis, a shared cancellation token, AAC/M4A via ffmpeg, and a **2-hour recording handled without loading it whole**. |
-| core unit tests (in the library) | 13 | the DSP, the window extractor and the drift assessment. |
-| `crates/stagesync-desktop` unit tests | 29 | the desktop crate's painters and its state helpers, and the head-less layout test. |
+| `tests/short_source_tests.rs` | 6 | the gate on the fine fit, the median offset and the tail of a short recording. |
+| `tests/spectral_timing_tests.rs` | 5 | the log-mel cross-check, and the rate of the file being indexed. |
+| core unit tests (in the library) | 41 | the DSP, the window extractor, the drift assessment, the RF64 writer and the reader. |
+| `crates/stagesync-desktop` unit tests | 47 | the desktop crate's painters and its state helpers, the head-less layout test, and the preview's mixing. |
+| `crates/stagesync-desktop/tests/mixer_workflow.rs` | 6 | the mixer panel: a row per recording, the mute, the solo, the monitoring modes, the predicted level and the exported mix. |
 | `crates/stagesync-desktop/tests/platform_tests.rs` | 16 | the platform adapter and the persisted settings. |
 | `crates/stagesync-desktop/tests/workflow.rs` | 6 | the desktop workflow end to end, without a window. |
-| **Total** | **121** | all passing. |
+| **Total** | **254** | all passing. |
 
 The 2-hour test is worth calling out: it writes a >100 MB file, streams the *second*
 hour of it out of the reference, and asserts that the coarse lock finds the offset at
@@ -518,25 +525,33 @@ cargo test --workspace                                 → 0
 cargo build --release --workspace                      → 0
 ```
 
-All four were run on **Windows 11 x64** with Rust 1.99.1.
+All four were run on **Windows 11 x64** with Rust 1.99.1, after the mixer was
+added. The test run was made **from a cold cache** — the three crates were cleaned
+first — and in parallel.
 
 Test counts as they were run:
 
 ```
 stagesync-cli    unit tests     0 passed
-stagesync-core   unit tests    15 passed
+stagesync-core   unit tests    41 passed
 stagesync-core   alignment     12 passed
 stagesync-core   drift          6 passed
 stagesync-core   dsp           18 passed
+stagesync-core   gap alignment  4 passed
+stagesync-core   merged timeline 6 passed
+stagesync-core   mixer         27 passed
 stagesync-core   render        21 passed
 stagesync-core   repair regressions 21 passed
 stagesync-core   robustness    12 passed
+stagesync-core   short source   6 passed
+stagesync-core   spectral timing 5 passed
 stagesync-core   doc tests      0 passed
-stagesync-desktop unit tests   30 passed
+stagesync-desktop unit tests   47 passed
+stagesync-desktop mixer workflow 6 passed
 stagesync-desktop platform     16 passed
 stagesync-desktop workflow      6 passed
 stagesync-desktop doc tests     0 passed
-                          total 157 passed, 0 failed
+                          total 254 passed, 0 failed
 ```
 
 The suite is hermetic: every test generates the fixtures it needs, each test
