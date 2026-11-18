@@ -129,7 +129,7 @@ pub struct RenderResult {
 
 /// Source-to-output geometry for one source.
 #[derive(Debug, Clone, Copy)]
-struct Geometry {
+pub(crate) struct Geometry {
     /// Output frames advanced per source frame.
     alpha: f64,
     /// Source frame position of output frame 0.
@@ -155,7 +155,15 @@ fn geometry_source_aligned(model: &LinearModel, source_rate: u32, output_rate: u
 }
 
 /// Geometry for a reference-timeline render.
-fn geometry_timeline(model: &LinearModel, source_rate: u32, output_rate: u32) -> Geometry {
+///
+/// The map is the one the mixer uses as well: output frame `n` is taken from source
+/// position `alpha * n + gamma`, so the source's material lands on the reference
+/// timeline at the position its model says it belongs at.
+pub(crate) fn geometry_timeline(
+    model: &LinearModel,
+    source_rate: u32,
+    output_rate: u32,
+) -> Geometry {
     Geometry {
         alpha: source_rate as f64 / (output_rate as f64 * model.scale),
         gamma: -model.offset * source_rate as f64 / model.scale,
@@ -183,7 +191,7 @@ fn output_frames_for(source_frames: u64, geom: Geometry) -> u64 {
 /// This is used when the map needs no rate change and lands on whole samples. The
 /// samples are copied untouched — no filter, no interpolation, no ringing — which is
 /// what "an offset-only correction performs no resampling" has to mean.
-struct SampleShifter {
+pub(crate) struct SampleShifter {
     shift: i64,
     buffer: VecDeque<f32>,
     /// Absolute index of the first buffered sample.
@@ -266,7 +274,7 @@ impl SampleShifter {
 }
 
 /// One channel's position map: either a resampler or an exact copy.
-enum Processor {
+pub(crate) enum Processor {
     /// Interpolated from input position `alpha * n + gamma`.
     Resample(StreamingResampler),
     /// Copied from input frame `n + shift`.
@@ -274,7 +282,18 @@ enum Processor {
 }
 
 impl Processor {
-    fn new(geom: Geometry, options: &RenderOptions, start_output: i64, limit: Option<u64>) -> Self {
+    /// Create a processor for a position map.
+    ///
+    /// `start_output` is the first output frame the processor may produce and `limit`
+    /// is the number of output frames it may produce in total. The limit is what keeps
+    /// the tail of the filter from being written past the end of the material.
+    pub(crate) fn new(
+        geom: Geometry,
+        taps: usize,
+        phases: usize,
+        start_output: i64,
+        limit: Option<u64>,
+    ) -> Self {
         if geom.is_unity_copy() {
             let mut shifter = SampleShifter::new(geom.gamma.round() as i64);
             shifter.set_next_output(start_output);
@@ -283,8 +302,7 @@ impl Processor {
             }
             Processor::Copy(shifter)
         } else {
-            let mut resampler =
-                StreamingResampler::new(geom.alpha, geom.gamma, options.taps, options.phases);
+            let mut resampler = StreamingResampler::new(geom.alpha, geom.gamma, taps, phases);
             resampler.set_next_output(start_output);
             if let Some(limit) = limit {
                 resampler.set_output_limit(limit);
@@ -293,14 +311,16 @@ impl Processor {
         }
     }
 
-    fn push(&mut self, samples: &[f32]) -> Vec<f32> {
+    /// Push input samples and return the output frames that are now available.
+    pub(crate) fn push(&mut self, samples: &[f32]) -> Vec<f32> {
         match self {
             Processor::Resample(r) => r.push(samples),
             Processor::Copy(c) => c.push(samples),
         }
     }
 
-    fn flush(&mut self) -> Vec<f32> {
+    /// Finish the map and return the remaining output frames.
+    pub(crate) fn flush(&mut self) -> Vec<f32> {
         match self {
             Processor::Resample(r) => r.flush(),
             Processor::Copy(c) => c.flush(),
@@ -327,7 +347,7 @@ impl ChannelBank {
         limit: Option<u64>,
     ) -> Self {
         let processors = (0..channels)
-            .map(|_| Processor::new(geom, options, start_output, limit))
+            .map(|_| Processor::new(geom, options.taps, options.phases, start_output, limit))
             .collect();
         let resampled = !geom.is_unity_copy();
         Self {
@@ -529,15 +549,19 @@ pub fn render_reference_timeline(
     })
 }
 
-/// A sequential cursor over one source, used by the merged timeline renderer.
+/// A sequential cursor over one source, used by the merged timeline renderer and by
+/// the mixer.
 ///
 /// The cursor keeps one processor per channel of the source, so a stereo source keeps
 /// its two channels, and it is driven by that source's **own** sample rate.
-struct SourceCursor {
+pub(crate) struct SourceCursor {
     decoder: AudioDecoder,
     /// The position map this source's material is read through.
     geometry: Geometry,
-    options: RenderOptions,
+    /// Resampler taps.
+    taps: usize,
+    /// Resampler phases.
+    phases: usize,
     /// The output frame the source's material starts at.
     start_frame: i64,
     /// One position map per channel of the source.
@@ -554,27 +578,42 @@ struct SourceCursor {
     /// away and read from further along the recording than the plan asked for,
     /// which is how a merged timeline ends up short and displaced.
     pending_start: i64,
+    /// The number of output frames the source's material may occupy.
+    ///
+    /// The limit is what stops the tail of the resampling filter from being written
+    /// past the end of the source's covered range: a source that ends at reference
+    /// time 10 s must not contribute anything at 10 s and a half.
+    limit: Option<u64>,
     finished: bool,
     block_frames: usize,
 }
 
 impl SourceCursor {
-    fn new(
+    /// Create a cursor over one source.
+    ///
+    /// `start_frame` is the output frame the source's material starts at, and `limit`
+    /// is the number of output frames it may occupy.
+    pub(crate) fn new(
         decoder: AudioDecoder,
         geom: Geometry,
         start_frame: i64,
-        options: &RenderOptions,
+        limit: Option<u64>,
+        taps: usize,
+        phases: usize,
+        block_frames: usize,
     ) -> Self {
         Self {
             decoder,
             geometry: geom,
-            options: options.clone(),
+            taps,
+            phases,
             start_frame,
             processors: Vec::new(),
             pending: Vec::new(),
             pending_start: start_frame,
+            limit,
             finished: false,
-            block_frames: options.block_frames,
+            block_frames,
         }
     }
 
@@ -598,7 +637,15 @@ impl SourceCursor {
                 // frame only one channel has is not a frame of the recording.
                 let channels = block.planes.len().max(1);
                 self.processors = (0..channels)
-                    .map(|_| Processor::new(self.geometry, &self.options, self.start_frame, None))
+                    .map(|_| {
+                        Processor::new(
+                            self.geometry,
+                            self.taps,
+                            self.phases,
+                            self.start_frame,
+                            self.limit,
+                        )
+                    })
                     .collect();
                 self.pending = vec![VecDeque::new(); channels];
             }
@@ -625,7 +672,13 @@ impl SourceCursor {
     /// Every channel returns the **same number of frames**: a frame that one channel
     /// does not have is not a frame of the recording, and the writer requires the
     /// planes it is given to be of equal length.
-    fn take(&mut self, from: i64, to: i64) -> Result<Vec<Vec<f32>>> {
+    ///
+    /// The frames handed over always belong to the positions the caller asked for.
+    /// A cursor that begins later than `from` — a recording that starts part-way
+    /// through the timeline — pads the frames before its start with silence, so the
+    /// material lands where the position map says it lands and not at the start of
+    /// the caller's block.
+    pub(crate) fn take(&mut self, from: i64, to: i64) -> Result<Vec<Vec<f32>>> {
         self.fill_to(to)?;
 
         // The frames that lie before `from` are discarded.
@@ -642,11 +695,18 @@ impl SourceCursor {
 
         // Only the frames every channel holds are frames of the recording.
         let want = (to - from).max(0) as usize;
-        let count = want.min(self.pending_len());
+
+        // The cursor may begin after the span the caller asked for: the recording
+        // does not cover the frames before its start, and those frames are silence.
+        // They are padded here, so the frames the caller receives are the frames it
+        // asked for and not the ones that happen to be in hand.
+        let pad = (self.pending_start - from).max(0) as usize;
+        let count = want.saturating_sub(pad).min(self.pending_len());
 
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(self.pending.len());
         for pending in self.pending.iter_mut() {
-            let mut plane = Vec::with_capacity(count);
+            let mut plane = Vec::with_capacity(pad + count);
+            plane.resize(pad, 0.0);
             for _ in 0..count {
                 match pending.pop_front() {
                     Some(v) => plane.push(v),
@@ -798,7 +858,15 @@ pub fn render_merged_timeline(
                             alignment.source.file_name
                         )
                     })?;
-                    cursors[index] = Some(SourceCursor::new(decoder, geom, start as i64, options));
+                    cursors[index] = Some(SourceCursor::new(
+                        decoder,
+                        geom,
+                        start as i64,
+                        None,
+                        options.taps,
+                        options.phases,
+                        options.block_frames,
+                    ));
                 }
                 let cursor_ref = cursors[index].as_mut().expect("cursor just created");
                 let frames = cursor_ref.take(start as i64, end as i64)?;

@@ -6,11 +6,13 @@
 pub mod decode;
 pub mod hash;
 pub mod peaks;
+pub mod rf64;
 pub mod wav;
 pub mod windows;
 
 pub use decode::{AudioDecoder, DecodedBlock, SourceMeta};
 pub use hash::sha256_file;
 pub use peaks::{PeakCache, PeakLevel, PeakWindow};
+pub use rf64::{Container, ContainerReader, Rf64Writer};
 pub use wav::{ensure_wav_size_fits, WavFormat, WavReader, WavWriter, RIFF_MAX_DATA_BYTES};
 pub use windows::{extract_windows, WindowRequest};

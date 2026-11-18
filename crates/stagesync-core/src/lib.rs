@@ -8,6 +8,7 @@
 //! * [`matching`]  — coarse global lock, fine alignment, robust drift model, segmentation.
 //! * [`resample`]  — deterministic polyphase windowed-sinc variable-rate resampler.
 //! * [`render`]    — correction rendering (source-aligned and reference-timeline layouts).
+//! * [`mixer`]    — real multi-track mixing: pan, gain, meters, clipping protection.
 //! * [`calibration`] — end-to-end calibration loop (measure → correct → re-measure).
 //! * [`verify`]    — independent holdout validation (waveform GCC-PHAT).
 //! * [`export`]    — WAV / CSV / JSON / graph artefacts.
@@ -33,6 +34,7 @@ pub mod calibration;
 pub mod export;
 pub mod features;
 pub mod matching;
+pub mod mixer;
 pub mod pipeline;
 pub mod render;
 pub mod resample;

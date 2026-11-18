@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 
 use super::hash::sha256_file;
+use super::rf64::{Container, Rf64Writer};
 
 /// Output sample encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +74,18 @@ pub fn ensure_wav_size_fits(frames: u64, channels: usize, format: WavFormat) -> 
     Ok(())
 }
 
+/// The writer a file is written through.
+///
+/// The two are not interchangeable: the RIFF writer hands its header to the RIFF
+/// library, while the RF64 writer writes the header itself, because the whole
+/// point of RF64 is a header the RIFF library cannot produce.
+enum WriterInner {
+    /// An ordinary RIFF/WAVE file.
+    Riff(hound::WavWriter<BufWriter<File>>),
+    /// An RF64 or BW64 file.
+    Extended(Rf64Writer),
+}
+
 /// Streaming WAV writer that accepts blocks of planar frames.
 ///
 /// The samples are written to a temporary file beside the destination, and that
@@ -82,13 +95,15 @@ pub fn ensure_wav_size_fits(frames: u64, channels: usize, format: WavFormat) -> 
 /// when the writer is dropped.
 pub struct WavWriter {
     /// The writer itself, taken out when the file is finalised.
-    writer: Option<hound::WavWriter<BufWriter<File>>>,
+    writer: Option<WriterInner>,
     format: WavFormat,
     channels: usize,
     sample_rate: u32,
     frames_written: u64,
     /// Bytes of audio payload written so far, for the RIFF size guard.
     data_bytes: u64,
+    /// The container the file is written in.
+    container: Container,
     /// Where the finished file belongs.
     destination: PathBuf,
     /// The file being written to.
@@ -146,11 +161,30 @@ fn create_temporary(destination: &Path) -> Result<(PathBuf, File)> {
 
 impl WavWriter {
     /// Create a new WAV file.
+    ///
+    /// The file is an ordinary RIFF/WAVE file, whose sizes fit in 32 bits. A file
+    /// whose payload would not fit is refused by [`ensure_wav_size_fits`] rather than
+    /// written with a size field that has wrapped.
     pub fn create(
         path: &Path,
         sample_rate: u32,
         channels: usize,
         format: WavFormat,
+    ) -> Result<Self> {
+        Self::create_with_container(path, sample_rate, channels, format, Container::Riff)
+    }
+
+    /// Create a new WAV file in a named container.
+    ///
+    /// [`Container::Rf64`] and [`Container::Bw64`] hold a payload of any size: their
+    /// header carries the true sizes in 64-bit fields. They are the only way to write
+    /// a recording that is longer than an ordinary WAV file can describe.
+    pub fn create_with_container(
+        path: &Path,
+        sample_rate: u32,
+        channels: usize,
+        format: WavFormat,
+        container: Container,
     ) -> Result<Self> {
         anyhow::ensure!(channels > 0, "cannot write a WAV with zero channels");
         anyhow::ensure!(
@@ -173,26 +207,41 @@ impl WavWriter {
         // The destination is named in the error rather than the temporary file: the
         // temporary name is a hidden, process-specific one that the user did not ask
         // for and cannot act on.
-        let writer = hound::WavWriter::new(BufWriter::with_capacity(1 << 20, file), spec)
-            .with_context(|| format!("failed to initialise WAV file: {}", path.display()))?;
+        let inner = match container {
+            Container::Riff => {
+                let writer = hound::WavWriter::new(BufWriter::with_capacity(1 << 20, file), spec)
+                    .with_context(|| {
+                    format!("failed to initialise WAV file: {}", path.display())
+                })?;
+                WriterInner::Riff(writer)
+            }
+            Container::Rf64 | Container::Bw64 => WriterInner::Extended(Rf64Writer::with_file(
+                file,
+                temporary.clone(),
+                path.to_path_buf(),
+                sample_rate,
+                channels,
+                format,
+                container,
+            )?),
+        };
         Ok(Self {
-            writer: Some(writer),
+            writer: Some(inner),
             format,
             channels,
             sample_rate,
             frames_written: 0,
             data_bytes: 0,
+            container,
             destination: path.to_path_buf(),
             temporary,
             committed: false,
         })
     }
 
-    /// The writer, while the file is still being written.
-    fn writer(&mut self) -> Result<&mut hound::WavWriter<BufWriter<File>>> {
-        self.writer
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("the WAV file has already been finalised"))
+    /// The container the file is written in.
+    pub fn container(&self) -> Container {
+        self.container
     }
 
     /// Sample rate of the output file.
@@ -223,11 +272,11 @@ impl WavWriter {
             .saturating_mul(self.channels as u64)
             .saturating_mul(self.format.bytes_per_sample());
         let total = self.data_bytes.saturating_add(bytes);
-        if total > RIFF_MAX_DATA_BYTES {
+        if total > RIFF_MAX_DATA_BYTES && self.container == Container::Riff {
             anyhow::bail!(
                 "the output reached {} bytes of audio, which is more than an ordinary \
-                 RIFF/WAVE file can hold ({} bytes). Export a shorter span, or convert \
-                 the file to RF64 first.",
+                 RIFF/WAVE file can hold ({} bytes). Write the file in the RF64 container \
+                 instead.",
                 total,
                 RIFF_MAX_DATA_BYTES
             );
@@ -255,23 +304,27 @@ impl WavWriter {
             );
         }
         self.reserve_data_bytes(n)?;
-        match self.format {
-            WavFormat::Float32 => {
-                for i in 0..n {
-                    for p in planes {
-                        self.writer()?.write_sample(p.as_ref()[i])?;
+        match self.writer.as_mut() {
+            Some(WriterInner::Riff(writer)) => match self.format {
+                WavFormat::Float32 => {
+                    for i in 0..n {
+                        for p in planes {
+                            writer.write_sample(p.as_ref()[i])?;
+                        }
                     }
                 }
-            }
-            WavFormat::Int16 => {
-                for i in 0..n {
-                    for p in planes {
-                        let v = (p.as_ref()[i] * 32767.0).round();
-                        let v = v.clamp(-32768.0, 32767.0);
-                        self.writer()?.write_sample(v as i16)?;
+                WavFormat::Int16 => {
+                    for i in 0..n {
+                        for p in planes {
+                            let v = (p.as_ref()[i] * 32767.0).round();
+                            let v = v.clamp(-32768.0, 32767.0);
+                            writer.write_sample(v as i16)?;
+                        }
                     }
                 }
-            }
+            },
+            Some(WriterInner::Extended(writer)) => writer.write_planar(planes)?,
+            None => anyhow::bail!("the WAV file has already been finalised"),
         }
         self.frames_written += n as u64;
         Ok(())
@@ -280,21 +333,25 @@ impl WavWriter {
     /// Write `frames` frames of digital silence.
     pub fn write_silence(&mut self, frames: usize) -> Result<()> {
         self.reserve_data_bytes(frames)?;
-        match self.format {
-            WavFormat::Float32 => {
-                for _ in 0..frames {
-                    for _ in 0..self.channels {
-                        self.writer()?.write_sample(0.0f32)?;
+        match self.writer.as_mut() {
+            Some(WriterInner::Riff(writer)) => match self.format {
+                WavFormat::Float32 => {
+                    for _ in 0..frames {
+                        for _ in 0..self.channels {
+                            writer.write_sample(0.0f32)?;
+                        }
                     }
                 }
-            }
-            WavFormat::Int16 => {
-                for _ in 0..frames {
-                    for _ in 0..self.channels {
-                        self.writer()?.write_sample(0i16)?;
+                WavFormat::Int16 => {
+                    for _ in 0..frames {
+                        for _ in 0..self.channels {
+                            writer.write_sample(0i16)?;
+                        }
                     }
                 }
-            }
+            },
+            Some(WriterInner::Extended(writer)) => writer.write_silence(frames)?,
+            None => anyhow::bail!("the WAV file has already been finalised"),
         }
         self.frames_written += frames as u64;
         Ok(())
@@ -306,18 +363,33 @@ impl WavWriter {
             .writer
             .take()
             .ok_or_else(|| anyhow::anyhow!("the WAV file has already been finalised"))?;
-        writer.finalize().with_context(|| {
-            format!(
-                "failed to finalise WAV file: {}",
-                self.destination.display()
-            )
-        })?;
-        std::fs::rename(&self.temporary, &self.destination).with_context(|| {
-            format!(
-                "failed to move the finished WAV file into place at {}",
-                self.destination.display()
-            )
-        })?;
+        match writer {
+            WriterInner::Riff(writer) => {
+                writer.finalize().with_context(|| {
+                    format!(
+                        "failed to finalise WAV file: {}",
+                        self.destination.display()
+                    )
+                })?;
+                std::fs::rename(&self.temporary, &self.destination).with_context(|| {
+                    format!(
+                        "failed to move the finished WAV file into place at {}",
+                        self.destination.display()
+                    )
+                })?;
+            }
+            WriterInner::Extended(writer) => {
+                // The extended writer owns the temporary file and moves it into place
+                // itself, because it has to patch the header before the file is
+                // complete.
+                writer.finalize().with_context(|| {
+                    format!(
+                        "failed to finalise WAV file: {}",
+                        self.destination.display()
+                    )
+                })?;
+            }
+        }
         self.committed = true;
         Ok(())
     }
