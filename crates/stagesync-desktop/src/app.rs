@@ -1966,6 +1966,55 @@ impl StageSyncApp {
             })
             .unwrap_or(600.0);
 
+        let playhead_anchor = self.playhead;
+        let muted_color = self.palette.text_muted;
+        let draw_view_controls =
+            |ui: &mut egui::Ui, view_start: &mut f64, view_end: &mut f64| -> Option<f64> {
+                let mut seek_to = None;
+                if ui
+                    .button("Fit")
+                    .on_hover_text("Show whole timeline (F)")
+                    .clicked()
+                {
+                    *view_start = 0.0;
+                    *view_end = duration;
+                }
+                if ui.button("+").on_hover_text("Zoom in (+)").clicked() {
+                    let span = (*view_end - *view_start).max(1e-3);
+                    let new_span = (span * 0.5).clamp(0.05, 24.0 * 3600.0);
+                    let ratio = ((playhead_anchor - *view_start) / span).clamp(-4.0, 4.0);
+                    *view_start = playhead_anchor - ratio * new_span;
+                    *view_end = *view_start + new_span;
+                }
+                if ui.button("-").on_hover_text("Zoom out (-)").clicked() {
+                    let span = (*view_end - *view_start).max(1e-3);
+                    let new_span = (span * 2.0).clamp(0.05, 24.0 * 3600.0);
+                    let ratio = ((playhead_anchor - *view_start) / span).clamp(-4.0, 4.0);
+                    *view_start = playhead_anchor - ratio * new_span;
+                    *view_end = *view_start + new_span;
+                }
+                if ui
+                    .button("Start")
+                    .on_hover_text("Jump to 0:00:00 (Home)")
+                    .clicked()
+                {
+                    seek_to = Some(0.0);
+                    *view_start = 0.0;
+                }
+                ui.colored_label(
+                    muted_color,
+                    format!(
+                        "{:.1}s / {:.1}s",
+                        (*view_end - *view_start).max(0.0),
+                        duration
+                    ),
+                );
+                seek_to
+            };
+
+        let compact_transport = ui.available_width() < 1180.0;
+        let mut requested_seek: Option<f64> = None;
+
         ui.horizontal_wrapped(|ui| {
             let playing = self.player.is_playing();
             let play_btn =
@@ -2039,39 +2088,31 @@ impl StageSyncApp {
             ui.separator();
             ui.monospace(format_timecode(self.playhead));
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("Fit")
-                    .on_hover_text("Show whole timeline (F)")
-                    .clicked()
-                {
-                    self.view_start = 0.0;
-                    self.view_end = duration;
-                }
-                if ui.button("+").on_hover_text("Zoom in (+)").clicked() {
-                    self.zoom_view(1.0, self.playhead);
-                }
-                if ui.button("-").on_hover_text("Zoom out (-)").clicked() {
-                    self.zoom_view(-1.0, self.playhead);
-                }
-                if ui
-                    .button("Start")
-                    .on_hover_text("Jump to 0:00:00 (Home)")
-                    .clicked()
-                {
-                    self.seek_playhead(0.0);
-                    self.view_start = 0.0;
-                }
-                ui.colored_label(
-                    self.palette.text_muted,
-                    format!(
-                        "{:.1}s / {:.1}s",
-                        (self.view_end - self.view_start).max(0.0),
-                        duration
-                    ),
-                );
-            });
+            if !compact_transport {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(s) =
+                        draw_view_controls(ui, &mut self.view_start, &mut self.view_end)
+                    {
+                        requested_seek = Some(s);
+                    }
+                });
+            }
         });
+
+        if compact_transport {
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(s) =
+                        draw_view_controls(ui, &mut self.view_start, &mut self.view_end)
+                    {
+                        requested_seek = Some(s);
+                    }
+                });
+            });
+        }
+        if let Some(pos) = requested_seek {
+            self.seek_playhead(pos);
+        }
 
         if changed {
             self.autogain_cache = None;
@@ -2243,10 +2284,11 @@ impl StageSyncApp {
                             match &entry.meta {
                                 Some(meta) => {
                                     ui.label(format!(
-                                        "{} Hz · {} ch · {}",
+                                        "{} Hz · {} ch · {} · {}",
                                         meta.sample_rate,
                                         meta.channels,
-                                        format_duration(meta.duration_secs)
+                                        format_duration(meta.duration_secs),
+                                        meta.codec
                                     ));
                                 }
                                 None => {
@@ -2282,13 +2324,43 @@ impl StageSyncApp {
                             if let Some(metrics) = metrics {
                                 wrapped(ui, metrics_line(&metrics));
                             }
+                            let pending_nudge = self.nudges.get(index).copied().unwrap_or(0.0);
+                            if pending_nudge.abs() > 1e-9 {
+                                ui.colored_label(
+                                    self.palette.warn,
+                                    format!(
+                                        "Pending nudge {:+.1} ms (export applies; click Apply to re-check)",
+                                        pending_nudge * 1000.0
+                                    ),
+                                );
+                            }
+                            if self.has_unapplied_anchor(index) {
+                                ui.colored_label(
+                                    self.palette.error,
+                                    "Unapplied manual anchor — click Apply anchor",
+                                );
+                            }
+                            let alignment = self.report.as_ref().and_then(|r| r.sources.get(index));
                             let status = status_for(self.report.as_ref(), index);
                             let verification = verification_for(self.report.as_ref(), index);
-                            ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(self.palette.text_muted, status.label());
-                                ui.separator();
-                                ui.colored_label(self.palette.text_muted, verification.label());
-                            });
+                            if alignment.is_none() {
+                                ui.colored_label(self.palette.text_muted, "Not analysed");
+                            } else if alignment.and_then(|a| a.model()).is_none() {
+                                ui.colored_label(self.palette.warn, "No reliable match");
+                            } else {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.colored_label(self.palette.text_muted, status.label());
+                                    if self.export_outcome.is_some()
+                                        || alignment.and_then(|a| a.holdout.as_ref()).is_some()
+                                    {
+                                        ui.separator();
+                                        ui.colored_label(
+                                            self.palette.text_muted,
+                                            verification.label(),
+                                        );
+                                    }
+                                });
+                            }
                             ui.horizontal(|ui| {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
@@ -2957,6 +3029,8 @@ impl StageSyncApp {
                 }),
                 segments,
                 selected: self.selected_target_index() == Some(index),
+                pending_nudge_secs: self.nudges.get(index).copied().unwrap_or(0.0),
+                unapplied_anchor: self.has_unapplied_anchor(index),
             });
         }
 

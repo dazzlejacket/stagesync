@@ -126,6 +126,9 @@ impl MixerState {
         let mut left = 0f32;
         let mut right = 0f32;
         for (track, info) in self.tracks.iter().zip(infos.iter()) {
+            if !info.aligned {
+                continue;
+            }
             let gain = track.effective_gain(solo_active);
             if gain == 0.0 {
                 continue;
@@ -181,7 +184,8 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
         ui.colored_label(palette.text_muted, state.mode.description());
     });
 
-    // The master fader and the predicted level of the whole mix.
+    // The master fader and the predicted upper-bound level of the aligned mix.
+    let any_aligned = infos.iter().any(|i| i.aligned);
     let (left, right) = state.predicted_output(infos);
     let peak = left.max(right);
     ui.horizontal_wrapped(|ui| {
@@ -196,21 +200,33 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
         {
             state.master_gain = db_to_linear(master_db);
         }
-        ui.label(format!("Predicted output {:.2} dBFS", linear_to_db(peak)));
-        if peak > 1.0 {
+        if !any_aligned {
             ui.colored_label(
-                ui.visuals().error_fg_color,
-                format!(
-                    "The mix may clip: it is predicted to reach {:.2} dBFS.",
-                    linear_to_db(peak)
-                ),
+                palette.text_muted,
+                "Predicted output (align tracks to preview)",
             );
-        } else if let (Some(written), reduction) = (state.last_peak, state.last_gain_reduction_db) {
-            let mut text = format!("Last export {:.2} dBFS", linear_to_db(written));
-            if reduction != 0.0 {
-                text.push_str(&format!(" (protection applied {:.2} dB)", -reduction));
+        } else {
+            ui.label(format!(
+                "Predicted output (upper bound): {:.2} dBFS",
+                linear_to_db(peak)
+            ));
+            if peak > 1.0 {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!(
+                        "The mix may clip: upper bound {:.2} dBFS.",
+                        linear_to_db(peak)
+                    ),
+                );
+            } else if let (Some(written), reduction) =
+                (state.last_peak, state.last_gain_reduction_db)
+            {
+                let mut text = format!("Last export {:.2} dBFS", linear_to_db(written));
+                if reduction != 0.0 {
+                    text.push_str(&format!(" (protection applied {:.2} dB)", -reduction));
+                }
+                ui.label(text);
             }
-            ui.label(text);
         }
     });
 
@@ -388,7 +404,7 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
                     });
 
                     ui.horizontal(|ui| {
-                        ui.colored_label(palette.text_muted, "Meter");
+                        ui.colored_label(palette.text_muted, "File peak");
                         let peak = info.and_then(|i| i.peak).unwrap_or(0.0);
                         let contribution = peak * track.effective_gain(solo_active);
                         meter(ui, contribution, &palette);
@@ -518,6 +534,32 @@ mod tests {
         assert!(
             left > right,
             "the recording was not panned left: {left} and {right}"
+        );
+    }
+
+    #[test]
+    fn unaligned_tracks_are_excluded_from_predicted_output() {
+        let mut state = MixerState::new(2);
+        state.tracks[0].gain = 2.0;
+        state.tracks[1].gain = 2.0;
+        let infos = vec![
+            TrackInfo {
+                name: "mic1.wav".to_string(),
+                peak: Some(0.9),
+                aligned: false,
+                channels: 1,
+            },
+            TrackInfo {
+                name: "mic2.wav".to_string(),
+                peak: Some(0.9),
+                aligned: false,
+                channels: 1,
+            },
+        ];
+        let (l, r) = state.predicted_output(&infos);
+        assert!(
+            l == 0.0 && r == 0.0,
+            "unaligned tracks predicted {l}/{r} instead of 0.0"
         );
     }
 }

@@ -235,10 +235,30 @@ fn populated_ui_supports_dark_light_tabs_and_responsive_sizes() {
         harness.run();
     }
 
-    // Verify compact 960x640 window size stays usable without layout panics.
+    // Verify compact 960x640 window size stays usable without layout panics or overlapping transport labels.
     harness.set_size(egui::vec2(960.0, 640.0));
     harness.run();
     assert!(harness.query_by_label("Analyze").is_some());
+    let tc_rect = harness
+        .query_by_label_contains("0:00:")
+        .expect("timecode readout present at 960x640")
+        .rect();
+    let fit_rect = harness
+        .query_by_label("Fit")
+        .expect("Fit button present at 960x640")
+        .rect();
+    let span_rect = harness
+        .query_by_label_contains("s / ")
+        .expect("view span label present at 960x640")
+        .rect();
+    assert!(
+        !tc_rect.intersects(span_rect) && !tc_rect.intersects(fit_rect),
+        "compact 960x640 transport labels collided: timecode={tc_rect:?}, span={span_rect:?}, fit={fit_rect:?}"
+    );
+    assert!(
+        span_rect.right() <= 960.0 && tc_rect.right() <= 960.0,
+        "compact 960x640 transport overflowed window width: tc={tc_rect:?}, span={span_rect:?}"
+    );
 
     // Also verify default window never leaves an empty/default-setting panic.
     let _ = AppSettings::default();

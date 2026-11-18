@@ -43,6 +43,10 @@ pub struct TargetLane<'a> {
     pub segments: Vec<(f64, f64, SegmentKind)>,
     /// Whether this recording is the one that is selected.
     pub selected: bool,
+    /// Pending un-applied nudge in seconds, highlighted in lane caption when non-zero.
+    pub pending_nudge_secs: f64,
+    /// Whether manual anchor edits await clicking "Apply anchor".
+    pub unapplied_anchor: bool,
 }
 
 /// Everything the waveform timeline needs to draw itself.
@@ -191,11 +195,20 @@ pub fn paint(painter: &Painter, rect: Rect, view: &WaveformView<'_>, palette: &P
             .peaks
             .map(|c| if c.channels >= 2 { " · L/R" } else { "" })
             .unwrap_or("");
-        let caption = if lane.selected {
+        let mut caption = if lane.selected {
             format!("{}{ch_note} · selected", lane.name)
         } else {
             format!("{}{ch_note}", lane.name)
         };
+        if lane.pending_nudge_secs.abs() > 1e-9 {
+            caption.push_str(&format!(
+                "  [PENDING NUDGE {:+.1} ms]",
+                lane.pending_nudge_secs * 1000.0
+            ));
+        }
+        if lane.unapplied_anchor {
+            caption.push_str("  [UNAPPLIED ANCHOR]");
+        }
         paint_caption(painter, rect, y, caption, lane.selected, palette);
         y += CAPTION_HEIGHT;
         paint_target_lane(painter, rect, &x_of, y, lane, view, palette);
@@ -602,17 +615,47 @@ fn paint_ruler(
     }
 }
 
-/// The spacing between ruler ticks, chosen so the labels never collide.
+/// Public wrapper for ruler interval spacing given visible seconds and lane width in pixels.
+pub fn ruler_tick_step(view_secs: f64, width_px: f32) -> f64 {
+    let px_per_sec = width_px.max(1.0) / view_secs.max(1e-6) as f32;
+    tick_step(px_per_sec)
+}
+
+/// The spacing between ruler ticks, chosen so multi-hour concert labels never collide.
 fn tick_step(px_per_sec: f32) -> f64 {
-    const NICE: [f64; 14] = [
-        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 300.0,
+    const NICE: [f64; 21] = [
+        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
+        600.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0,
     ];
+    const MIN_LABEL_PX: f64 = 84.0;
+    let pps = (px_per_sec as f64).max(1e-6);
     for candidate in NICE {
-        if candidate * px_per_sec as f64 >= 70.0 {
+        if candidate * pps >= MIN_LABEL_PX {
             return candidate;
         }
     }
-    NICE[NICE.len() - 1]
+    let mut step = NICE[NICE.len() - 1];
+    while step * pps < MIN_LABEL_PX {
+        step *= 2.0;
+    }
+    step
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concert_ruler_labels_keep_minimum_pixel_separation() {
+        for (duration, width) in [(9_685.0, 420.0f32), (9_685.0, 800.0), (86_400.0, 300.0)] {
+            let step = ruler_tick_step(duration, width);
+            let px_gap = step * (width as f64 / duration);
+            assert!(
+                px_gap >= 84.0,
+                "ruler ticks collapsed to {px_gap:.1} px at {duration}s / {width}px (step={step}s)"
+            );
+        }
+    }
 }
 
 /// A short label for a ruler tick.
