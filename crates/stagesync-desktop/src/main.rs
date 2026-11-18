@@ -93,7 +93,16 @@ fn main() -> anyhow::Result<()> {
         Box::new(move |_cc| {
             let mut application = app::StageSyncApp::new();
             if !files.is_empty() {
-                application.open_files(files);
+                let is_single_project = files.len() == 1
+                    && files[0]
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("stagesync"));
+                if is_single_project {
+                    let _ = application.open_project_path(&files[0]);
+                } else {
+                    application.open_files(files);
+                }
             }
             if analyse {
                 application.analyse_on_start();

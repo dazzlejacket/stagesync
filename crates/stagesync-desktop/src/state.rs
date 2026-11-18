@@ -21,6 +21,14 @@ pub struct FileEntry {
     pub meta: Option<SourceMeta>,
     /// Why the probe failed, if it did.
     pub error: Option<String>,
+    /// `true` when opening a project failed to locate this file on disk.
+    pub missing: bool,
+    /// Warning if the file's size or SHA-256 differs from the saved project.
+    pub modified_warning: Option<String>,
+    /// Expected SHA-256 saved in the project (if loaded from `.stagesync`).
+    pub expected_sha256: Option<String>,
+    /// Expected byte length saved in the project (if loaded from `.stagesync`).
+    pub expected_byte_len: Option<u64>,
 }
 
 impl FileEntry {
@@ -30,6 +38,10 @@ impl FileEntry {
             path,
             meta: None,
             error: None,
+            missing: false,
+            modified_warning: None,
+            expected_sha256: None,
+            expected_byte_len: None,
         }
     }
 

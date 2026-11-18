@@ -31,6 +31,7 @@ use crate::state::{stem, ExportSettings, TaskProgress};
 pub struct Cancelled;
 
 /// Why a background job stopped without producing a result.
+#[derive(Debug)]
 pub enum JobFailure {
     /// The user cancelled the job.
     Cancelled,

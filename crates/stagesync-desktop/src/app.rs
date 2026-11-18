@@ -1,7 +1,7 @@
 //! The StageSync window.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -18,12 +18,18 @@ use crate::chart;
 use crate::jobs::{self, ExportOutcome, JobEvent};
 use crate::platform;
 use crate::player::{Player, Voice};
+use crate::project::{
+    self, MediaStatus, ProjectAnalysisOptions, ProjectExportSettings, ProjectMediaRef,
+    ProjectMixerState, ProjectTargetEntry, ProjectTimelineState, ProjectVoice, StageSyncProject,
+    PROJECT_EXTENSION,
+};
 use crate::settings::{self, AppSettings};
 use crate::state::{
     container_label, drift_verdict, expand_dropped_paths, format_duration, format_label, is_wav,
     layout_label, loudness_label, metrics_for, protection_label, status_for, verification_for,
     AnchorFields, ExportSettings, FileEntry, TaskProgress,
 };
+use crate::theme::{Palette, ThemeMode};
 use crate::timeline;
 use crate::waveview;
 
@@ -41,6 +47,15 @@ enum Selection {
 enum JobKind {
     Analysis,
     Export,
+}
+
+/// User action deferred pending unsaved-changes confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingAction {
+    NewProject,
+    PickOpenProject,
+    OpenProject(PathBuf),
+    CloseWindow,
 }
 
 /// A background job that is currently running.
@@ -145,6 +160,24 @@ pub struct StageSyncApp {
     nudge_history: Vec<(usize, f64)>,
     /// How many times the window has been asked to shrink to the monitor.
     size_requests: usize,
+    /// Path of the currently open/saved `.stagesync` project, if any.
+    project_path: Option<PathBuf>,
+    /// Whether session state has unsaved changes since last project save/open.
+    dirty: bool,
+    /// Recently opened or saved `.stagesync` files.
+    recent_projects: Vec<PathBuf>,
+    /// User theme preference (`Dark`, `Light`, `System`).
+    theme_mode: ThemeMode,
+    /// Resolved palette for the current frame.
+    palette: Palette,
+    /// Last time crash-recovery autosave snapshot was written.
+    last_autosave: std::time::Instant,
+    /// Metadata of an uncleaned crash-recovery snapshot waiting on disk.
+    recovery_available: Option<project::RecoveryMeta>,
+    /// Action awaiting the Save / Don't Save / Cancel prompt.
+    pending_confirm: Option<PendingAction>,
+    /// Set once the user explicitly confirmed closing with unsaved changes.
+    force_close: bool,
 }
 
 impl Default for StageSyncApp {
@@ -202,6 +235,20 @@ impl StageSyncApp {
             nudge_history: Vec::new(),
             mixer: crate::mixer::MixerState::default(),
             size_requests: 0,
+            project_path: None,
+            dirty: false,
+            recent_projects: stored
+                .recent_projects
+                .iter()
+                .map(PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect(),
+            theme_mode: ThemeMode::from_name(&stored.theme),
+            palette: Palette::dark(),
+            last_autosave: std::time::Instant::now(),
+            recovery_available: project::load_recovery_meta(),
+            pending_confirm: None,
+            force_close: false,
         };
         app.apply_settings(&stored);
         app
@@ -316,8 +363,12 @@ impl StageSyncApp {
             window_height: self.window_height,
             loudness: settings::loudness_name(self.settings.loudness).to_string(),
             container: settings::container_name(self.settings.container).to_string(),
-            theme: "dark".to_string(),
-            recent_projects: Vec::new(),
+            theme: self.theme_mode.name().to_string(),
+            recent_projects: self
+                .recent_projects
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
         };
         if let Err(error) = stored.save() {
             log::warn!("could not write the settings: {error}");
@@ -350,7 +401,11 @@ impl StageSyncApp {
                         );
                         continue;
                     }
+                    if self.view_start == 0.0 && (self.view_end - 600.0).abs() < 1e-6 {
+                        self.view_end = report.timeline_duration.max(1.0);
+                    }
                     self.report = Some(*report);
+                    self.mark_dirty();
                     self.last_error = None;
                     self.notice = Some("Analysis finished.".to_string());
                     self.push_log("analysis finished".to_string());
@@ -439,14 +494,63 @@ impl StageSyncApp {
 
     /// Store the result of a background probe.
     fn apply_probe(&mut self, path: PathBuf, meta: Option<SourceMeta>, error: Option<String>) {
+        let mut invalidated_by_modification = false;
+        let check_entry = |entry: &mut FileEntry,
+                           is_ref: bool,
+                           view_end: &mut f64,
+                           report_none: bool,
+                           view_start: f64|
+         -> bool {
+            let mut modified = false;
+            if let Some(m) = &meta {
+                entry.missing = false;
+                let byte_mismatch = entry.expected_byte_len.is_some_and(|exp| exp != m.byte_len);
+                let hash_mismatch = entry
+                    .expected_sha256
+                    .as_ref()
+                    .is_some_and(|exp| exp != &m.sha256);
+                if byte_mismatch || hash_mismatch {
+                    entry.modified_warning = Some(
+                        "File contents differ from saved project — re-run analysis.".to_string(),
+                    );
+                    modified = true;
+                } else {
+                    entry.modified_warning = None;
+                }
+                if is_ref
+                    && report_none
+                    && view_start == 0.0
+                    && (*view_end - 600.0).abs() < 1e-6
+                    && m.duration_secs > 0.0
+                {
+                    *view_end = m.duration_secs.max(1.0);
+                }
+            } else if error.is_some() && !entry.path.is_file() {
+                entry.missing = true;
+            }
+            entry.meta = meta.clone();
+            entry.error = error.clone();
+            modified
+        };
+
+        let report_none = self.report.is_none();
+        let view_start = self.view_start;
+        let mut view_end = self.view_end;
         if let Some(entry) = self.reference.as_mut().filter(|entry| entry.path == path) {
-            entry.meta = meta;
-            entry.error = error;
-            return;
+            invalidated_by_modification =
+                check_entry(entry, true, &mut view_end, report_none, view_start);
+            self.view_end = view_end;
+        } else if let Some(entry) = self.targets.iter_mut().find(|entry| entry.path == path) {
+            invalidated_by_modification =
+                check_entry(entry, false, &mut view_end, report_none, view_start);
         }
-        if let Some(entry) = self.targets.iter_mut().find(|entry| entry.path == path) {
-            entry.meta = meta;
-            entry.error = error;
+
+        if invalidated_by_modification && self.report.is_some() {
+            self.report = None;
+            self.export_outcome = None;
+            self.notice = Some(
+                "Cached alignment was cleared because a recording changed on disk.".to_string(),
+            );
         }
     }
 
@@ -530,6 +634,8 @@ impl StageSyncApp {
             } else {
                 self.targets.push(FileEntry::new(path.clone()));
                 self.anchors.push(AnchorFields::default());
+                self.nudges.push(0.0);
+                self.mixer.sync_to(self.targets.len());
             }
             jobs::spawn_probe(self.tx.clone(), path.clone());
             // The waveform is built at the same time: it needs the whole recording,
@@ -541,6 +647,7 @@ impl StageSyncApp {
             self.report = None;
             self.export_outcome = None;
             self.last_error = None;
+            self.mark_dirty();
             self.notice = Some("The file list changed — run the analysis again.".to_string());
         }
     }
@@ -598,6 +705,7 @@ impl StageSyncApp {
         self.nudges.clear();
         self.nudge_history.clear();
         self.mixer.sync_to(self.targets.len());
+        self.mark_dirty();
         self.notice = Some("The reference was cleared.".to_string());
     }
 
@@ -627,6 +735,7 @@ impl StageSyncApp {
         self.report = None;
         self.export_outcome = None;
         self.selection = None;
+        self.mark_dirty();
         self.notice = Some(format!("{name} was removed — run the analysis again."));
     }
 
@@ -677,9 +786,363 @@ impl StageSyncApp {
         self.report = None;
         self.export_outcome = None;
         self.selection = Some(Selection::Reference);
+        self.mark_dirty();
         self.notice = Some(format!(
             "{name} is now the reference — run the analysis again."
         ));
+    }
+
+    // --- Projects, Relocate & Crash Recovery -------------------------------
+
+    /// Whether the session has unsaved modifications.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Path of the currently open/saved `.stagesync` file, if any.
+    pub fn project_path(&self) -> Option<&Path> {
+        self.project_path.as_deref()
+    }
+
+    /// Mark the active project as having unsaved changes.
+    fn mark_dirty(&mut self) {
+        if self.reference.is_some() || !self.targets.is_empty() || self.project_path.is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Snapshot the current session into a serializable `.stagesync` project.
+    pub fn to_project(&self, project_path: Option<&Path>) -> StageSyncProject {
+        let project_dir = project_path
+            .and_then(|p| p.parent())
+            .filter(|p| !p.as_os_str().is_empty());
+
+        let reference = self
+            .reference
+            .as_ref()
+            .map(|entry| ProjectMediaRef::from_entry(entry, project_dir));
+
+        let targets = self
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| ProjectTargetEntry {
+                media: ProjectMediaRef::from_entry(entry, project_dir),
+                anchor: self.anchors.get(i).copied().unwrap_or_default().into(),
+                pending_nudge_secs: self.nudges.get(i).copied().unwrap_or(0.0),
+            })
+            .collect();
+
+        let voice = match self.voice {
+            Voice::Reference => ProjectVoice::Reference,
+            Voice::Target => ProjectVoice::Target,
+            Voice::Mix => ProjectVoice::Mix,
+        };
+
+        StageSyncProject {
+            version: project::PROJECT_FORMAT_VERSION,
+            saved_at_unix_secs: project::unix_now_secs(),
+            reference,
+            targets,
+            analysis: ProjectAnalysisOptions {
+                use_spectral_check: self.use_spectral_check,
+                measure_waveform_drift: self.measure_waveform_drift,
+                force_offset_only: self.force_offset_only,
+            },
+            report: self.report.clone(),
+            mixer: ProjectMixerState::from(&self.mixer),
+            timeline: ProjectTimelineState {
+                view_start: self.view_start,
+                view_end: self.view_end,
+                playhead: self.playhead,
+                region: self.region,
+                loop_region: self.loop_region,
+                voice,
+            },
+            export: ProjectExportSettings::from(&self.settings),
+        }
+    }
+
+    /// Save the active session atomically to `path` and update recent projects.
+    pub fn save_project_to(&mut self, path: &Path) -> Result<(), anyhow::Error> {
+        let snapshot = self.to_project(Some(path));
+        snapshot.save_to(path)?;
+        self.project_path = Some(path.to_path_buf());
+        self.dirty = false;
+        self.record_recent_project(path);
+        project::clear_recovery();
+        self.recovery_available = None;
+        self.notice = Some(format!("Project saved to {}", platform::display_path(path)));
+        self.push_log(format!("saved project {}", platform::display_path(path)));
+        Ok(())
+    }
+
+    /// Open a `.stagesync` project from disk, verifying source hashes and missing files.
+    pub fn open_project_path(&mut self, path: &Path) -> Result<(), anyhow::Error> {
+        let loaded = StageSyncProject::load_from(path)?;
+        self.apply_loaded_project(loaded, Some(path.to_path_buf()));
+        self.record_recent_project(path);
+        Ok(())
+    }
+
+    fn apply_loaded_project(
+        &mut self,
+        loaded: project::LoadedProject,
+        source_path: Option<PathBuf>,
+    ) {
+        self.player.stop();
+        self.peaks.clear();
+        self.peaks_pending = 0;
+        self.export_outcome = None;
+        self.selection = None;
+        self.nudge_history.clear();
+        self.last_error = None;
+
+        let proj = loaded.project;
+        self.use_spectral_check = proj.analysis.use_spectral_check;
+        self.measure_waveform_drift = proj.analysis.measure_waveform_drift;
+        self.force_offset_only = proj.analysis.force_offset_only;
+
+        self.reference = loaded.reference.as_ref().map(entry_from_resolved);
+        self.targets = loaded.targets.iter().map(entry_from_resolved).collect();
+        self.anchors = proj
+            .targets
+            .iter()
+            .map(|t| AnchorFields::from(t.anchor))
+            .collect();
+        self.nudges = proj.targets.iter().map(|t| t.pending_nudge_secs).collect();
+
+        self.mixer.mode = proj.mixer.mode;
+        self.mixer.master_gain = proj.mixer.master_gain;
+        self.mixer.tracks = proj.mixer.tracks;
+        self.mixer.sync_to(self.targets.len());
+
+        self.settings = proj.export.to_export_settings(&self.mixer);
+
+        self.view_start = proj.timeline.view_start;
+        self.view_end = proj.timeline.view_end;
+        self.playhead = proj.timeline.playhead;
+        self.region = proj.timeline.region;
+        self.loop_region = proj.timeline.loop_region;
+        self.voice = match proj.timeline.voice {
+            ProjectVoice::Reference => Voice::Reference,
+            ProjectVoice::Target => Voice::Target,
+            ProjectVoice::Mix => Voice::Mix,
+        };
+
+        self.report = loaded.valid_report;
+        self.project_path = source_path.clone();
+        self.dirty = false;
+
+        // Kick off background metadata verification + streaming PeakCache builds for present files.
+        if let Some(ref_entry) = &self.reference {
+            if !ref_entry.missing {
+                jobs::spawn_probe(self.tx.clone(), ref_entry.path.clone());
+                jobs::spawn_peaks(self.tx.clone(), ref_entry.path.clone());
+                self.peaks_pending += 1;
+            }
+        }
+        for tgt in &self.targets {
+            if !tgt.missing {
+                jobs::spawn_probe(self.tx.clone(), tgt.path.clone());
+                jobs::spawn_peaks(self.tx.clone(), tgt.path.clone());
+                self.peaks_pending += 1;
+            }
+        }
+
+        for msg in &loaded.notices {
+            self.push_log(msg.clone());
+        }
+        if !loaded.notices.is_empty() {
+            self.last_error = Some(loaded.notices.join(" · "));
+        } else if let Some(p) = &source_path {
+            self.notice = Some(format!("Opened project {}", platform::display_path(p)));
+        }
+    }
+
+    /// Reset to a blank project.
+    pub fn new_project(&mut self) {
+        self.player.stop();
+        self.reference = None;
+        self.targets.clear();
+        self.anchors.clear();
+        self.nudges.clear();
+        self.nudge_history.clear();
+        self.mixer = crate::mixer::MixerState::default();
+        self.report = None;
+        self.export_outcome = None;
+        self.selection = None;
+        self.peaks.clear();
+        self.peaks_pending = 0;
+        self.view_start = 0.0;
+        self.view_end = 600.0;
+        self.playhead = 0.0;
+        self.region = None;
+        self.loop_region = None;
+        self.project_path = None;
+        self.dirty = false;
+        self.last_error = None;
+        self.notice = Some("Started a new project.".to_string());
+        project::clear_recovery();
+        self.recovery_available = None;
+    }
+
+    /// Relocate a missing or moved reference recording to `new_path`.
+    pub fn relocate_reference(&mut self, new_path: PathBuf) {
+        let Some(ref mut entry) = self.reference else {
+            return;
+        };
+        let changed = relocate_entry(entry, new_path.clone());
+        if changed && self.report.is_some() {
+            self.report = None;
+            self.export_outcome = None;
+        }
+        jobs::spawn_probe(self.tx.clone(), new_path.clone());
+        jobs::spawn_peaks(self.tx.clone(), new_path);
+        self.peaks_pending += 1;
+        self.mark_dirty();
+        self.last_error = None;
+        self.notice = Some(if changed {
+            "Reference relocated to a different file — run Auto Sync again.".to_string()
+        } else {
+            "Reference relocated and digest verified.".to_string()
+        });
+    }
+
+    /// Relocate a missing or moved target recording to `new_path`.
+    pub fn relocate_target(&mut self, index: usize, new_path: PathBuf) {
+        let Some(entry) = self.targets.get_mut(index) else {
+            return;
+        };
+        let changed = relocate_entry(entry, new_path.clone());
+        if changed && self.report.is_some() {
+            self.report = None;
+            self.export_outcome = None;
+        }
+        jobs::spawn_probe(self.tx.clone(), new_path.clone());
+        jobs::spawn_peaks(self.tx.clone(), new_path);
+        self.peaks_pending += 1;
+        self.mark_dirty();
+        self.last_error = None;
+        self.notice = Some(if changed {
+            "Target relocated to a different file — run Auto Sync again.".to_string()
+        } else {
+            "Target relocated and digest verified.".to_string()
+        });
+    }
+
+    fn record_recent_project(&mut self, path: &Path) {
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|c| c.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+        self.recent_projects.retain(|existing| existing != &abs);
+        self.recent_projects.insert(0, abs);
+        self.recent_projects.truncate(10);
+        self.persist_settings();
+    }
+
+    fn maybe_autosave(&mut self) {
+        if !self.dirty || self.running.is_some() {
+            return;
+        }
+        if self.last_autosave.elapsed().as_secs() < 20 {
+            return;
+        }
+        self.last_autosave = std::time::Instant::now();
+        let snapshot = self.to_project(self.project_path.as_deref());
+        if let Err(err) =
+            project::write_recovery(&snapshot, self.project_path.as_deref(), self.dirty)
+        {
+            log::warn!("autosave failed: {err:#}");
+        }
+    }
+
+    fn request_action(&mut self, action: PendingAction) {
+        if self.dirty {
+            self.pending_confirm = Some(action);
+        } else {
+            self.execute_pending_action(action);
+        }
+    }
+
+    fn execute_pending_action(&mut self, action: PendingAction) {
+        match action {
+            PendingAction::NewProject => self.new_project(),
+            PendingAction::PickOpenProject => self.browse_open_project(),
+            PendingAction::OpenProject(path) => {
+                if let Err(err) = self.open_project_path(&path) {
+                    self.last_error = Some(format!("Failed to open project: {err:#}"));
+                }
+            }
+            PendingAction::CloseWindow => {
+                self.force_close = true;
+            }
+        }
+    }
+
+    fn browse_open_project(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Open StageSync project")
+            .add_filter("StageSync Project", &[PROJECT_EXTENSION])
+            .pick_file();
+        if let Some(path) = picked {
+            if let Err(err) = self.open_project_path(&path) {
+                self.last_error = Some(format!("Failed to open project: {err:#}"));
+            }
+        }
+    }
+
+    fn browse_save_project(&mut self, save_as: bool) -> bool {
+        if !save_as {
+            if let Some(path) = self.project_path.clone() {
+                return match self.save_project_to(&path) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        self.last_error = Some(format!("Failed to save project: {err:#}"));
+                        false
+                    }
+                };
+            }
+        }
+        let default_name = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("concert.stagesync");
+        let picked = rfd::FileDialog::new()
+            .set_title("Save StageSync project")
+            .add_filter("StageSync Project", &[PROJECT_EXTENSION])
+            .set_file_name(default_name)
+            .save_file();
+        if let Some(mut path) = picked {
+            if path.extension().is_none() {
+                path.set_extension(PROJECT_EXTENSION);
+            }
+            match self.save_project_to(&path) {
+                Ok(()) => return true,
+                Err(err) => {
+                    self.last_error = Some(format!("Failed to save project: {err:#}"));
+                }
+            }
+        }
+        false
+    }
+
+    fn browse_relocate_file(&self, title: &str) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter(
+                "Audio",
+                &[
+                    "wav", "flac", "m4a", "mp3", "ogg", "oga", "aac", "opus", "wma",
+                ],
+            )
+            .pick_file()
     }
 
     // --- Jobs --------------------------------------------------------------
@@ -838,7 +1301,59 @@ impl StageSyncApp {
         let mut cancel = false;
         let mut changed = false;
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("New Project").clicked() {
+                    ui.close();
+                    self.request_action(PendingAction::NewProject);
+                }
+                if ui.button("Open Project…").clicked() {
+                    ui.close();
+                    self.request_action(PendingAction::PickOpenProject);
+                }
+                ui.menu_button("Recent Projects", |ui| {
+                    if self.recent_projects.is_empty() {
+                        ui.label("No recent projects");
+                    } else {
+                        for recent in self.recent_projects.clone() {
+                            let label = recent
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| platform::display_path(&recent));
+                            if ui
+                                .button(label)
+                                .on_hover_text(platform::display_path(&recent))
+                                .clicked()
+                            {
+                                ui.close();
+                                self.request_action(PendingAction::OpenProject(recent));
+                            }
+                        }
+                    }
+                });
+                ui.separator();
+                if ui.button("Save Project").clicked() {
+                    ui.close();
+                    self.browse_save_project(false);
+                }
+                if ui.button("Save Project As…").clicked() {
+                    ui.close();
+                    self.browse_save_project(true);
+                }
+            });
+            let proj_label = match &self.project_path {
+                Some(p) => p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Untitled".to_string()),
+                None => "Untitled".to_string(),
+            };
+            ui.label(if self.dirty {
+                format!("{proj_label}*")
+            } else {
+                proj_label
+            });
+            ui.separator();
             start = ui
                 .add_enabled(can_analyze, egui::Button::new("Analyze"))
                 .clicked();
@@ -926,6 +1441,7 @@ impl StageSyncApp {
         });
 
         if changed {
+            self.mark_dirty();
             self.persist_settings();
         }
 
@@ -989,6 +1505,20 @@ impl StageSyncApp {
             if let Some(error) = &entry.error {
                 ui.colored_label(ui.visuals().error_fg_color, format!("cannot read: {error}"));
             }
+            if entry.missing {
+                ui.horizontal(|ui| {
+                    ui.colored_label(ui.visuals().error_fg_color, "Missing file");
+                    if ui.button("Relocate…").clicked() {
+                        if let Some(new_path) =
+                            self.browse_relocate_file("Locate missing reference recording")
+                        {
+                            self.relocate_reference(new_path);
+                        }
+                    }
+                });
+            } else if let Some(warn) = &entry.modified_warning {
+                ui.colored_label(ui.visuals().warn_fg_color, warn.as_str());
+            }
         } else {
             ui.label("none — the first file you add becomes the reference");
         }
@@ -1047,6 +1577,25 @@ impl StageSyncApp {
             }
             if let Some(error) = &entry.error {
                 ui.colored_label(ui.visuals().error_fg_color, format!("cannot read: {error}"));
+            }
+            if entry.missing {
+                ui.horizontal(|ui| {
+                    ui.colored_label(ui.visuals().error_fg_color, "Missing file");
+                    if ui
+                        .push_id(("relocate_target", index), |ui| ui.button("Relocate…"))
+                        .inner
+                        .clicked()
+                    {
+                        if let Some(new_path) = self.browse_relocate_file(&format!(
+                            "Locate missing recording {}",
+                            entry.name()
+                        )) {
+                            self.relocate_target(index, new_path);
+                        }
+                    }
+                });
+            } else if let Some(warn) = &entry.modified_warning {
+                ui.colored_label(ui.visuals().warn_fg_color, warn.as_str());
             }
             if let Some(metrics) = metrics {
                 wrapped(ui, metrics_line(&metrics));
@@ -1278,6 +1827,7 @@ impl StageSyncApp {
         }
 
         if changed {
+            self.mark_dirty();
             self.persist_settings();
         }
     }
@@ -1302,6 +1852,48 @@ impl StageSyncApp {
     /// The main area: the timeline, the anchor controls and the source details.
     fn central(&mut self, ui: &mut egui::Ui) {
         self.central_width = ui.available_width();
+        if let Some(meta) = self.recovery_available.clone() {
+            let warn = ui.visuals().warn_fg_color;
+            egui::Frame::new()
+                .fill(warn.gamma_multiply(0.16))
+                .corner_radius(4.0)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let label = meta
+                            .active_project_path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|n| {
+                                format!("Recover unsaved session from {}?", n.to_string_lossy())
+                            })
+                            .unwrap_or_else(|| {
+                                "An unsaved autosave recovery snapshot was found.".to_string()
+                            });
+                        ui.colored_label(warn, label);
+                        if ui.button("Recover Session").clicked() {
+                            match project::load_recovery_project() {
+                                Ok((loaded, rmeta)) => {
+                                    let target = rmeta.and_then(|m| m.active_project_path);
+                                    self.apply_loaded_project(loaded, target);
+                                    self.dirty = true;
+                                    self.recovery_available = None;
+                                }
+                                Err(err) => {
+                                    self.last_error =
+                                        Some(format!("Could not recover session: {err:#}"));
+                                    self.recovery_available = None;
+                                }
+                            }
+                        }
+                        if ui.button("Discard").clicked() {
+                            project::clear_recovery();
+                            self.recovery_available = None;
+                        }
+                    });
+                });
+            ui.add_space(6.0);
+        }
         if let Some(error) = self.last_error.clone() {
             // The colours come from the theme, so the message is legible both
             // on a light desktop and on a dark one.
@@ -1942,6 +2534,7 @@ impl StageSyncApp {
         }
         self.nudges[index] = current + delta;
         self.nudge_history.push((index, current));
+        self.mark_dirty();
     }
 
     /// Take back the last nudge.
@@ -1949,6 +2542,7 @@ impl StageSyncApp {
         if let Some((index, previous)) = self.nudge_history.pop() {
             if let Some(value) = self.nudges.get_mut(index) {
                 *value = previous;
+                self.mark_dirty();
             }
         }
     }
@@ -2349,6 +2943,51 @@ impl StageSyncApp {
     }
 }
 
+/// Construct a `FileEntry` from a resolved `.stagesync` project reference.
+fn entry_from_resolved(resolved: &project::ResolvedMedia) -> FileEntry {
+    let mut entry = FileEntry::new(resolved.resolved_path.clone());
+    entry.expected_sha256 = resolved.saved.sha256.clone();
+    entry.expected_byte_len = resolved.saved.byte_len;
+    match &resolved.status {
+        MediaStatus::Verified | MediaStatus::RelocatedByRelativePath => {}
+        MediaStatus::Missing => {
+            entry.missing = true;
+            entry.error = Some("file not found on disk".to_string());
+        }
+        MediaStatus::ModifiedOnDisk { detail } => {
+            entry.modified_warning = Some(detail.clone());
+        }
+    }
+    entry
+}
+
+/// Update `entry` after the user locates it on disk, returning `true` if bytes changed.
+fn relocate_entry(entry: &mut FileEntry, new_path: PathBuf) -> bool {
+    let changed = match (&entry.expected_byte_len, &entry.expected_sha256) {
+        (Some(exp_len), Some(exp_hash)) => {
+            let len_ok = std::fs::metadata(&new_path)
+                .map(|m| m.len() == *exp_len)
+                .unwrap_or(false);
+            let hash_ok = len_ok
+                && stagesync_core::audio::sha256_file(&new_path)
+                    .map(|h| h == *exp_hash)
+                    .unwrap_or(false);
+            !hash_ok
+        }
+        _ => true,
+    };
+    entry.path = new_path;
+    entry.missing = false;
+    entry.error = None;
+    entry.meta = None;
+    entry.modified_warning = if changed {
+        Some("Relocated file has different audio bytes — re-run Auto Sync.".to_string())
+    } else {
+        None
+    };
+    changed
+}
+
 /// How many characters of a path are shown before the middle is elided.
 ///
 /// The monospace font of the file list is about seven pixels wide, and the
@@ -2439,6 +3078,7 @@ impl StageSyncApp {
     /// them. This is separate from [`eframe::App::ui`] so that the layout can
     /// be laid out head-lessly, at any window size, in a test.
     fn layout(&mut self, ui: &mut egui::Ui) {
+        self.palette = crate::theme::apply_theme(ui.ctx(), self.theme_mode.is_dark(ui.ctx()));
         self.drain_events();
         self.follow_the_playhead();
         self.keep_window_on_screen(ui);
@@ -2454,11 +3094,21 @@ impl StageSyncApp {
                 .collect()
         });
         if !dropped.is_empty() {
-            let expanded = expand_dropped_paths(&dropped);
-            if expanded.is_empty() {
-                self.last_error = Some("There are no recordings in what was dropped.".to_string());
+            let is_single_project = dropped.len() == 1
+                && dropped[0]
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION));
+            if is_single_project {
+                self.request_action(PendingAction::OpenProject(dropped[0].clone()));
             } else {
-                self.import_paths(expanded);
+                let expanded = expand_dropped_paths(&dropped);
+                if expanded.is_empty() {
+                    self.last_error =
+                        Some("There are no recordings in what was dropped.".to_string());
+                } else {
+                    self.import_paths(expanded);
+                }
             }
         }
 
@@ -2472,12 +3122,21 @@ impl StageSyncApp {
                 self.window_height = size.y;
             }
         }
-        if ui.ctx().input(|input| input.viewport().close_requested()) && !self.closing_saved {
-            // The window is about to close: the settings are written once, so the
-            // file is not rewritten on every frame of the closing.
-            self.closing_saved = true;
-            self.persist_settings();
+        if ui.ctx().input(|input| input.viewport().close_requested()) {
+            if self.dirty && !self.force_close {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.pending_confirm.is_none() {
+                    self.pending_confirm = Some(PendingAction::CloseWindow);
+                }
+            } else if !self.closing_saved {
+                self.closing_saved = true;
+                self.persist_settings();
+                project::clear_recovery();
+            }
         }
+
+        self.maybe_autosave();
 
         // egui sizes a panel to its content and gives it no upper bound of its
         // own, so a long file name or a wide text box would otherwise squeeze
@@ -2504,6 +3163,14 @@ impl StageSyncApp {
             .max_size(export_max)
             .show(ui, |ui| self.export_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
+
+        self.draw_pending_confirm(ui.ctx());
+
+        if self.force_close {
+            self.dirty = false;
+            project::clear_recovery();
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         if self.running.is_some() || self.peaks_pending > 0 {
             // Keep the progress display moving while a job is running, and keep
@@ -2572,6 +3239,49 @@ impl StageSyncApp {
     fn play_voice_at(&mut self, voice: Voice, position: f64) {
         self.playhead = position;
         self.play_voice(voice);
+    }
+
+    fn draw_pending_confirm(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_confirm.clone() else {
+            return;
+        };
+        let mut choice: Option<Option<bool>> = None;
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Save changes to the current StageSync project before continuing?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        choice = Some(Some(true));
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        choice = Some(Some(false));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(None);
+                    }
+                });
+            });
+        if let Some(decision) = choice {
+            match decision {
+                Some(true) => {
+                    if self.browse_save_project(false) {
+                        self.pending_confirm = None;
+                        self.execute_pending_action(action);
+                    }
+                }
+                Some(false) => {
+                    self.pending_confirm = None;
+                    self.execute_pending_action(action);
+                }
+                None => {
+                    self.pending_confirm = None;
+                }
+            }
+        }
     }
 }
 
