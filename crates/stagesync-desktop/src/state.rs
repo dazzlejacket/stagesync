@@ -359,6 +359,26 @@ pub struct ExportSettings {
     pub sample_rate: Option<u32>,
     /// Output sample format.
     pub format: WavFormat,
+    /// The mixer's settings: which recordings go into the mix, and how.
+    pub mix: stagesync_core::mixer::MixSettings,
+    /// How the mix protects itself against clipping.
+    pub protection: stagesync_core::mixer::ClippingProtection,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            dir: String::new(),
+            layout: Layout::SourceAligned,
+            sample_rate: None,
+            format: WavFormat::Float32,
+            mix: stagesync_core::mixer::MixSettings {
+                tracks: Vec::new(),
+                master_gain: 1.0,
+            },
+            protection: stagesync_core::mixer::ClippingProtection::None,
+        }
+    }
 }
 
 /// The manual anchor the user typed in.
@@ -388,6 +408,8 @@ pub fn layout_label(layout: Layout) -> &'static str {
         Layout::SourceAligned => "Source aligned",
         Layout::ReferenceTimelinePerSource => "Reference timeline, per source",
         Layout::ReferenceTimelineMerged => "Reference timeline, merged",
+        Layout::Mixdown => "Mixdown",
+        Layout::MixStems => "Synchronised stems",
     }
 }
 
@@ -396,6 +418,16 @@ pub fn format_label(format: WavFormat) -> &'static str {
     match format {
         WavFormat::Float32 => "32-bit float",
         WavFormat::Int16 => "16-bit PCM",
+    }
+}
+
+/// A short label for a clipping protection.
+pub fn protection_label(protection: stagesync_core::mixer::ClippingProtection) -> &'static str {
+    use stagesync_core::mixer::ClippingProtection;
+    match protection {
+        ClippingProtection::None => "None",
+        ClippingProtection::SoftClip { .. } => "Soft knee",
+        ClippingProtection::AutoGain { .. } => "Automatic gain",
     }
 }
 

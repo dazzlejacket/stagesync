@@ -19,6 +19,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use stagesync_core::audio::{AudioDecoder, WavFormat};
 use stagesync_core::export::{self, Artifact};
 use stagesync_core::matching::AlignmentReport;
+use stagesync_core::mixer::{self, MixSettings, MixTrack};
 use stagesync_core::pipeline::{analyze, AnalysisConfig, ManualAnchor};
 use stagesync_core::render::{self, Layout, RenderOptions, RenderResult};
 use stagesync_core::verify::{verify_corrected, HoldoutResult, VerifyConfig};
@@ -102,6 +103,42 @@ enum Command {
         /// Skip the hold-out verification of the rendered audio.
         #[arg(long)]
         no_verify: bool,
+        /// The recordings that go into the mix, by file name. May be repeated.
+        ///
+        /// Without this every recording that was aligned goes into the mix. The
+        /// reference is never one of them: it is the thing the others were aligned
+        /// to, not a track of the mix.
+        #[arg(long, value_name = "NAME")]
+        mix_track: Vec<String>,
+        /// A JSON file with the mixer's settings.
+        ///
+        /// The file names the recordings that go into the mix and says what each
+        /// one's fader, pan, mute and solo are.
+        #[arg(long, value_name = "FILE")]
+        mix_config: Option<PathBuf>,
+        /// How the mix protects itself against clipping.
+        #[arg(long, value_enum, default_value_t = ProtectionArg::None)]
+        clip_protection: ProtectionArg,
+        /// The level the automatic gain protection aims at, in dBFS.
+        #[arg(long, value_name = "DB", default_value_t = -1.0)]
+        clip_target_db: f64,
+        /// Bring the recordings to a common level before they are mixed.
+        ///
+        /// The level is measured as the root-mean-square of each recording. This is
+        /// **not** a perceptual loudness measurement: it applies no frequency
+        /// weighting.
+        #[arg(long)]
+        match_loudness: bool,
+        /// Write one synchronised file per chosen recording as well as the mix.
+        #[arg(long)]
+        stems: bool,
+        /// The container the mixed file is written in.
+        ///
+        /// A RIFF file cannot hold more than four gibibytes of payload, so a long
+        /// mix needs the extended form. The automatic choice writes RIFF while the
+        /// file fits in it and RF64 when it does not.
+        #[arg(long, value_enum, default_value_t = ContainerArg::Auto)]
+        container: ContainerArg,
     },
     /// Independently verify a rendered correction against the reference.
     Verify {
@@ -159,6 +196,10 @@ enum LayoutArg {
     TimelinePerSource,
     /// One merged reference-length timeline covering every source.
     TimelineMerged,
+    /// One mixed file: the chosen recordings, mixed onto the reference timeline.
+    Mixdown,
+    /// One reference-length timeline per chosen recording, without the mix.
+    MixStems,
 }
 
 impl From<LayoutArg> for Layout {
@@ -167,6 +208,46 @@ impl From<LayoutArg> for Layout {
             LayoutArg::SourceAligned => Layout::SourceAligned,
             LayoutArg::TimelinePerSource => Layout::ReferenceTimelinePerSource,
             LayoutArg::TimelineMerged => Layout::ReferenceTimelineMerged,
+            LayoutArg::Mixdown => Layout::Mixdown,
+            LayoutArg::MixStems => Layout::MixStems,
+        }
+    }
+}
+
+/// How the mix protects itself against clipping.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ProtectionArg {
+    /// Nothing: a peak above 0 dBFS is written as it is into a float file.
+    None,
+    /// A soft knee above the threshold.
+    SoftClip,
+    /// One master gain, chosen so that the loudest sample lands on the target.
+    AutoGain,
+}
+
+/// The container the mixed file is written in.
+///
+/// A RIFF file cannot hold more than four gibibytes of payload, so a long mix
+/// needs the extended form.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ContainerArg {
+    /// RIFF while the file fits in it, RF64 when it does not.
+    Auto,
+    /// The ordinary RIFF form. A file that does not fit in it is refused.
+    Riff,
+    /// The RF64 form: RIFF with a 64-bit size.
+    Rf64,
+    /// The BW64 form: the same shape, with a different name.
+    Bw64,
+}
+
+impl From<ContainerArg> for mixer::ContainerChoice {
+    fn from(value: ContainerArg) -> Self {
+        match value {
+            ContainerArg::Auto => mixer::ContainerChoice::Auto,
+            ContainerArg::Riff => mixer::ContainerChoice::Riff,
+            ContainerArg::Rf64 => mixer::ContainerChoice::Rf64,
+            ContainerArg::Bw64 => mixer::ContainerChoice::Bw64,
         }
     }
 }
@@ -246,6 +327,13 @@ fn main() -> Result<()> {
             no_waveform_drift,
             offset_only,
             no_verify,
+            mix_track,
+            mix_config,
+            clip_protection,
+            clip_target_db,
+            match_loudness,
+            stems,
+            container,
         } => {
             let mut report = run_analysis(
                 &reference,
@@ -265,6 +353,15 @@ fn main() -> Result<()> {
                 options.sample_rate = Some(report.reference.sample_rate);
             }
 
+            // The mix's settings: which recordings go into it, and what each one's
+            // fader and pan are.
+            let mix_settings = build_mix_settings(&report, &mix_track, mix_config.as_deref())?;
+            let selected: Vec<usize> = mix_settings
+                .tracks
+                .iter()
+                .map(|track| track.source_index)
+                .collect();
+
             std::fs::create_dir_all(&out)
                 .with_context(|| format!("failed to create output directory: {}", out.display()))?;
 
@@ -274,10 +371,18 @@ fn main() -> Result<()> {
             // originals are read-only and the reference is never altered, so
             // this is refused before anything is written.
             let inputs = input_paths(&report);
-            let planned = render::complete_outputs(
-                &out,
-                &render::planned_outputs(&out, &report, options.layout),
-            );
+            let mut planned_audio =
+                render::planned_outputs_for(&out, &report, options.layout, &selected);
+            if options.layout == Layout::Mixdown && stems {
+                // The synchronised stems are written alongside the mix.
+                planned_audio.extend(render::planned_outputs_for(
+                    &out,
+                    &report,
+                    Layout::MixStems,
+                    &selected,
+                ));
+            }
+            let planned = render::complete_outputs(&out, &planned_audio);
             // Two recordings that share a file name are given the same output
             // name, and the second write would silently replace the first.
             render::ensure_outputs_are_distinct(&planned)?;
@@ -429,6 +534,121 @@ fn main() -> Result<()> {
                         final_path(&path).display(),
                         result.source_frames as f64 / result.sample_rate as f64,
                         result.silence_frames as f64 / result.sample_rate as f64
+                    );
+                    results.push(result);
+                }
+                Layout::Mixdown => {
+                    if selected.is_empty() {
+                        anyhow::bail!("no recording was chosen for the mix");
+                    }
+                    let mix_options = mixer::MixOptions {
+                        sample_rate: options.sample_rate,
+                        channels: 2,
+                        format: options.format,
+                        protection: match clip_protection {
+                            ProtectionArg::None => mixer::ClippingProtection::None,
+                            ProtectionArg::SoftClip => {
+                                mixer::ClippingProtection::SoftClip { threshold: 0.9 }
+                            }
+                            ProtectionArg::AutoGain => mixer::ClippingProtection::AutoGain {
+                                target_dbfs: clip_target_db,
+                            },
+                        },
+                        loudness: if match_loudness {
+                            mixer::LoudnessMatch::MatchToLoudest
+                        } else {
+                            mixer::LoudnessMatch::None
+                        },
+                        container: container.into(),
+                        ..mixer::MixOptions::default()
+                    };
+                    let path = staged.path("mixdown.wav");
+                    render::prepare_output(&path)?;
+                    let result = mixer::render_mix(&report, &mix_settings, &mix_options, &path)?;
+                    println!(
+                        "rendered the mix -> {} ({:.1} s, {} channel(s), peak {:.2} dBFS)",
+                        final_path(&path).display(),
+                        result.frames as f64 / result.sample_rate as f64,
+                        result.channels,
+                        result.peak_dbfs()
+                    );
+                    if result.gain_reduction_db != 0.0 {
+                        println!(
+                            "  the clipping protection applied {:.2} dB of gain",
+                            -result.gain_reduction_db
+                        );
+                    }
+                    if result.overs > 0 {
+                        println!(
+                            "  {} samples are above 0 dBFS{}",
+                            result.overs,
+                            if options.format == stagesync_core::audio::WavFormat::Float32 {
+                                " and were written as they are, because a 32-bit float file can hold them"
+                            } else {
+                                " and were clipped by the 16-bit format"
+                            }
+                        );
+                    }
+                    for note in &result.notes {
+                        println!("  note: {note}");
+                    }
+                }
+                Layout::MixStems => {
+                    // One synchronised file per chosen recording, without the mix.
+                    for index in &selected {
+                        let Some(alignment) = report.sources.get(*index) else {
+                            continue;
+                        };
+                        let Some(model) = alignment.model() else {
+                            eprintln!(
+                                "skipping {}: no reliable alignment was established",
+                                alignment.source.file_name
+                            );
+                            continue;
+                        };
+                        let path =
+                            staged.path(&format!("{}_stem.wav", stem(&alignment.source.file_name)));
+                        render::prepare_output(&path)?;
+                        let result = render::render_reference_timeline(
+                            &alignment.source.path,
+                            &model,
+                            report.timeline_duration,
+                            &path,
+                            &options,
+                        )?;
+                        println!(
+                            "rendered stem {} -> {}",
+                            alignment.source.file_name,
+                            final_path(&path).display()
+                        );
+                        results.push(result);
+                    }
+                }
+            }
+
+            // The synchronised stems can be written alongside the mix.
+            if options.layout == Layout::Mixdown && stems {
+                for index in &selected {
+                    let Some(alignment) = report.sources.get(*index) else {
+                        continue;
+                    };
+                    let Some(model) = alignment.model() else {
+                        continue;
+                    };
+                    let path =
+                        staged.path(&format!("{}_stem.wav", stem(&alignment.source.file_name)));
+                    render::prepare_output(&path)?;
+                    let result = render::render_reference_timeline(
+                        &alignment.source.path,
+                        &model,
+                        report.timeline_duration,
+                        &path,
+                        &options,
+                    )?;
+                    println!(
+                        "rendered stem {} -> {}",
+                        alignment.source.file_name,
+                        final_path(&path).display()
                     );
                     results.push(result);
                 }
@@ -942,4 +1162,121 @@ fn drift_verdict(assessment: &stagesync_core::matching::DriftAssessment) -> Stri
 /// application write the same files for the same recordings.
 fn stem(name: &str) -> String {
     render::safe_stem(name)
+}
+
+/// The mixer's settings, from the command line and an optional configuration file.
+///
+/// The configuration file names the recordings by their file name, because an index
+/// into the source list would mean something different in every run. The command
+/// line's `--mix-track` names do the same.
+#[derive(Debug, serde::Deserialize)]
+struct MixConfigFile {
+    /// The master fader.
+    #[serde(default = "one")]
+    master_gain: f32,
+    /// The tracks of the mix.
+    #[serde(default)]
+    tracks: Vec<MixTrackConfig>,
+}
+
+/// One track of the mix, as it appears in the configuration file.
+#[derive(Debug, serde::Deserialize)]
+struct MixTrackConfig {
+    /// The recording: its file name, or its full path.
+    source: String,
+    /// The fader.
+    #[serde(default = "one")]
+    gain: f32,
+    /// The trim.
+    #[serde(default = "one")]
+    trim: f32,
+    /// The pan: `-1` is hard left, `+1` is hard right.
+    #[serde(default)]
+    pan: f32,
+    /// Whether the recording is muted.
+    #[serde(default)]
+    mute: bool,
+    /// Whether the recording is soloed.
+    #[serde(default)]
+    solo: bool,
+}
+
+/// The default gain of a track.
+fn one() -> f32 {
+    1.0
+}
+
+/// Build the mixer's settings.
+fn build_mix_settings(
+    report: &AlignmentReport,
+    names: &[String],
+    config_path: Option<&Path>,
+) -> Result<MixSettings> {
+    let mut settings = MixSettings {
+        tracks: Vec::new(),
+        master_gain: 1.0,
+    };
+
+    // The configuration file comes first: the command line's `--mix-track` names
+    // are then taken as a selection of the tracks it defined, or as the whole mix
+    // when there is no configuration file.
+    if let Some(path) = config_path {
+        let text = std::fs::read_to_string(path).with_context(|| {
+            format!("failed to read the mixer configuration: {}", path.display())
+        })?;
+        let config: MixConfigFile = serde_json::from_str(&text).with_context(|| {
+            format!(
+                "failed to read the mixer configuration {}: it must be a JSON object with \
+                 a \"tracks\" list",
+                path.display()
+            )
+        })?;
+        settings.master_gain = config.master_gain;
+        for track in &config.tracks {
+            let index = mixer::resolve_source(report, &track.source)?;
+            settings.tracks.push(MixTrack {
+                source_index: index,
+                gain: track.gain,
+                trim: track.trim,
+                pan: track.pan,
+                mute: track.mute,
+                solo: track.solo,
+                ..MixTrack::default()
+            });
+        }
+    }
+
+    if !names.is_empty() {
+        let mut chosen = Vec::new();
+        for name in names {
+            let index = mixer::resolve_source(report, name)?;
+            chosen.push(index);
+        }
+        // A named track that the configuration file already described keeps the
+        // configuration's fader and pan.
+        settings
+            .tracks
+            .retain(|track| chosen.contains(&track.source_index));
+        for index in chosen {
+            if !settings
+                .tracks
+                .iter()
+                .any(|track| track.source_index == index)
+            {
+                settings.tracks.push(MixTrack::new(index));
+            }
+        }
+    }
+
+    if settings.tracks.is_empty() {
+        // With nothing chosen, every recording that was aligned goes into the mix.
+        settings.tracks = report
+            .sources
+            .iter()
+            .enumerate()
+            .filter(|(_, alignment)| alignment.model().is_some())
+            .map(|(index, _)| MixTrack::new(index))
+            .collect();
+    }
+    Ok(settings)
 }

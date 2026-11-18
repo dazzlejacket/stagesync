@@ -1,4 +1,5 @@
-//! Playback: the reference, the corrected target, and the switch between them.
+//! Playback: the reference, the corrected target, the switch between them, and the
+//! mix.
 //!
 //! The preview is not a stand-in for the export — it is the export's own
 //! arithmetic, run in real time. The target is read with the core's decoder, and
@@ -7,17 +8,25 @@
 //! approximated the correction would be worse than useless: it would show a
 //! synchronisation that the export does not have.
 //!
+//! The **mix** is the same: several recordings are read at once, each through its
+//! own position map, and mixed with the core's own pan matrices and gains. The
+//! preview is streaming, so a three-hour concert costs a few tens of megabytes
+//! rather than gigabytes.
+//!
 //! The reference is **never** altered. It is read, resampled to the output
 //! device's rate so that the two can be compared sample for sample, and played.
 
 use std::collections::VecDeque;
 use std::num::NonZero;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player as RodioPlayer, Source};
 use stagesync_core::audio::AudioDecoder;
 use stagesync_core::matching::LinearModel;
+use stagesync_core::mixer::{MixTrack, PanMatrix};
 use stagesync_core::resample::StreamingResampler;
 
 /// The resampling quality, the same filter the renderer uses.
@@ -34,6 +43,8 @@ pub enum Voice {
     Reference,
     /// A target recording, with the correction applied.
     Target,
+    /// The mix of several recordings.
+    Mix,
 }
 
 impl Voice {
@@ -42,6 +53,49 @@ impl Voice {
         match self {
             Voice::Reference => "Reference",
             Voice::Target => "Corrected target",
+            Voice::Mix => "Mix",
+        }
+    }
+}
+
+/// One recording of the mix, with the way it is placed in the field.
+pub struct MixMember {
+    /// The recording to read.
+    pub path: std::path::PathBuf,
+    /// The correction to apply.
+    pub model: LinearModel,
+    /// The fader, as a linear gain.
+    pub gain: f32,
+    /// The pan position: `-1` is hard left, `+1` is hard right.
+    pub pan: f32,
+    /// The law used to pan a mono recording.
+    pub pan_law: stagesync_core::mixer::PanLaw,
+    /// How a stereo recording is panned.
+    pub stereo_pan: stagesync_core::mixer::StereoPan,
+}
+
+impl MixMember {
+    /// A member of the mix, at its own level and in the centre.
+    pub fn new(path: std::path::PathBuf, model: LinearModel) -> Self {
+        Self {
+            path,
+            model,
+            gain: 1.0,
+            pan: 0.0,
+            pan_law: stagesync_core::mixer::PanLaw::EqualPower,
+            stereo_pan: stagesync_core::mixer::StereoPan::Balance,
+        }
+    }
+
+    /// The member described by a track of the mixer's settings.
+    pub fn from_track(path: std::path::PathBuf, model: LinearModel, track: &MixTrack) -> Self {
+        Self {
+            path,
+            model,
+            gain: track.gain * track.trim,
+            pan: track.pan,
+            pan_law: track.pan_law,
+            stereo_pan: track.stereo_pan,
         }
     }
 }
@@ -73,6 +127,11 @@ pub struct Player {
     /// The rate the output device runs at.
     rate: u32,
     volume: f32,
+    /// The loudest sample the mix has produced, shared with the playing source.
+    ///
+    /// The source is handed to the sound device, so the peak it measures is
+    /// published through a shared cell rather than read back from it.
+    mix_peak: Arc<AtomicU32>,
 }
 
 impl Default for Player {
@@ -95,6 +154,7 @@ impl Player {
                     error: None,
                     rate,
                     volume: 1.0,
+                    mix_peak: Arc::new(AtomicU32::new(0)),
                 }
             }
             Err(error) => Self {
@@ -104,6 +164,7 @@ impl Player {
                 error: Some(format!("no audio output device: {error}")),
                 rate: 48_000,
                 volume: 1.0,
+                mix_peak: Arc::new(AtomicU32::new(0)),
             },
         }
     }
@@ -144,6 +205,13 @@ impl Player {
     /// Whether something is playing.
     pub fn is_playing(&self) -> bool {
         self.playing.is_some()
+    }
+
+    /// The loudest sample the mix that is playing has produced.
+    ///
+    /// It is zero when nothing is playing.
+    pub fn mix_peak(&self) -> f32 {
+        f32::from_bits(self.mix_peak.load(Ordering::Relaxed))
     }
 
     /// The position on the reference timeline, in seconds.
@@ -211,6 +279,44 @@ impl Player {
         });
         Ok(())
     }
+
+    /// Play several recordings at once, mixed.
+    ///
+    /// Every recording is read through its own position map, so each one is at the
+    /// place its alignment says it belongs at, and the mix is the core's own: the
+    /// same pan matrices and the same gains the export uses.
+    ///
+    /// The mix is **streamed**: only a block of each recording is ever held in
+    /// memory, so a three-hour concert costs a few tens of megabytes.
+    pub fn play_mix(
+        &mut self,
+        members: &[MixMember],
+        master_gain: f32,
+        from_secs: f64,
+    ) -> Result<(), anyhow::Error> {
+        let rate = self.rate;
+        let from_secs = from_secs.max(0.0);
+        let published_peak = Arc::clone(&self.mix_peak);
+        // The peak of the new mix starts from nothing.
+        published_peak.store(0.0f32.to_bits(), Ordering::Relaxed);
+        let source = MixSource::open(members, master_gain, from_secs, rate, published_peak)?;
+        let Some(player) = &self.player else {
+            return Err(anyhow::anyhow!(
+                "there is no audio output device: {}",
+                self.error.as_deref().unwrap_or("unknown reason")
+            ));
+        };
+        player.stop();
+        player.clear();
+        player.append(source);
+        player.play();
+        self.playing = Some(Playing {
+            voice: Voice::Mix,
+            start_secs: from_secs,
+            started: Instant::now(),
+        });
+        Ok(())
+    }
 }
 
 /// A recording, read from a position and resampled to the output rate.
@@ -229,6 +335,11 @@ struct ResampledSource {
     rate: u32,
     /// Whether the recording has been read to its end.
     finished: bool,
+    /// The number of silent frames before the recording's material begins.
+    ///
+    /// A recording that starts later on the reference timeline than the position
+    /// the playback started at is silent until its own start.
+    delay: u64,
 }
 
 impl ResampledSource {
@@ -239,6 +350,11 @@ impl ResampledSource {
     ///
     /// The position is a position on the **reference** timeline. For a corrected
     /// target it is turned into a position in the recording by the model.
+    ///
+    /// The recording is placed on the reference timeline exactly as the export places
+    /// it: a recording that has not started yet at the given position contributes
+    /// silence until the position its model says it starts at, and the material is
+    /// read from the fraction of a frame the model puts it at.
     fn open(
         path: &Path,
         from_secs: f64,
@@ -249,32 +365,48 @@ impl ResampledSource {
         let in_rate = decoder.meta().sample_rate;
         let channels = decoder.meta().channels.max(1);
 
-        // Where in the recording to start reading, and how much the rate changes.
+        // Where the recording's material sits on the reference timeline, and how the
+        // rate changes.
         //
         // The output advances along the reference timeline at one second per second,
         // whatever the recording's own rate is. For the reference that is simply
         // its own rate; for a corrected target the drift stretches the material, so
         // the recording is read more slowly than it is written.
-        let (start_frame, alpha) = match model {
-            None => (
-                (from_secs * in_rate as f64).round() as u64,
-                in_rate as f64 / out_rate as f64,
+        let (alpha, gamma) = match model {
+            None => (in_rate as f64 / out_rate as f64, 0.0),
+            Some(model) => (
+                in_rate as f64 / (out_rate as f64 * model.scale),
+                -model.offset * in_rate as f64 / model.scale,
             ),
+        };
+
+        // The position in the recording that the given reference position falls on.
+        let position = alpha * (from_secs * out_rate as f64) + gamma;
+        let (start_frame, fraction, delay) = match model {
+            None => {
+                let start = position.floor().max(0.0);
+                (start as u64, position - start, 0)
+            }
             Some(model) => {
-                // The source time that corresponds to the requested reference time.
-                let source_time = (from_secs - model.offset) / model.scale;
-                let source_time = source_time.max(0.0);
-                (
-                    (source_time * in_rate as f64).round() as u64,
-                    in_rate as f64 / (out_rate as f64 * model.scale),
-                )
+                if position >= 0.0 {
+                    let start = position.floor();
+                    (start as u64, position - start, 0)
+                } else {
+                    // The recording has not started yet at this position: it stays
+                    // silent until the position its model gives it.
+                    let start_at = model.offset;
+                    let delay = ((start_at - from_secs).max(0.0) * out_rate as f64).round() as u64;
+                    (0, 0.0, delay)
+                }
             }
         };
 
         decoder.seek_to_frame(start_frame)?;
 
+        // The resampler is given the fraction of the frame the material starts on,
+        // so the preview reads the same position the export does.
         let resamplers = (0..channels)
-            .map(|_| StreamingResampler::new(alpha, 0.0, TAPS, PHASES))
+            .map(|_| StreamingResampler::new(alpha, fraction, TAPS, PHASES))
             .collect();
 
         Ok(Self {
@@ -284,6 +416,7 @@ impl ResampledSource {
             channels: channels as u16,
             rate: out_rate,
             finished: false,
+            delay,
         })
     }
 
@@ -341,6 +474,35 @@ impl ResampledSource {
             }
         }
     }
+
+    /// The next frame of the recording's own channels.
+    ///
+    /// `false` means the recording has nothing more to give. The mixer treats that
+    /// as silence, so a recording that ends leaves no click behind.
+    fn next_frame(&mut self, out: &mut [f32]) -> bool {
+        let channels = self.channels as usize;
+        loop {
+            // The recording has not started yet on the reference timeline: the frame
+            // is silence, and it is silence that the mix adds to the other
+            // recordings rather than the end of this one.
+            if self.delay > 0 {
+                self.delay -= 1;
+                for sample in out.iter_mut().take(channels) {
+                    *sample = 0.0;
+                }
+                return true;
+            }
+            if self.ready.len() >= channels {
+                for sample in out.iter_mut().take(channels) {
+                    *sample = self.ready.pop_front().unwrap_or(0.0);
+                }
+                return true;
+            }
+            if !self.fill() {
+                return false;
+            }
+        }
+    }
 }
 
 impl Iterator for ResampledSource {
@@ -375,6 +537,150 @@ impl Source for ResampledSource {
     fn total_duration(&self) -> Option<std::time::Duration> {
         // The length of what is left depends on where the recording ends, which is
         // not known until it has been read.
+        None
+    }
+}
+
+/// One recording of the mix, read at the output's rate.
+struct MixMemberSource {
+    /// The recording itself.
+    source: ResampledSource,
+    /// The matrix that places the recording in the field.
+    matrix: PanMatrix,
+    /// The fader.
+    gain: f32,
+    /// The recording's current frame, in its own channels.
+    frame: Vec<f32>,
+}
+
+/// Several recordings, mixed, played at once.
+///
+/// The mix is the core's own arithmetic: each recording is read through its own
+/// position map — the same drift correction the export applies — and the pan
+/// matrices and gains are the core's own.
+struct MixSource {
+    /// The recordings of the mix.
+    members: Vec<MixMemberSource>,
+    /// The interleaved stereo output, waiting to be played.
+    ready: VecDeque<f32>,
+    /// The rate the output runs at.
+    rate: u32,
+    /// The master fader.
+    master_gain: f32,
+    /// The loudest sample the mix has produced.
+    peak: f32,
+    /// How many samples above 0 dBFS the mix has produced.
+    overs: u64,
+    /// Where the peak is published for the interface to read.
+    published_peak: Arc<AtomicU32>,
+}
+
+impl MixSource {
+    /// Open the recordings of the mix at a position on the reference timeline.
+    fn open(
+        members: &[MixMember],
+        master_gain: f32,
+        from_secs: f64,
+        out_rate: u32,
+        published_peak: Arc<AtomicU32>,
+    ) -> Result<Self, anyhow::Error> {
+        let mut sources = Vec::with_capacity(members.len());
+        for member in members {
+            let source =
+                ResampledSource::open(&member.path, from_secs, out_rate, Some(&member.model))?;
+            // The matrix is the core's own, so the preview and the export place the
+            // recording in the field in exactly the same way.
+            let channels = source.channels as usize;
+            let matrix =
+                PanMatrix::for_source(channels, member.pan, member.pan_law, member.stereo_pan);
+            sources.push(MixMemberSource {
+                source,
+                matrix,
+                gain: member.gain,
+                frame: vec![0.0; channels.max(1)],
+            });
+        }
+        Ok(Self {
+            members: sources,
+            ready: VecDeque::new(),
+            rate: out_rate,
+            master_gain,
+            peak: 0.0,
+            overs: 0,
+            published_peak,
+        })
+    }
+
+    /// Produce the next output frame.
+    fn fill(&mut self) -> bool {
+        let mut left = 0f32;
+        let mut right = 0f32;
+        let mut any = false;
+
+        for member in self.members.iter_mut() {
+            if !member.source.next_frame(&mut member.frame) {
+                // The recording has ended: it contributes nothing more, and the
+                // silence it leaves is exactly silence, so there is no click.
+                continue;
+            }
+            any = true;
+            let mut out = [0f32; 2];
+            member.matrix.apply(&member.frame, &mut out);
+            left += out[0] * member.gain;
+            right += out[1] * member.gain;
+        }
+        if !any {
+            return false;
+        }
+
+        let left = left * self.master_gain;
+        let right = right * self.master_gain;
+        self.peak = self.peak.max(left.abs()).max(right.abs());
+        // The peak is published as it grows, so the interface can show what the
+        // mix is actually doing rather than what it is expected to do.
+        self.published_peak
+            .store(self.peak.to_bits(), Ordering::Relaxed);
+        if left.abs() > 1.0 {
+            self.overs += 1;
+        }
+        if right.abs() > 1.0 {
+            self.overs += 1;
+        }
+        self.ready.push_back(left);
+        self.ready.push_back(right);
+        true
+    }
+}
+
+impl Iterator for MixSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        loop {
+            if let Some(sample) = self.ready.pop_front() {
+                return Some(sample);
+            }
+            if !self.fill() {
+                return None;
+            }
+        }
+    }
+}
+
+impl Source for MixSource {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        NonZero::new(2).expect("two is not zero")
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        NonZero::new(self.rate).unwrap_or(NonZero::new(48_000).expect("48000 is not zero"))
+    }
+
+    fn total_duration(&self) -> Option<std::time::Duration> {
         None
     }
 }
@@ -456,5 +762,144 @@ mod tests {
             (first - 0.5).abs() < 0.01,
             "the first sample was {first}, and half way through the ramp it should be about 0.5"
         );
+    }
+
+    /// A recording of a constant value.
+    fn constant(path: &Path, value: f32, frames: usize, rate: u32) {
+        let samples = vec![value; frames];
+        let mut writer = WavWriter::create(path, rate, 1, WavFormat::Float32).expect("create");
+        writer
+            .write_planar(std::slice::from_ref(&samples))
+            .expect("write");
+        writer.finalize().expect("finalise");
+    }
+
+    #[test]
+    fn two_recordings_are_played_at_once_and_mixed() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let rate = 8000u32;
+        let a = dir.path().join("a.wav");
+        let b = dir.path().join("b.wav");
+        constant(&a, 0.25, rate as usize, rate);
+        constant(&b, 0.25, rate as usize, rate);
+
+        let members = vec![
+            MixMember::new(a, LinearModel::new(1.0, 0.0)),
+            MixMember::new(b, LinearModel::new(1.0, 0.0)),
+        ];
+        let peak_cell = Arc::new(AtomicU32::new(0));
+        let mut source =
+            MixSource::open(&members, 1.0, 0.0, rate, Arc::clone(&peak_cell)).expect("open");
+
+        // The first frame of the mix, read as a stereo frame.
+        let left = source.next().expect("a sample");
+        let right = source.next().expect("a sample");
+        // Each recording is panned to the centre with the equal-power law, so each
+        // contributes 0.25 * 0.7071 and the mix is the sum.
+        let expected = 2.0 * 0.25 * 0.5f32.sqrt();
+        assert!(
+            (left - expected).abs() < 1e-5,
+            "the mix was {left} and it should be {expected}"
+        );
+        assert!(
+            (right - expected).abs() < 1e-5,
+            "the mix was {right} and it should be {expected}"
+        );
+        // The peak of the mix is published for the interface to read.
+        let published = f32::from_bits(peak_cell.load(Ordering::Relaxed));
+        assert!(published >= left.abs());
+    }
+
+    #[test]
+    fn a_panned_recording_is_played_on_one_side_only() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let rate = 8000u32;
+        let a = dir.path().join("a.wav");
+        constant(&a, 0.5, rate as usize, rate);
+
+        let mut member = MixMember::new(a, LinearModel::new(1.0, 0.0));
+        member.pan = -1.0;
+        let mut source =
+            MixSource::open(&[member], 1.0, 0.0, rate, Arc::new(AtomicU32::new(0))).expect("open");
+
+        let left = source.next().expect("a sample");
+        let right = source.next().expect("a sample");
+        assert!(
+            (left - 0.5).abs() < 1e-5,
+            "the left channel was {left} and it should be 0.5"
+        );
+        assert!(
+            right.abs() < 1e-6,
+            "the right channel was not silent: {right}"
+        );
+    }
+
+    #[test]
+    fn a_recording_that_starts_late_is_silent_until_its_own_start() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let rate = 8000u32;
+        let a = dir.path().join("a.wav");
+        constant(&a, 0.5, rate as usize, rate);
+
+        // The recording belongs half a second into the reference timeline. Played
+        // from the beginning of the timeline it must be silent until then: the
+        // preview places the recording where its model says it is, exactly as the
+        // export does.
+        let offset = 0.5;
+        let members = vec![MixMember::new(a, LinearModel::new(1.0, offset))];
+        let mut source =
+            MixSource::open(&members, 1.0, 0.0, rate, Arc::new(AtomicU32::new(0))).expect("open");
+
+        let start = (offset * rate as f64) as usize;
+        for frame in 0..start {
+            let left = source.next().expect("a sample");
+            let right = source.next().expect("a sample");
+            assert!(
+                left.abs() < 1e-6 && right.abs() < 1e-6,
+                "the recording was heard at frame {frame}, before its own start at {start}: {left}"
+            );
+        }
+        let left = source.next().expect("a sample");
+        let right = source.next().expect("a sample");
+        let expected = 0.5 * 0.5f32.sqrt();
+        assert!(
+            (left - expected).abs() < 1e-5,
+            "the recording was not at its own start: {left} instead of {expected}"
+        );
+        assert!(
+            (right - expected).abs() < 1e-5,
+            "the recording was not at its own start: {right} instead of {expected}"
+        );
+    }
+
+    #[test]
+    fn a_recording_that_ends_leaves_silence_and_no_click() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let rate = 8000u32;
+        let a = dir.path().join("a.wav");
+        // A quarter of a second of material.
+        constant(&a, 0.5, rate as usize / 4, rate);
+
+        let members = vec![MixMember::new(a, LinearModel::new(1.0, 0.0))];
+        let mut source =
+            MixSource::open(&members, 1.0, 0.0, rate, Arc::new(AtomicU32::new(0))).expect("open");
+
+        let mut last: Option<f32> = None;
+        let mut samples = 0usize;
+        for sample in source.by_ref() {
+            // Every sample before the end is the same: there is no click when the
+            // recording stops.
+            if let Some(previous) = last {
+                if samples < rate as usize / 4 - 2 {
+                    assert!(
+                        (sample - previous).abs() < 1e-6,
+                        "the mix jumped at sample {samples}: {previous} then {sample}"
+                    );
+                }
+            }
+            last = Some(sample);
+            samples += 1;
+        }
+        assert!(samples > rate as usize / 4, "the recording was cut short");
     }
 }

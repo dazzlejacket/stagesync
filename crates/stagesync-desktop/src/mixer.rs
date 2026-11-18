@@ -1,0 +1,422 @@
+//! The mixer: the controls, the meters, and the state behind them.
+//!
+//! The panel is drawn under the waveform timeline, because that is where the user
+//! looks when they ask "what will this sound like".
+//!
+//! Two rules govern what the panel shows:
+//!
+//! * **The reference is never a track.** It is the thing the other recordings were
+//!   aligned to; it can be *monitored*, but mixing it into the output would double
+//!   every recording.
+//! * **The level that is shown is a prediction, and says so.** The prediction is
+//!   built from the measured peak of each recording, so it is an upper bound: it
+//!   assumes every recording reaches its peak at the same instant. It is exactly
+//!   the right thing to warn about clipping with.
+
+use eframe::egui::{self, Color32, Rect, Sense, Stroke, Vec2};
+use stagesync_core::audio::PeakCache;
+use stagesync_core::mixer::{db_to_linear, linear_to_db, MixSettings, MixTrack, MonitorMode};
+
+/// What the panel needs to know about one recording.
+#[derive(Debug, Clone)]
+pub struct TrackInfo {
+    /// The recording's name.
+    pub name: String,
+    /// The loudest sample of the recording, when it is known.
+    pub peak: Option<f32>,
+    /// Whether the recording has a reliable alignment.
+    pub aligned: bool,
+    /// How many channels the recording has.
+    ///
+    /// The pan law a mono recording is panned with is not the one a stereo
+    /// recording is panned with, so the prediction needs to know which it is.
+    pub channels: usize,
+}
+
+/// The state of the mixer.
+#[derive(Debug, Clone)]
+pub struct MixerState {
+    /// One track per target recording, in the order of the target list.
+    pub tracks: Vec<MixTrack>,
+    /// What is being listened to.
+    pub mode: MonitorMode,
+    /// The master fader, as a linear gain.
+    pub master_gain: f32,
+    /// The peak of the mix that was last written, when there was one.
+    pub last_peak: Option<f32>,
+    /// The gain reduction the last export's protection applied, in decibels.
+    pub last_gain_reduction_db: f64,
+    /// The loudest sample the mix that is playing has produced.
+    pub live_peak: Option<f32>,
+}
+
+impl Default for MixerState {
+    fn default() -> Self {
+        Self {
+            tracks: Vec::new(),
+            mode: MonitorMode::Both,
+            master_gain: 1.0,
+            last_peak: None,
+            last_gain_reduction_db: 0.0,
+            live_peak: None,
+        }
+    }
+}
+
+impl MixerState {
+    /// A mixer with one track per recording.
+    pub fn new(count: usize) -> Self {
+        Self {
+            tracks: (0..count).map(MixTrack::new).collect(),
+            ..Self::default()
+        }
+    }
+
+    /// Make the mixer match the number of recordings.
+    ///
+    /// A recording that is added gets a track of its own; a recording that is
+    /// removed takes its track with it. The faders of the recordings that stay are
+    /// left alone.
+    pub fn sync_to(&mut self, count: usize) {
+        while self.tracks.len() < count {
+            let index = self.tracks.len();
+            self.tracks.push(MixTrack::new(index));
+        }
+        self.tracks.truncate(count);
+    }
+
+    /// The settings of the whole mix, for the exporter.
+    pub fn settings(&self) -> MixSettings {
+        MixSettings {
+            tracks: self.tracks.clone(),
+            master_gain: self.master_gain,
+        }
+    }
+
+    /// The tracks the monitoring mode plays.
+    ///
+    /// The reference is never among them.
+    pub fn monitored(&self) -> Vec<MixTrack> {
+        MixSettings::for_mode(self.mode, &self.tracks)
+    }
+
+    /// The predicted level of the mix, and whether it would clip.
+    ///
+    /// The prediction is the sum of the recordings' measured peaks, each scaled by
+    /// its own fader and by the gain that places it in the field. It is an upper
+    /// bound — the recordings' peaks rarely fall at the same instant — and it is
+    /// reported as a bound rather than as a measurement.
+    pub fn predicted_output(&self, infos: &[TrackInfo]) -> (f32, f32) {
+        let solo_active = self.tracks.iter().any(|t| t.enabled && t.solo);
+        let mut left = 0f32;
+        let mut right = 0f32;
+        for (track, info) in self.tracks.iter().zip(infos.iter()) {
+            let gain = track.effective_gain(solo_active);
+            if gain == 0.0 {
+                continue;
+            }
+            let Some(peak) = info.peak else {
+                continue;
+            };
+            let matrix = stagesync_core::mixer::PanMatrix::for_source(
+                info.channels.max(1),
+                track.pan,
+                track.pan_law,
+                track.stereo_pan,
+            );
+            let (gl, gr) = matrix
+                .diagonal()
+                .unwrap_or((matrix.gain(0, 0), matrix.gain(1, 1)));
+            left += peak * gain * gl;
+            right += peak * gain * gr;
+        }
+        let master = self.master_gain;
+        (left * master, right * master)
+    }
+}
+
+/// The loudest sample of a recording, from its peak cache.
+pub fn peak_of(cache: &PeakCache) -> f32 {
+    let mut peak = 0f32;
+    for level in &cache.levels {
+        for plane in level.maxs.iter().chain(level.mins.iter()) {
+            for value in plane {
+                peak = peak.max(value.abs());
+            }
+        }
+    }
+    peak
+}
+
+/// Draw the mixer panel.
+///
+/// The panel draws one row per recording: its name, its fader, its pan, its mute
+/// and solo buttons and its meter. Above the rows are the monitoring mode, the
+/// master fader and the predicted level of the whole mix.
+pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
+    ui.heading("Mixer");
+    ui.label(
+        "Every recording is placed on the reference timeline with the correction the \
+         analysis measured. The reference itself is never mixed in.",
+    );
+
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_label("Monitor")
+            .selected_text(state.mode.label())
+            .show_ui(ui, |ui| {
+                for mode in MonitorMode::ALL {
+                    ui.selectable_value(&mut state.mode, mode, mode.label())
+                        .on_hover_text(mode.description());
+                }
+            });
+        ui.label(state.mode.description());
+    });
+
+    // The master fader and the predicted level of the whole mix.
+    let (left, right) = state.predicted_output(infos);
+    let peak = left.max(right);
+    ui.horizontal_wrapped(|ui| {
+        let mut master_db = linear_to_db(state.master_gain);
+        if ui
+            .add(
+                egui::Slider::new(&mut master_db, -60.0..=12.0)
+                    .suffix(" dB")
+                    .text("Master"),
+            )
+            .changed()
+        {
+            state.master_gain = db_to_linear(master_db);
+        }
+        ui.label(format!("Predicted output {:.2} dBFS", linear_to_db(peak)));
+        if peak > 1.0 {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "The mix may clip: it is predicted to reach {:.2} dBFS.",
+                    linear_to_db(peak)
+                ),
+            );
+        } else if let (Some(written), reduction) = (state.last_peak, state.last_gain_reduction_db) {
+            let mut text = format!("Last export {:.2} dBFS", linear_to_db(written));
+            if reduction != 0.0 {
+                text.push_str(&format!(" (protection applied {:.2} dB)", -reduction));
+            }
+            ui.label(text);
+        }
+    });
+
+    // The level the mix that is playing has actually reached. The prediction above
+    // is an upper bound taken from the recordings' own peaks; this is a
+    // measurement of what came out of the mixer.
+    if let Some(live) = state.live_peak {
+        if live > 0.0 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Playing {:.2} dBFS", linear_to_db(live)));
+                if live > 1.0 {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!(
+                            "The playing mix is above full scale: {:.2} dBFS.",
+                            linear_to_db(live)
+                        ),
+                    );
+                }
+            });
+        }
+    }
+
+    ui.separator();
+
+    if state.tracks.is_empty() {
+        ui.label("There are no recordings to mix.");
+        return;
+    }
+
+    for (index, track) in state.tracks.iter_mut().enumerate() {
+        let info = infos.get(index);
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let name = info
+                        .map(|i| i.name.clone())
+                        .unwrap_or_else(|| format!("Recording {}", index + 1));
+                    ui.label(name);
+                    if let Some(info) = info {
+                        if !info.aligned {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                "no alignment: it will not be mixed in",
+                            );
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .selectable_label(track.solo, "S")
+                            .on_hover_text("Solo: hear this recording on its own")
+                            .clicked()
+                        {
+                            track.solo = !track.solo;
+                        }
+                        if ui
+                            .selectable_label(track.mute, "M")
+                            .on_hover_text("Mute this recording")
+                            .clicked()
+                        {
+                            track.mute = !track.mute;
+                        }
+                    });
+                });
+
+                ui.horizontal(|ui| {
+                    let mut gain_db = linear_to_db(track.gain);
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut gain_db, -60.0..=12.0)
+                                .suffix(" dB")
+                                .text("Level"),
+                        )
+                        .changed()
+                    {
+                        track.gain = db_to_linear(gain_db);
+                    }
+                    let mut pan = track.pan;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut pan, -1.0..=1.0)
+                                .suffix(" pan")
+                                .text("Pan"),
+                        )
+                        .changed()
+                    {
+                        track.pan = pan;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Meter");
+                    let peak = info.and_then(|i| i.peak).unwrap_or(0.0);
+                    let contribution = peak * track.gain;
+                    meter(ui, contribution);
+                    ui.label(format!("{:.1} dBFS", linear_to_db(contribution)));
+                });
+            });
+    }
+}
+
+/// Draw a level meter.
+fn meter(ui: &mut egui::Ui, peak: f32) {
+    let height = 12.0;
+    let width = 120.0;
+    let (rect, _response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, Color32::from_gray(28));
+
+    // The scale runs from -60 dBFS to 0 dBFS.
+    let db = linear_to_db(peak);
+    let fraction = ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
+    if fraction > 0.0 {
+        let filled = Rect::from_min_max(
+            rect.left_top(),
+            egui::pos2(rect.left() + rect.width() * fraction, rect.bottom()),
+        );
+        let colour = if db > -1.0 {
+            Color32::from_rgb(198, 58, 58)
+        } else if db > -12.0 {
+            Color32::from_rgb(214, 168, 44)
+        } else {
+            Color32::from_rgb(62, 158, 92)
+        };
+        painter.rect_filled(filled, 2.0, colour);
+    }
+    // The 0 dBFS line.
+    let zero = rect.right();
+    painter.line_segment(
+        [
+            egui::pos2(zero, rect.top()),
+            egui::pos2(zero, rect.bottom()),
+        ],
+        Stroke::new(1.0, Color32::from_gray(120)),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stagesync_core::mixer::{PanLaw, StereoPan};
+
+    #[test]
+    fn the_mixer_keeps_a_track_for_every_recording() {
+        let mut state = MixerState::new(2);
+        assert_eq!(state.tracks.len(), 2);
+        state.sync_to(3);
+        assert_eq!(state.tracks.len(), 3);
+        state.sync_to(1);
+        assert_eq!(state.tracks.len(), 1);
+    }
+
+    #[test]
+    fn a_muted_recording_contributes_nothing_to_the_prediction() {
+        let mut state = MixerState::new(1);
+        state.tracks[0].gain = 1.0;
+        let infos = vec![TrackInfo {
+            name: "a".to_string(),
+            peak: Some(0.5),
+            aligned: true,
+            channels: 1,
+        }];
+        let (left, _) = state.predicted_output(&infos);
+        assert!(left > 0.0, "the prediction was empty");
+        state.tracks[0].mute = true;
+        let (left, _) = state.predicted_output(&infos);
+        assert!(left.abs() < 1e-9, "the muted recording was counted: {left}");
+    }
+
+    #[test]
+    fn the_prediction_grows_with_the_fader() {
+        let mut state = MixerState::new(1);
+        let infos = vec![TrackInfo {
+            name: "a".to_string(),
+            peak: Some(0.5),
+            aligned: true,
+            channels: 1,
+        }];
+        state.tracks[0].gain = 1.0;
+        let (quiet, _) = state.predicted_output(&infos);
+        state.tracks[0].gain = 2.0;
+        let (loud, _) = state.predicted_output(&infos);
+        assert!(
+            loud > quiet * 1.9,
+            "the prediction did not follow the fader: {quiet} and {loud}"
+        );
+    }
+
+    #[test]
+    fn the_reference_is_never_a_track_of_the_mix() {
+        let state = MixerState::new(2);
+        let monitored = state.monitored();
+        assert!(
+            monitored.iter().all(|t| t.source_index < 2),
+            "a track outside the recordings was monitored"
+        );
+    }
+
+    #[test]
+    fn the_pan_moves_the_prediction_towards_one_side() {
+        let mut state = MixerState::new(1);
+        state.tracks[0].pan_law = PanLaw::ConstantGain;
+        state.tracks[0].stereo_pan = StereoPan::Balance;
+        let infos = vec![TrackInfo {
+            name: "a".to_string(),
+            peak: Some(0.5),
+            aligned: true,
+            channels: 1,
+        }];
+        state.tracks[0].pan = -1.0;
+        let (left, right) = state.predicted_output(&infos);
+        assert!(
+            left > right,
+            "the recording was not panned left: {left} and {right}"
+        );
+    }
+}

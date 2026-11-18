@@ -21,8 +21,8 @@ use crate::player::{Player, Voice};
 use crate::settings::{self, AppSettings};
 use crate::state::{
     drift_verdict, expand_dropped_paths, format_duration, format_label, is_wav, layout_label,
-    metrics_for, status_for, verification_for, AnchorFields, ExportSettings, FileEntry,
-    TaskProgress,
+    metrics_for, protection_label, status_for, verification_for, AnchorFields, ExportSettings,
+    FileEntry, TaskProgress,
 };
 use crate::timeline;
 use crate::waveview;
@@ -139,6 +139,8 @@ pub struct StageSyncApp {
     /// the sync engine measured is left alone, because a placement that is a few
     /// milliseconds out says nothing about the rate.
     nudges: Vec<f64>,
+    /// The mixer: one track per recording, with its fader, pan, mute and solo.
+    mixer: crate::mixer::MixerState,
     /// The nudge history, so that a nudge can be undone.
     nudge_history: Vec<(usize, f64)>,
     /// How many times the window has been asked to shrink to the monitor.
@@ -176,6 +178,7 @@ impl StageSyncApp {
                 layout: Layout::SourceAligned,
                 sample_rate: None,
                 format: stagesync_core::audio::WavFormat::Float32,
+                ..ExportSettings::default()
             },
             use_spectral_check: true,
             measure_waveform_drift: true,
@@ -197,6 +200,7 @@ impl StageSyncApp {
             loop_region: None,
             nudges: Vec::new(),
             nudge_history: Vec::new(),
+            mixer: crate::mixer::MixerState::default(),
             size_requests: 0,
         };
         app.apply_settings(&stored);
@@ -731,6 +735,9 @@ impl StageSyncApp {
         self.last_error = None;
         self.notice = None;
         self.push_log(format!("export started into {}", self.settings.dir));
+        // The mixer's settings travel with the export, so that the file the window
+        // writes is the mix the user can hear.
+        self.settings.mix = self.mixer.settings();
         jobs::spawn_export(self.tx.clone(), report, self.settings.clone(), cancel);
     }
 
@@ -1072,6 +1079,8 @@ impl StageSyncApp {
                         "Reference timeline, merged",
                         Layout::ReferenceTimelineMerged,
                     ),
+                    ("Mixdown", Layout::Mixdown),
+                    ("Synchronised stems", Layout::MixStems),
                 ] {
                     changed |= ui
                         .selectable_value(&mut self.settings.layout, layout, label)
@@ -1087,6 +1096,12 @@ impl StageSyncApp {
             }
             Layout::ReferenceTimelineMerged => {
                 "One reference-length file with every source placed; overlaps follow the order above."
+            }
+            Layout::Mixdown => {
+                "One mixed file: the recordings the mixer plays, on the reference timeline."
+            }
+            Layout::MixStems => {
+                "One reference-length file per recording the mixer plays, without the mix."
             }
         });
 
@@ -1123,6 +1138,47 @@ impl StageSyncApp {
                         .changed();
                 }
             });
+
+        // The clipping protection only applies to the mixing layouts: the other
+        // layouts write one recording at a time, and a recording is never turned
+        // down without being asked to be.
+        if self.settings.layout.is_mix() {
+            egui::ComboBox::from_label("Clipping")
+                .selected_text(protection_label(self.settings.protection))
+                .show_ui(ui, |ui| {
+                    for protection in [
+                        stagesync_core::mixer::ClippingProtection::None,
+                        stagesync_core::mixer::ClippingProtection::SoftClip { threshold: 0.9 },
+                        stagesync_core::mixer::ClippingProtection::AutoGain { target_dbfs: -1.0 },
+                    ] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.settings.protection,
+                                protection,
+                                protection_label(protection),
+                            )
+                            .changed();
+                    }
+                });
+            wrapped(
+                ui,
+                match self.settings.protection {
+                    stagesync_core::mixer::ClippingProtection::None => {
+                        "Nothing is done. A 32-bit float file holds a peak above 0 dBFS, so it \
+                         is written as it is."
+                    }
+                    stagesync_core::mixer::ClippingProtection::SoftClip { .. } => {
+                        "Samples above the threshold are compressed smoothly. This changes the \
+                         material, and the number of samples it touched is reported."
+                    }
+                    stagesync_core::mixer::ClippingProtection::AutoGain { .. } => {
+                        "The mix is measured and one master gain is applied so that the \
+                         loudest sample lands on the target. The recordings keep their \
+                         relative levels."
+                    }
+                },
+            );
+        }
 
         ui.add_space(6.0);
         let can_export = self.report.is_some()
@@ -1200,6 +1256,8 @@ impl StageSyncApp {
 
         self.timeline_section(ui);
         ui.add_space(8.0);
+        self.mixer_section(ui);
+        ui.add_space(8.0);
         self.transport_section(ui);
         ui.add_space(4.0);
         self.problems_section(ui);
@@ -1209,6 +1267,64 @@ impl StageSyncApp {
         self.anchor_section(ui);
         ui.add_space(8.0);
         self.detail_section(ui);
+    }
+
+    /// The mixer: one row per recording, with its fader, pan, mute, solo and meter.
+    ///
+    /// The panel sits directly under the timeline, because that is where the user
+    /// looks when they ask what the mix will sound like.
+    fn mixer_section(&mut self, ui: &mut egui::Ui) {
+        // The mixer always has one track per recording, whether or not the analysis
+        // has run: a recording that has no alignment yet still deserves a fader.
+        self.mixer.sync_to(self.targets.len());
+
+        // The level the playing mix has actually reached, as opposed to the level
+        // it is predicted to reach.
+        self.mixer.live_peak = match self.player.voice() {
+            Some(crate::player::Voice::Mix) => {
+                let peak = self.player.mix_peak();
+                if peak > 0.0 {
+                    Some(peak)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        let infos: Vec<crate::mixer::TrackInfo> = self
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let peak = self
+                    .peaks
+                    .get(&entry.path)
+                    .map(|cache| crate::mixer::peak_of(cache.as_ref()));
+                let aligned = self
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.sources.get(index))
+                    .map(|alignment| alignment.model().is_some())
+                    .unwrap_or(false);
+                // The channel count comes from the analysis when there is one, and
+                // from the recording's own metadata otherwise.
+                let channels = self
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.sources.get(index))
+                    .map(|alignment| alignment.source.channels)
+                    .unwrap_or(1);
+                crate::mixer::TrackInfo {
+                    name: entry.name(),
+                    peak,
+                    aligned,
+                    channels: channels.max(1),
+                }
+            })
+            .collect();
+
+        crate::mixer::panel(ui, &mut self.mixer, &infos);
     }
 
     /// The waveform timeline: the reference on top, the recordings below it.
@@ -1435,6 +1551,13 @@ impl StageSyncApp {
             {
                 self.play_voice(Voice::Target);
             }
+            if ui
+                .selectable_label(self.voice == Voice::Mix, "Mix")
+                .on_hover_text("Play the recordings the mixer has selected, mixed together")
+                .clicked()
+            {
+                self.play_voice(Voice::Mix);
+            }
 
             ui.separator();
 
@@ -1523,6 +1646,29 @@ impl StageSyncApp {
                 );
                 self.player.play_target(&path, &model, position)
             }
+            Voice::Mix => {
+                if self.mixer.mode == stagesync_core::mixer::MonitorMode::ReferenceOnly {
+                    // The reference is monitored on its own. It is never a track of
+                    // the mix, so "the mix" in this mode is the reference alone.
+                    let Some(path) = self.reference.as_ref().map(|entry| entry.path.clone()) else {
+                        self.last_error = Some("There is no reference recording.".to_string());
+                        return;
+                    };
+                    self.player.play_reference(&path, position)
+                } else {
+                    let members = self.mix_members();
+                    if members.is_empty() {
+                        self.last_error = Some(
+                            "There is nothing to mix: run the analysis and choose the \
+                             recordings in the mixer."
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let master = self.mixer.master_gain;
+                    self.player.play_mix(&members, master, position)
+                }
+            }
         };
         match result {
             Ok(()) => {
@@ -1534,6 +1680,42 @@ impl StageSyncApp {
                 self.last_error = Some(format!("Playback failed: {error:#}"));
             }
         }
+    }
+
+    /// The recordings the mixer plays, with their corrections.
+    ///
+    /// The reference is never among them: it is the thing the other recordings were
+    /// aligned to, and mixing it in would double every one of them.
+    fn mix_members(&self) -> Vec<crate::player::MixMember> {
+        let Some(report) = self.report.as_ref() else {
+            return Vec::new();
+        };
+        let monitored = self.mixer.monitored();
+        let mut members = Vec::with_capacity(monitored.len());
+        for track in monitored {
+            let Some(alignment) = report.sources.get(track.source_index) else {
+                continue;
+            };
+            let Some(model) = alignment.model() else {
+                continue;
+            };
+            // A muted recording is not played at all: multiplying by zero would
+            // still decode the file.
+            if track.mute {
+                continue;
+            }
+            // A pending nudge moves the recording immediately, so that the mix is
+            // heard the way the picture shows it.
+            let model = stagesync_core::matching::LinearModel::new(
+                model.scale,
+                model.offset + self.nudges.get(track.source_index).copied().unwrap_or(0.0),
+            );
+            let mut member =
+                crate::player::MixMember::from_track(alignment.source.path.clone(), model, &track);
+            member.gain *= track.trim;
+            members.push(member);
+        }
+        members
     }
 
     /// The places worth listening to.

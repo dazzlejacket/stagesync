@@ -321,7 +321,18 @@ pub fn export_report(
     let expected = match options.layout {
         Layout::SourceAligned | Layout::ReferenceTimelinePerSource => report.sources.len(),
         Layout::ReferenceTimelineMerged => 1,
+        Layout::Mixdown => 1,
+        Layout::MixStems => settings.mix.tracks.len().max(1),
     };
+
+    // The recordings the mixer plays. The reference is never among them.
+    let selected: Vec<usize> = settings
+        .mix
+        .tracks
+        .iter()
+        .filter(|track| track.enabled && !track.mute)
+        .map(|track| track.source_index)
+        .collect();
 
     // The corrected files are named after the recordings they come from, so an
     // export into a directory that already holds a recording of that name
@@ -331,7 +342,10 @@ pub fn export_report(
     let inputs: Vec<PathBuf> = std::iter::once(report.reference.path.clone())
         .chain(report.sources.iter().map(|a| a.source.path.clone()))
         .collect();
-    let planned = render::complete_outputs(&out, &planned_outputs(&out, report, options.layout));
+    let planned = render::complete_outputs(
+        &out,
+        &planned_outputs(&out, report, options.layout, &selected),
+    );
     // Two recordings that share a file name are given the same output name, and
     // the second write would silently replace the first.
     render::ensure_outputs_are_distinct(&planned)
@@ -455,6 +469,90 @@ pub fn export_report(
                     JobFailure::Failed(format!("failed to render {}: {error:#}", path.display()))
                 })?;
             renders.push(result);
+        }
+        Layout::Mixdown => {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(JobFailure::Cancelled);
+            }
+            if selected.is_empty() {
+                return Err(JobFailure::Failed(
+                    "no recording was chosen for the mix".to_string(),
+                ));
+            }
+            step += 1;
+            report_progress(
+                &mut *on_progress,
+                step,
+                expected,
+                "mixing the recordings".to_string(),
+            );
+            let path = staged.path("mixdown.wav");
+            render::prepare_output(&path)
+                .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+            let mix_options = stagesync_core::mixer::MixOptions {
+                sample_rate: options.sample_rate,
+                channels: 2,
+                format: options.format,
+                protection: settings.protection,
+                ..stagesync_core::mixer::MixOptions::default()
+            };
+            let result =
+                stagesync_core::mixer::render_mix(report, &settings.mix, &mix_options, &path)
+                    .map_err(|error| {
+                        JobFailure::Failed(format!(
+                            "failed to render {}: {error:#}",
+                            path.display()
+                        ))
+                    })?;
+            for note in &result.notes {
+                log::info!("the mix: {note}");
+            }
+            renders.push(RenderResult {
+                path: result.path.clone(),
+                sample_rate: result.sample_rate,
+                channels: result.channels,
+                frames: result.frames,
+                source_frames: result.frames,
+                silence_frames: 0,
+                effective_rate: 1.0,
+                pitch_shift_cents: 0.0,
+                resampled: false,
+            });
+        }
+        Layout::MixStems => {
+            // One synchronised file per chosen recording, without the mix.
+            for index in &selected {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(JobFailure::Cancelled);
+                }
+                let Some(alignment) = report.sources.get(*index) else {
+                    continue;
+                };
+                let Some(model) = alignment.model() else {
+                    continue;
+                };
+                step += 1;
+                report_progress(
+                    &mut *on_progress,
+                    step,
+                    expected,
+                    format!("placing {}", alignment.source.file_name),
+                );
+                let path = staged.path(&format!("{}_stem.wav", stem(&alignment.source.file_name)));
+                render::prepare_output(&path)
+                    .map_err(|error| JobFailure::Failed(format!("{error:#}")))?;
+                let result = render::render_reference_timeline(
+                    &alignment.source.path,
+                    &model,
+                    report.timeline_duration,
+                    &path,
+                    &options,
+                )
+                .map_err(|error| {
+                    JobFailure::Failed(format!("failed to render {}: {error:#}", path.display()))
+                })?;
+                renders.push(result);
+            }
         }
     }
 
@@ -641,7 +739,12 @@ fn panic_text(payload: &(dyn Any + Send)) -> String {
 /// The names are worked out before anything is written, so that an export
 /// which would land on one of the recordings can be refused before the first
 /// file is touched.
-fn planned_outputs(out: &Path, report: &AlignmentReport, layout: Layout) -> Vec<PathBuf> {
+fn planned_outputs(
+    out: &Path,
+    report: &AlignmentReport,
+    layout: Layout,
+    selected: &[usize],
+) -> Vec<PathBuf> {
     match layout {
         Layout::SourceAligned => report
             .sources
@@ -654,5 +757,11 @@ fn planned_outputs(out: &Path, report: &AlignmentReport, layout: Layout) -> Vec<
             .map(|a| out.join(format!("{}_timeline.wav", stem(&a.source.file_name))))
             .collect(),
         Layout::ReferenceTimelineMerged => vec![out.join("timeline_merged.wav")],
+        Layout::Mixdown => vec![out.join("mixdown.wav")],
+        Layout::MixStems => selected
+            .iter()
+            .filter_map(|index| report.sources.get(*index))
+            .map(|a| out.join(format!("{}_stem.wav", stem(&a.source.file_name))))
+            .collect(),
     }
 }

@@ -45,6 +45,17 @@ pub enum Layout {
     ReferenceTimelinePerSource,
     /// One merged reference-length timeline covering all sources.
     ReferenceTimelineMerged,
+    /// One mixed file: the recordings the user chose, mixed onto the reference
+    /// timeline.
+    ///
+    /// The mix is produced by [`crate::mixer`], not by this module, but it is a
+    /// layout of the export all the same.
+    Mixdown,
+    /// One reference-length timeline per chosen recording, without the mix.
+    ///
+    /// These are the synchronised stems: the recordings placed on the reference
+    /// timeline, each on its own, so that they can be mixed elsewhere.
+    MixStems,
 }
 
 impl Layout {
@@ -54,7 +65,14 @@ impl Layout {
             Layout::SourceAligned => "source_aligned",
             Layout::ReferenceTimelinePerSource => "reference_timeline_per_source",
             Layout::ReferenceTimelineMerged => "reference_timeline_merged",
+            Layout::Mixdown => "mixdown",
+            Layout::MixStems => "mix_stems",
         }
+    }
+
+    /// Whether the layout is one of the mixing layouts.
+    pub fn is_mix(self) -> bool {
+        matches!(self, Layout::Mixdown | Layout::MixStems)
     }
 }
 
@@ -1109,10 +1127,28 @@ pub fn safe_stem(name: &str) -> String {
 /// which would land on one of the recordings can be refused before the first
 /// file is touched. The *complete* set of files an export writes — this list
 /// plus the sidecars — is [`complete_outputs`].
+///
+/// This is the form every layout but the stems uses: all of them write a file
+/// for every recording, or one file for the whole timeline. The stem layout
+/// writes one file per *chosen* recording and is [`planned_outputs_for`].
 pub fn planned_outputs(
     out: &Path,
     report: &crate::matching::AlignmentReport,
     layout: Layout,
+) -> Vec<PathBuf> {
+    planned_outputs_for(out, report, layout, &[])
+}
+
+/// The corrected audio files an export writes, for the chosen recordings.
+///
+/// `selected` names the recordings that go into the mix. It is ignored by the
+/// layouts that use every recording; the stem layout writes one file per
+/// selected recording.
+pub fn planned_outputs_for(
+    out: &Path,
+    report: &crate::matching::AlignmentReport,
+    layout: Layout,
+    selected: &[usize],
 ) -> Vec<PathBuf> {
     match layout {
         Layout::SourceAligned => report
@@ -1126,6 +1162,12 @@ pub fn planned_outputs(
             .map(|a| out.join(format!("{}_timeline.wav", safe_stem(&a.source.file_name))))
             .collect(),
         Layout::ReferenceTimelineMerged => vec![out.join("timeline_merged.wav")],
+        Layout::Mixdown => vec![out.join("mixdown.wav")],
+        Layout::MixStems => selected
+            .iter()
+            .filter_map(|index| report.sources.get(*index))
+            .map(|a| out.join(format!("{}_stem.wav", safe_stem(&a.source.file_name))))
+            .collect(),
     }
 }
 

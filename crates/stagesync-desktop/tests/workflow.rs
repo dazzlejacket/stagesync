@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use stagesync_core::audio::{WavFormat, WavReader, WavWriter};
 use stagesync_core::matching::{AlignmentReport, LinearModel};
+use stagesync_core::mixer::{ClippingProtection, MixSettings};
 use stagesync_core::pipeline::{analyze, AnalysisConfig};
 use stagesync_core::render::Layout;
 
@@ -138,6 +139,8 @@ fn export_writes_every_artefact_and_reports_real_paths() {
         layout: Layout::SourceAligned,
         sample_rate: None,
         format: WavFormat::Float32,
+        mix: MixSettings::default(),
+        protection: ClippingProtection::None,
     };
 
     let mut progress: Vec<TaskProgress> = Vec::new();
@@ -269,6 +272,8 @@ fn export_stops_when_it_is_cancelled() {
         layout: Layout::SourceAligned,
         sample_rate: None,
         format: WavFormat::Int16,
+        mix: MixSettings::default(),
+        protection: ClippingProtection::None,
     };
 
     // The flag is already set, so the export must refuse to start.

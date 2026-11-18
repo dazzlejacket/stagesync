@@ -8,6 +8,7 @@
 pub mod app;
 pub mod chart;
 pub mod jobs;
+pub mod mixer;
 pub mod platform;
 pub mod player;
 pub mod settings;

@@ -108,6 +108,8 @@ pub fn layout_name(layout: Layout) -> &'static str {
         Layout::SourceAligned => "source_aligned",
         Layout::ReferenceTimelinePerSource => "timeline_per_source",
         Layout::ReferenceTimelineMerged => "timeline_merged",
+        Layout::Mixdown => "mixdown",
+        Layout::MixStems => "mix_stems",
     }
 }
 
@@ -116,6 +118,8 @@ pub fn layout_from_name(name: &str) -> Layout {
     match name {
         "timeline_per_source" => Layout::ReferenceTimelinePerSource,
         "timeline_merged" => Layout::ReferenceTimelineMerged,
+        "mixdown" => Layout::Mixdown,
+        "mix_stems" => Layout::MixStems,
         _ => Layout::SourceAligned,
     }
 }
