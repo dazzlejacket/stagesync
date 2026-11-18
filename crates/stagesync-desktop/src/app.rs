@@ -58,6 +58,15 @@ enum PendingAction {
     CloseWindow,
 }
 
+/// Active panel tab in the lower workspace dock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DockTab {
+    #[default]
+    Mixer,
+    Inspector,
+    Manual,
+}
+
 /// A background job that is currently running.
 struct RunningJob {
     kind: JobKind,
@@ -178,6 +187,12 @@ pub struct StageSyncApp {
     pending_confirm: Option<PendingAction>,
     /// Set once the user explicitly confirmed closing with unsaved changes.
     force_close: bool,
+    /// Active panel tab in the lower workspace dock.
+    dock_tab: DockTab,
+    /// Whether the expandable message log drawer is open.
+    show_log: bool,
+    /// Whether the right Export & Inspector drawer is visible.
+    show_export: bool,
 }
 
 impl Default for StageSyncApp {
@@ -249,6 +264,9 @@ impl StageSyncApp {
             recovery_available: project::load_recovery_meta(),
             pending_confirm: None,
             force_close: false,
+            dock_tab: DockTab::Mixer,
+            show_log: false,
+            show_export: true,
         };
         app.apply_settings(&stored);
         app
@@ -804,6 +822,17 @@ impl StageSyncApp {
         self.project_path.as_deref()
     }
 
+    /// Whether an alignment report is currently populated.
+    pub fn has_report(&self) -> bool {
+        self.report.is_some()
+    }
+
+    /// Whether all imported recordings have finished building peak caches.
+    pub fn has_all_peaks(&self) -> bool {
+        self.peaks_pending == 0
+            && self.peaks.len() >= (self.reference.is_some() as usize + self.targets.len())
+    }
+
     /// Mark the active project as having unsaved changes.
     fn mark_dirty(&mut self) {
         if self.reference.is_some() || !self.targets.is_empty() || self.project_path.is_some() {
@@ -1293,7 +1322,29 @@ impl StageSyncApp {
 
     // --- Panels ------------------------------------------------------------
 
-    /// The toolbar with the run controls and the progress display.
+    /// Switch theme mode cleanly (`Dark`, `Light`, `System`) and persist preference.
+    pub fn set_theme_mode(&mut self, mode: ThemeMode) {
+        self.theme_mode = mode;
+        self.palette = match mode {
+            ThemeMode::Light => Palette::light(),
+            _ => Palette::dark(),
+        };
+        self.persist_settings();
+    }
+
+    /// Select a target recording by index for inspection / screenshots / shortcuts.
+    pub fn select_target(&mut self, index: usize) {
+        if index < self.targets.len() {
+            self.selection = Some(Selection::Target(index));
+        }
+    }
+
+    /// Drain pending background jobs (`Probed`, `PeaksReady`, `AnalysisFinished`, `ExportFinished`).
+    pub fn poll_background(&mut self) {
+        self.drain_events();
+    }
+
+    /// Compact dual-row studio header: workflow & project controls on top, transport & zoom below.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let busy = self.running.is_some() || self.verifying;
         let can_analyze = self.reference.is_some() && !self.targets.is_empty() && !busy;
@@ -1303,11 +1354,11 @@ impl StageSyncApp {
 
         ui.horizontal_wrapped(|ui| {
             ui.menu_button("File", |ui| {
-                if ui.button("New Project").clicked() {
+                if ui.button("New Project  (Ctrl+N)").clicked() {
                     ui.close();
                     self.request_action(PendingAction::NewProject);
                 }
-                if ui.button("Open Project…").clicked() {
+                if ui.button("Open Project…  (Ctrl+O)").clicked() {
                     ui.close();
                     self.request_action(PendingAction::PickOpenProject);
                 }
@@ -1332,15 +1383,24 @@ impl StageSyncApp {
                     }
                 });
                 ui.separator();
-                if ui.button("Save Project").clicked() {
+                if ui.button("Save Project  (Ctrl+S)").clicked() {
                     ui.close();
                     self.browse_save_project(false);
                 }
-                if ui.button("Save Project As…").clicked() {
+                if ui.button("Save Project As…  (Ctrl+Shift+S)").clicked() {
                     ui.close();
                     self.browse_save_project(true);
                 }
             });
+
+            if ui
+                .button("Add files…")
+                .on_hover_text("Import reference and target audio files")
+                .clicked()
+            {
+                self.browse_for_files();
+            }
+
             let proj_label = match &self.project_path {
                 Some(p) => p
                     .file_name()
@@ -1348,103 +1408,237 @@ impl StageSyncApp {
                     .unwrap_or_else(|| "Untitled".to_string()),
                 None => "Untitled".to_string(),
             };
-            ui.label(if self.dirty {
-                format!("{proj_label}*")
+            ui.colored_label(
+                if self.dirty {
+                    self.palette.accent
+                } else {
+                    self.palette.text_muted
+                },
+                if self.dirty {
+                    format!("{proj_label}*")
+                } else {
+                    proj_label
+                },
+            );
+
+            ui.separator();
+
+            let analyze_btn = egui::Button::new(egui::RichText::new("Analyze").strong().color(
+                if can_analyze {
+                    Color32::WHITE
+                } else {
+                    self.palette.text_muted
+                },
+            ))
+            .fill(if can_analyze {
+                self.palette.accent
             } else {
-                proj_label
+                self.palette.bg_surface
             });
-            ui.separator();
             start = ui
-                .add_enabled(can_analyze, egui::Button::new("Analyze"))
+                .add_enabled(can_analyze, analyze_btn)
+                .on_hover_text("Run coarse + fine sync & clock drift measurement")
                 .clicked();
+
             if self.running.is_some() {
-                let label = match self.running.as_ref().map(|job| job.kind) {
-                    Some(JobKind::Export) => "Cancel (the file being written cannot be stopped)",
-                    _ => "Cancel",
-                };
-                cancel = ui.button(label).clicked();
-            } else if self.verifying {
-                ui.label("Verifying…");
-            }
-            ui.separator();
-            changed |= ui
-                .checkbox(&mut self.use_spectral_check, "Spectral cross-check")
-                .on_hover_text(
-                    "Run the independent log-mel cross-check while analysing. It is slower and \
-                     gives a second opinion on every match; turn it off if it is not usable.",
-                )
-                .changed();
-            changed |= ui
-                .checkbox(&mut self.measure_waveform_drift, "Waveform drift check")
-                .on_hover_text(
-                    "Measure the drift on the raw waveform as an independent second opinion, at \
-                     positions the fit did not use. It costs an extra pass over the audio and it \
-                     is the only way to tell a measured drift from a guessed one.",
-                )
-                .changed();
-            changed |= ui
-                .checkbox(&mut self.force_offset_only, "Offset only")
-                .on_hover_text(
-                    "Correct the position but leave the rate alone. Use this when the recordings \
-                     must not be resampled.",
-                )
-                .changed();
-            ui.separator();
-            match &self.progress {
-                Some(progress) => {
-                    ui.label(progress.label.clone());
-                    ui.add(egui::ProgressBar::new(
-                        progress.fraction.clamp(0.0, 1.0) as f32
-                    ));
-                    ui.label(progress.message.clone());
-                }
-                None => {
-                    if self.verifying {
-                        ui.label("Verifying the rendered correction…");
-                    } else if self.peaks_pending > 0 {
-                        ui.label(format!(
-                            "Drawing the waveforms… ({} left)",
-                            self.peaks_pending
-                        ));
-                    } else {
-                        // The state of the session, in one line: what is loaded and
-                        // what has been worked out about it.
-                        let mut info = format!(
-                            "{} recording(s), {} waveform(s)",
-                            self.reference.is_some() as usize + self.targets.len(),
-                            self.peaks.len()
-                        );
-                        if let Some(report) = self.report.as_ref() {
-                            info.push_str(&format!(
-                                " · aligned in {:.1} s",
-                                report
-                                    .timeline
-                                    .last()
-                                    .map_or(0.0, |span| span.reference_end)
-                            ));
-                            let low = report
-                                .timeline
-                                .iter()
-                                .filter(|span| span.kind == SegmentKind::LowConfidence)
-                                .count();
-                            let gaps = report
-                                .timeline
-                                .iter()
-                                .filter(|span| span.kind == SegmentKind::UncoveredReference)
-                                .count();
-                            info.push_str(&format!(" · {gaps} gap(s), {low} uncertain"));
-                        }
-                        ui.label(info);
+                let tip = match self.running.as_ref().map(|job| job.kind) {
+                    Some(JobKind::Export) => {
+                        "Cancel remaining exports (the file currently writing cannot stop mid-file)"
                     }
+                    _ => "Stop the running analysis",
+                };
+                cancel = ui.button("Cancel").on_hover_text(tip).clicked();
+            } else if self.verifying {
+                ui.colored_label(self.palette.accent, "Verifying…");
+            }
+
+            ui.menu_button("Options", |ui| {
+                changed |= ui
+                    .checkbox(&mut self.use_spectral_check, "Spectral cross-check")
+                    .on_hover_text(
+                        "Run independent log-mel cross-check for confidence corroboration.",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut self.measure_waveform_drift, "Waveform drift check")
+                    .on_hover_text("Measure raw waveform GCC-PHAT drift at hold-out positions.")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut self.force_offset_only, "Offset only (no resampling)")
+                    .on_hover_text(
+                        "Align constant offset only and keep source playback rate unchanged.",
+                    )
+                    .changed();
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .selectable_label(self.show_export, "Export panel")
+                    .on_hover_text("Toggle Export inspector drawer")
+                    .clicked()
+                {
+                    self.show_export = !self.show_export;
+                }
+                if ui
+                    .selectable_label(self.show_log, format!("Log ({})", self.log.len()))
+                    .on_hover_text("Toggle message log drawer")
+                    .clicked()
+                {
+                    self.show_log = !self.show_log;
+                }
+                let theme_icon = if self.palette.dark {
+                    crate::theme::Icon::Moon
+                } else {
+                    crate::theme::Icon::Sun
+                };
+                if crate::theme::small_icon_button(
+                    ui,
+                    theme_icon,
+                    "Toggle theme",
+                    &format!(
+                        "Theme: {} (click to cycle Dark / Light / System)",
+                        self.theme_mode.label()
+                    ),
+                )
+                .clicked()
+                {
+                    self.theme_mode = match self.theme_mode {
+                        ThemeMode::Dark => ThemeMode::Light,
+                        ThemeMode::Light => ThemeMode::System,
+                        ThemeMode::System => ThemeMode::Dark,
+                    };
+                    self.persist_settings();
+                }
+                ui.colored_label(self.palette.text_muted, self.theme_mode.label());
+            });
+        });
+
+        ui.separator();
+
+        // Row 2: Studio Transport, A/B Switch, Timecode, and Timeline Zoom/Fit
+        let duration = self
+            .report
+            .as_ref()
+            .map(|report| report.timeline_duration.max(1.0))
+            .or_else(|| {
+                self.reference
+                    .as_ref()
+                    .and_then(|r| r.meta.as_ref())
+                    .map(|m| m.duration_secs.max(1.0))
+            })
+            .unwrap_or(600.0);
+
+        ui.horizontal_wrapped(|ui| {
+            let playing = self.player.is_playing();
+            let play_btn =
+                egui::Button::new(if playing { "Stop" } else { "Play" }).fill(if playing {
+                    self.palette.playhead.gamma_multiply(0.22)
+                } else {
+                    self.palette.bg_surface
+                });
+            if ui
+                .add(play_btn)
+                .on_hover_text("Play / Stop at playhead (Space)")
+                .clicked()
+            {
+                if playing {
+                    self.player.stop();
+                } else {
+                    self.play_voice(self.voice);
                 }
             }
+
+            ui.separator();
+            for (v, label, tip) in [
+                (Voice::Reference, "Reference", "Play original reference (1)"),
+                (
+                    Voice::Target,
+                    "Corrected target",
+                    "Play selected drift-corrected target (2)",
+                ),
+                (Voice::Mix, "Mix", "Play multi-track mix (3)"),
+            ] {
+                if ui
+                    .selectable_label(self.voice == v, label)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    self.play_voice(v);
+                }
+            }
+
+            ui.separator();
+            if ui
+                .add_enabled(self.region.is_some(), egui::Button::new("Loop selection"))
+                .on_hover_text("Loop selected span (L)")
+                .clicked()
+            {
+                self.loop_region = self.region;
+                self.mark_dirty();
+            }
+            if ui
+                .add_enabled(self.loop_region.is_some(), egui::Button::new("Clear loop"))
+                .clicked()
+            {
+                self.loop_region = None;
+                self.mark_dirty();
+            }
+
+            let mut vol = (self.player.volume() * 100.0).round();
+            if ui
+                .add(
+                    egui::Slider::new(&mut vol, 0.0..=100.0)
+                        .suffix("%")
+                        .show_value(false)
+                        .text("Vol"),
+                )
+                .on_hover_text(format!("Preview monitor level: {vol:.0}%"))
+                .changed()
+            {
+                self.player.set_volume(vol / 100.0);
+            }
+
+            ui.separator();
+            ui.monospace(format_timecode(self.playhead));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("Fit")
+                    .on_hover_text("Show whole timeline (F)")
+                    .clicked()
+                {
+                    self.view_start = 0.0;
+                    self.view_end = duration;
+                }
+                if ui.button("+").on_hover_text("Zoom in (+)").clicked() {
+                    self.zoom_view(1.0, self.playhead);
+                }
+                if ui.button("-").on_hover_text("Zoom out (-)").clicked() {
+                    self.zoom_view(-1.0, self.playhead);
+                }
+                if ui
+                    .button("Start")
+                    .on_hover_text("Jump to 0:00:00 (Home)")
+                    .clicked()
+                {
+                    self.playhead = 0.0;
+                    self.view_start = 0.0;
+                }
+                ui.colored_label(
+                    self.palette.text_muted,
+                    format!(
+                        "{:.1}s / {:.1}s",
+                        (self.view_end - self.view_start).max(0.0),
+                        duration
+                    ),
+                );
+            });
         });
 
         if changed {
             self.mark_dirty();
             self.persist_settings();
         }
-
         if start {
             self.start_analysis();
         }
@@ -1456,375 +1650,456 @@ impl StageSyncApp {
         }
     }
 
-    /// The file list.
+    /// The file list (vertically scrollable sidebar).
     fn file_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Files");
-        wrapped(
-            ui,
-            "Drop audio files or a folder onto the window, or use Add files\u{2026}",
-        );
         ui.horizontal(|ui| {
-            if ui.button("Add files…").clicked() {
-                self.browse_for_files();
-            }
-            if ui
-                .add_enabled(
-                    self.reference.is_some() && self.running.is_none(),
-                    egui::Button::new("Clear reference"),
-                )
-                .clicked()
-            {
-                self.clear_reference();
-            }
+            ui.strong("Sources");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        self.reference.is_some() && self.running.is_none(),
+                        egui::Button::new("Clear ref"),
+                    )
+                    .clicked()
+                {
+                    self.clear_reference();
+                }
+            });
         });
         ui.separator();
 
-        ui.strong("Reference");
-        if let Some(entry) = self.reference.clone() {
-            let selected = self.selection == Some(Selection::Reference);
-            if ui.selectable_label(selected, entry.name()).clicked() {
-                self.selection = Some(Selection::Reference);
-            }
-            ui.monospace(platform::elide_path(&entry.path, PATH_CHARS));
-            match &entry.meta {
-                Some(meta) => {
-                    ui.label(format!(
-                        "{} Hz · {} ch · {} · {}",
-                        meta.sample_rate,
-                        meta.channels,
-                        format_duration(meta.duration_secs),
-                        meta.codec
-                    ));
+        egui::ScrollArea::vertical()
+            .id_salt("sources_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.colored_label(self.palette.text_muted, "REFERENCE");
+                if let Some(entry) = self.reference.clone() {
+                    let selected = self.selection == Some(Selection::Reference);
+                    egui::Frame::new()
+                        .fill(if selected {
+                            self.palette.bg_lane_selected
+                        } else {
+                            self.palette.bg_surface
+                        })
+                        .stroke(eframe::egui::Stroke::new(
+                            1.0,
+                            if selected {
+                                self.palette.accent
+                            } else {
+                                self.palette.border_subtle
+                            },
+                        ))
+                        .corner_radius(3.0)
+                        .inner_margin(egui::Margin::symmetric(8, 6))
+                        .show(ui, |ui| {
+                            if ui.selectable_label(selected, entry.name()).clicked() {
+                                self.selection = Some(Selection::Reference);
+                            }
+                            ui.colored_label(
+                                self.palette.text_faint,
+                                platform::elide_path(&entry.path, PATH_CHARS),
+                            );
+                            match &entry.meta {
+                                Some(meta) => {
+                                    ui.label(format!(
+                                        "{} Hz · {} ch · {} · {}",
+                                        meta.sample_rate,
+                                        meta.channels,
+                                        format_duration(meta.duration_secs),
+                                        meta.codec
+                                    ));
+                                }
+                                None => {
+                                    if entry.error.is_none() && !entry.missing {
+                                        ui.colored_label(self.palette.text_muted, "reading…");
+                                    }
+                                }
+                            }
+                            if let Some(error) = &entry.error {
+                                ui.colored_label(self.palette.error, format!("cannot read: {error}"));
+                            }
+                            if entry.missing {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(self.palette.error, "Missing file");
+                                    if ui.button("Relocate…").clicked() {
+                                        if let Some(new_path) = self
+                                            .browse_relocate_file("Locate missing reference recording")
+                                        {
+                                            self.relocate_reference(new_path);
+                                        }
+                                    }
+                                });
+                            } else if let Some(warn) = &entry.modified_warning {
+                                ui.colored_label(self.palette.warn, warn.as_str());
+                            }
+                        });
+                } else {
+                    wrapped(
+                        ui,
+                        "Drop audio files or a folder anywhere, or click Add files… (first becomes Reference).",
+                    );
                 }
-                None => {
-                    if entry.error.is_none() {
-                        ui.label("reading…");
-                    }
-                }
-            }
-            if let Some(error) = &entry.error {
-                ui.colored_label(ui.visuals().error_fg_color, format!("cannot read: {error}"));
-            }
-            if entry.missing {
-                ui.horizontal(|ui| {
-                    ui.colored_label(ui.visuals().error_fg_color, "Missing file");
-                    if ui.button("Relocate…").clicked() {
-                        if let Some(new_path) =
-                            self.browse_relocate_file("Locate missing reference recording")
-                        {
-                            self.relocate_reference(new_path);
-                        }
-                    }
-                });
-            } else if let Some(warn) = &entry.modified_warning {
-                ui.colored_label(ui.visuals().warn_fg_color, warn.as_str());
-            }
-        } else {
-            ui.label("none — the first file you add becomes the reference");
-        }
-        ui.separator();
 
-        ui.strong("Targets");
-        if self.targets.is_empty() {
-            ui.label("none — add the recordings you want to align");
-        }
+                ui.add_space(6.0);
+                ui.colored_label(
+                    self.palette.text_muted,
+                    format!("TARGETS ({})", self.targets.len()),
+                );
+                if self.targets.is_empty() {
+                    ui.colored_label(
+                        self.palette.text_muted,
+                        "None yet — drop or add recordings to align.",
+                    );
+                }
 
-        let mut select: Option<Selection> = None;
-        let mut remove: Option<usize> = None;
-        let mut promote: Option<usize> = None;
-        for index in 0..self.targets.len() {
-            let entry = self.targets[index].clone();
-            let metrics = self
-                .report
-                .as_ref()
-                .map(|report| metrics_for(report, index));
-            ui.horizontal(|ui| {
-                let selected = self.selection == Some(Selection::Target(index));
-                if ui.selectable_label(selected, entry.name()).clicked() {
-                    select = Some(Selection::Target(index));
+                let mut select: Option<Selection> = None;
+                let mut remove: Option<usize> = None;
+                let mut promote: Option<usize> = None;
+                for index in 0..self.targets.len() {
+                    let entry = self.targets[index].clone();
+                    let metrics = self
+                        .report
+                        .as_ref()
+                        .map(|report| metrics_for(report, index));
+                    let selected = self.selection == Some(Selection::Target(index));
+                    egui::Frame::new()
+                        .fill(if selected {
+                            self.palette.bg_lane_selected
+                        } else {
+                            self.palette.bg_surface
+                        })
+                        .stroke(eframe::egui::Stroke::new(
+                            1.0,
+                            if selected {
+                                self.palette.accent
+                            } else {
+                                self.palette.border_subtle
+                            },
+                        ))
+                        .corner_radius(3.0)
+                        .inner_margin(egui::Margin::symmetric(8, 6))
+                        .show(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    selected,
+                                    egui::RichText::new(entry.name()).strong(),
+                                )
+                                .clicked()
+                            {
+                                select = Some(Selection::Target(index));
+                            }
+                            ui.colored_label(
+                                self.palette.text_faint,
+                                platform::elide_path(&entry.path, PATH_CHARS),
+                            );
+                            match &entry.meta {
+                                Some(meta) => {
+                                    ui.label(format!(
+                                        "{} Hz · {} ch · {}",
+                                        meta.sample_rate,
+                                        meta.channels,
+                                        format_duration(meta.duration_secs)
+                                    ));
+                                }
+                                None => {
+                                    if entry.error.is_none() && !entry.missing {
+                                        ui.colored_label(self.palette.text_muted, "reading…");
+                                    }
+                                }
+                            }
+                            if let Some(error) = &entry.error {
+                                ui.colored_label(self.palette.error, format!("cannot read: {error}"));
+                            }
+                            if entry.missing {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(self.palette.error, "Missing file");
+                                    if ui
+                                        .push_id(("relocate_target", index), |ui| {
+                                            ui.button("Relocate…")
+                                        })
+                                        .inner
+                                        .clicked()
+                                    {
+                                        if let Some(new_path) = self.browse_relocate_file(&format!(
+                                            "Locate missing recording {}",
+                                            entry.name()
+                                        )) {
+                                            self.relocate_target(index, new_path);
+                                        }
+                                    }
+                                });
+                            } else if let Some(warn) = &entry.modified_warning {
+                                ui.colored_label(self.palette.warn, warn.as_str());
+                            }
+                            if let Some(metrics) = metrics {
+                                wrapped(ui, metrics_line(&metrics));
+                            }
+                            let status = status_for(self.report.as_ref(), index);
+                            let verification = verification_for(self.report.as_ref(), index);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.colored_label(self.palette.text_muted, status.label());
+                                ui.separator();
+                                ui.colored_label(self.palette.text_muted, verification.label());
+                            });
+                            ui.horizontal(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_enabled(
+                                                self.running.is_none(),
+                                                egui::Button::new("×"),
+                                            )
+                                            .on_hover_text("Remove recording from list")
+                                            .clicked()
+                                        {
+                                            remove = Some(index);
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                self.running.is_none(),
+                                                egui::Button::new("Make reference"),
+                                            )
+                                            .on_hover_text("Use this recording as the reference")
+                                            .clicked()
+                                        {
+                                            promote = Some(index);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                    ui.add_space(4.0);
                 }
-                if ui
-                    .add_enabled(self.running.is_none(), egui::Button::new("Make reference"))
-                    .clicked()
-                {
-                    promote = Some(index);
+
+                if let Some(selection) = select {
+                    self.selection = Some(selection);
                 }
-                if ui
-                    // The multiplication sign, not the heavy ballot x: the font
-                    // that egui ships has no glyph for U+2716, and a button
-                    // without a glyph is an empty box.
-                    .add_enabled(self.running.is_none(), egui::Button::new("×"))
-                    .clicked()
-                {
-                    remove = Some(index);
+                if let Some(index) = remove {
+                    self.remove_target(index);
+                }
+                if let Some(index) = promote {
+                    self.make_reference(index);
                 }
             });
-            ui.monospace(platform::elide_path(&entry.path, PATH_CHARS));
-            match &entry.meta {
-                Some(meta) => {
-                    ui.label(format!(
-                        "{} Hz · {} ch · {}",
-                        meta.sample_rate,
-                        meta.channels,
-                        format_duration(meta.duration_secs)
-                    ));
-                }
-                None => {
-                    if entry.error.is_none() {
-                        ui.label("reading…");
-                    }
-                }
-            }
-            if let Some(error) = &entry.error {
-                ui.colored_label(ui.visuals().error_fg_color, format!("cannot read: {error}"));
-            }
-            if entry.missing {
-                ui.horizontal(|ui| {
-                    ui.colored_label(ui.visuals().error_fg_color, "Missing file");
-                    if ui
-                        .push_id(("relocate_target", index), |ui| ui.button("Relocate…"))
-                        .inner
-                        .clicked()
-                    {
-                        if let Some(new_path) = self.browse_relocate_file(&format!(
-                            "Locate missing recording {}",
-                            entry.name()
-                        )) {
-                            self.relocate_target(index, new_path);
-                        }
-                    }
-                });
-            } else if let Some(warn) = &entry.modified_warning {
-                ui.colored_label(ui.visuals().warn_fg_color, warn.as_str());
-            }
-            if let Some(metrics) = metrics {
-                wrapped(ui, metrics_line(&metrics));
-            }
-            // The status says what is actually known, and the verification says
-            // what was checked in the exported audio. They are different things,
-            // and the user needs both.
-            let status = status_for(self.report.as_ref(), index);
-            let verification = verification_for(self.report.as_ref(), index);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(status.label());
-                ui.separator();
-                ui.label(verification.label());
-            });
-            ui.separator();
-        }
-
-        if let Some(selection) = select {
-            self.selection = Some(selection);
-        }
-        if let Some(index) = remove {
-            self.remove_target(index);
-        }
-        if let Some(index) = promote {
-            self.make_reference(index);
-        }
     }
 
-    /// The export controls and the list of files that were written.
+    /// The export controls and the list of files that were written (vertically scrollable).
     fn export_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Export");
+        ui.strong("Export");
+        ui.separator();
         let mut browse = false;
         let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label("Folder");
-            // The field fills the space the panel has left, rather than asking
-            // for an infinite width: a text box that grows with the window
-            // would push the panel wider than its cap.
-            let width = (ui.available_width() - ui.spacing().item_spacing.x - 70.0).max(80.0);
-            changed |= ui
-                .add_sized(
-                    [width, ui.spacing().interact_size.y],
-                    egui::TextEdit::singleline(&mut self.settings.dir)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("choose a folder"),
-                )
-                .changed();
-            if ui.button("Browse…").clicked() {
-                browse = true;
-            }
-        });
-        if browse {
-            self.browse_for_folder();
-            changed = true;
-        }
 
-        egui::ComboBox::from_label("Layout")
-            .selected_text(layout_label(self.settings.layout))
-            .show_ui(ui, |ui| {
-                for (label, layout) in [
-                    ("Source aligned", Layout::SourceAligned),
-                    (
-                        "Reference timeline, per source",
-                        Layout::ReferenceTimelinePerSource,
-                    ),
-                    (
-                        "Reference timeline, merged",
-                        Layout::ReferenceTimelineMerged,
-                    ),
-                    ("Mixdown", Layout::Mixdown),
-                    ("Synchronised stems", Layout::MixStems),
-                ] {
+        egui::ScrollArea::vertical()
+            .id_salt("export_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Folder");
+                    let width =
+                        (ui.available_width() - ui.spacing().item_spacing.x - 70.0).max(80.0);
                     changed |= ui
-                        .selectable_value(&mut self.settings.layout, layout, label)
+                        .add_sized(
+                            [width, ui.spacing().interact_size.y],
+                            egui::TextEdit::singleline(&mut self.settings.dir)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("choose a folder"),
+                        )
                         .changed();
+                    if ui.button("Browse…").clicked() {
+                        browse = true;
+                    }
+                });
+                if browse {
+                    self.browse_for_folder();
+                    changed = true;
                 }
-            });
-        wrapped(ui, match self.settings.layout {
-            Layout::SourceAligned => {
-                "One corrected file per source, keeping its own length and sample rate."
-            }
-            Layout::ReferenceTimelinePerSource => {
-                "One reference-length file per source; the gaps are written as silence."
-            }
-            Layout::ReferenceTimelineMerged => {
-                "One reference-length file with every source placed; overlaps follow the order above."
-            }
-            Layout::Mixdown => {
-                "One mixed file: the recordings the mixer plays, on the reference timeline."
-            }
-            Layout::MixStems => {
-                "One reference-length file per recording the mixer plays, without the mix."
-            }
-        });
 
-        let mut override_rate = self.settings.sample_rate.is_some();
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(&mut override_rate, "Output sample rate")
-                .changed()
-            {
-                self.settings.sample_rate = if override_rate { Some(48_000) } else { None };
-                changed = true;
-            }
-            if let Some(rate) = self.settings.sample_rate.as_mut() {
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(rate)
-                            .speed(100.0)
-                            .range(8_000..=192_000),
-                    )
-                    .changed();
-                ui.label("Hz");
-            }
-        });
+                egui::ComboBox::from_label("Layout")
+                    .selected_text(layout_label(self.settings.layout))
+                    .show_ui(ui, |ui| {
+                        for (label, layout) in [
+                            ("Source aligned", Layout::SourceAligned),
+                            (
+                                "Reference timeline, per source",
+                                Layout::ReferenceTimelinePerSource,
+                            ),
+                            (
+                                "Reference timeline, merged",
+                                Layout::ReferenceTimelineMerged,
+                            ),
+                            ("Mixdown", Layout::Mixdown),
+                            ("Synchronised stems", Layout::MixStems),
+                        ] {
+                            changed |= ui
+                                .selectable_value(&mut self.settings.layout, layout, label)
+                                .changed();
+                        }
+                    });
+                wrapped(
+                    ui,
+                    match self.settings.layout {
+                        Layout::SourceAligned => {
+                            "One corrected file per source, keeping its own length and sample rate."
+                        }
+                        Layout::ReferenceTimelinePerSource => {
+                            "One reference-length file per source; gaps written as silence."
+                        }
+                        Layout::ReferenceTimelineMerged => {
+                            "One reference-length file combining all sources in list order."
+                        }
+                        Layout::Mixdown => "One stereo mixdown rendered from the Mixer settings.",
+                        Layout::MixStems => {
+                            "One reference-length stem per enabled mixer recording."
+                        }
+                    },
+                );
 
-        egui::ComboBox::from_label("Format")
-            .selected_text(format_label(self.settings.format))
-            .show_ui(ui, |ui| {
-                for format in [
-                    stagesync_core::audio::WavFormat::Float32,
-                    stagesync_core::audio::WavFormat::Int16,
-                ] {
-                    changed |= ui
-                        .selectable_value(&mut self.settings.format, format, format_label(format))
-                        .changed();
+                let mut override_rate = self.settings.sample_rate.is_some();
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut override_rate, "Output sample rate")
+                        .changed()
+                    {
+                        self.settings.sample_rate = if override_rate { Some(48_000) } else { None };
+                        changed = true;
+                    }
+                    if let Some(rate) = self.settings.sample_rate.as_mut() {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(rate)
+                                    .speed(100.0)
+                                    .range(8_000..=192_000),
+                            )
+                            .changed();
+                        ui.label("Hz");
+                    }
+                });
+
+                egui::ComboBox::from_label("Format")
+                    .selected_text(format_label(self.settings.format))
+                    .show_ui(ui, |ui| {
+                        for format in [
+                            stagesync_core::audio::WavFormat::Float32,
+                            stagesync_core::audio::WavFormat::Int16,
+                        ] {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.format,
+                                    format,
+                                    format_label(format),
+                                )
+                                .changed();
+                        }
+                    });
+
+                if self.settings.layout.is_mix() {
+                    egui::ComboBox::from_label("Clipping")
+                        .selected_text(protection_label(self.settings.protection))
+                        .show_ui(ui, |ui| {
+                            for protection in [
+                                stagesync_core::mixer::ClippingProtection::None,
+                                stagesync_core::mixer::ClippingProtection::SoftClip {
+                                    threshold: 0.9,
+                                },
+                                stagesync_core::mixer::ClippingProtection::AutoGain {
+                                    target_dbfs: -1.0,
+                                },
+                            ] {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut self.settings.protection,
+                                        protection,
+                                        protection_label(protection),
+                                    )
+                                    .changed();
+                            }
+                        });
+                    wrapped(
+                        ui,
+                        match self.settings.protection {
+                            stagesync_core::mixer::ClippingProtection::None => {
+                                "32-bit float keeps peaks above 0 dBFS unclipped."
+                            }
+                            stagesync_core::mixer::ClippingProtection::SoftClip { .. } => {
+                                "Smoothly compresses samples above threshold."
+                            }
+                            stagesync_core::mixer::ClippingProtection::AutoGain { .. } => {
+                                "Two-pass master trim landing peak on -1.0 dBFS."
+                            }
+                        },
+                    );
+
+                    egui::ComboBox::from_label("Loudness")
+                        .selected_text(loudness_label(self.settings.loudness))
+                        .show_ui(ui, |ui| {
+                            for loudness in [
+                                stagesync_core::mixer::LoudnessMatch::None,
+                                stagesync_core::mixer::LoudnessMatch::MatchToLoudest,
+                            ] {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut self.settings.loudness,
+                                        loudness,
+                                        loudness_label(loudness),
+                                    )
+                                    .changed();
+                            }
+                        });
+
+                    egui::ComboBox::from_label("Container")
+                        .selected_text(container_label(self.settings.container))
+                        .show_ui(ui, |ui| {
+                            for container in [
+                                stagesync_core::mixer::ContainerChoice::Auto,
+                                stagesync_core::mixer::ContainerChoice::Riff,
+                                stagesync_core::mixer::ContainerChoice::Rf64,
+                                stagesync_core::mixer::ContainerChoice::Bw64,
+                            ] {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut self.settings.container,
+                                        container,
+                                        container_label(container),
+                                    )
+                                    .changed();
+                            }
+                        });
                 }
-            });
 
-        // The clipping protection only applies to the mixing layouts: the other
-        // layouts write one recording at a time, and a recording is never turned
-        // down without being asked to be.
-        if self.settings.layout.is_mix() {
-            egui::ComboBox::from_label("Clipping")
-                .selected_text(protection_label(self.settings.protection))
-                .show_ui(ui, |ui| {
-                    for protection in [
-                        stagesync_core::mixer::ClippingProtection::None,
-                        stagesync_core::mixer::ClippingProtection::SoftClip { threshold: 0.9 },
-                        stagesync_core::mixer::ClippingProtection::AutoGain { target_dbfs: -1.0 },
-                    ] {
-                        changed |= ui
-                            .selectable_value(
-                                &mut self.settings.protection,
-                                protection,
-                                protection_label(protection),
-                            )
-                            .changed();
-                    }
+                ui.add_space(6.0);
+                let can_export = self.report.is_some()
+                    && !self.settings.dir.trim().is_empty()
+                    && self.running.is_none()
+                    && !self.verifying;
+                let exp_btn = egui::Button::new(egui::RichText::new("Export").strong().color(
+                    if can_export {
+                        Color32::WHITE
+                    } else {
+                        self.palette.text_muted
+                    },
+                ))
+                .fill(if can_export {
+                    self.palette.accent
+                } else {
+                    self.palette.bg_surface
                 });
-            wrapped(
-                ui,
-                match self.settings.protection {
-                    stagesync_core::mixer::ClippingProtection::None => {
-                        "Nothing is done. A 32-bit float file holds a peak above 0 dBFS, so it \
-                         is written as it is."
-                    }
-                    stagesync_core::mixer::ClippingProtection::SoftClip { .. } => {
-                        "Samples above the threshold are compressed smoothly. This changes the \
-                         material, and the number of samples it touched is reported."
-                    }
-                    stagesync_core::mixer::ClippingProtection::AutoGain { .. } => {
-                        "The mix is measured and one master gain is applied so that the \
-                         loudest sample lands on the target. The recordings keep their \
-                         relative levels."
-                    }
-                },
-            );
+                if ui.add_enabled(can_export, exp_btn).clicked() {
+                    self.start_export();
+                }
 
-            egui::ComboBox::from_label("Loudness")
-                .selected_text(loudness_label(self.settings.loudness))
-                .show_ui(ui, |ui| {
-                    for loudness in [
-                        stagesync_core::mixer::LoudnessMatch::None,
-                        stagesync_core::mixer::LoudnessMatch::MatchToLoudest,
-                    ] {
-                        changed |= ui
-                            .selectable_value(
-                                &mut self.settings.loudness,
-                                loudness,
-                                loudness_label(loudness),
-                            )
-                            .changed();
-                    }
-                });
-
-            egui::ComboBox::from_label("Container")
-                .selected_text(container_label(self.settings.container))
-                .show_ui(ui, |ui| {
-                    for container in [
-                        stagesync_core::mixer::ContainerChoice::Auto,
-                        stagesync_core::mixer::ContainerChoice::Riff,
-                        stagesync_core::mixer::ContainerChoice::Rf64,
-                        stagesync_core::mixer::ContainerChoice::Bw64,
-                    ] {
-                        changed |= ui
-                            .selectable_value(
-                                &mut self.settings.container,
-                                container,
-                                container_label(container),
-                            )
-                            .changed();
-                    }
-                });
-        }
-
-        ui.add_space(6.0);
-        let can_export = self.report.is_some()
-            && !self.settings.dir.trim().is_empty()
-            && self.running.is_none()
-            && !self.verifying;
-        if ui
-            .add_enabled(can_export, egui::Button::new("Export"))
-            .clicked()
-        {
-            self.start_export();
-        }
-
-        if let Some(outcome) = &self.export_outcome {
-            ui.separator();
-            ui.strong("Files written");
-            egui::ScrollArea::vertical()
-                .id_salt("written_files")
-                .show(ui, |ui| {
+                if let Some(outcome) = &self.export_outcome {
+                    ui.separator();
+                    ui.strong(format!("Files written ({})", outcome.files.len()));
                     for path in &outcome.files {
-                        ui.monospace(platform::elide_path(path, PATH_CHARS));
+                        ui.colored_label(
+                            self.palette.text_muted,
+                            platform::elide_path(path, PATH_CHARS),
+                        );
                     }
-                });
-        }
+                }
+            });
 
         if changed {
             self.mark_dirty();
@@ -1832,31 +2107,87 @@ impl StageSyncApp {
         }
     }
 
-    /// The message log.
+    /// Compact studio status bar + expandable message log drawer.
     fn log_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.strong("Messages");
-            ui.separator();
-            ui.colored_label(weak_text(ui), platform::describe_platform());
-        });
-        egui::ScrollArea::vertical()
-            .id_salt("log")
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for line in &self.log {
-                    ui.label(line.as_str());
+            match &self.progress {
+                Some(progress) => {
+                    ui.colored_label(self.palette.accent, progress.label.clone());
+                    ui.add(
+                        egui::ProgressBar::new(progress.fraction.clamp(0.0, 1.0) as f32)
+                            .desired_width(160.0),
+                    );
+                    ui.colored_label(self.palette.text_muted, progress.message.clone());
                 }
+                None => {
+                    if self.verifying {
+                        ui.colored_label(self.palette.accent, "Verifying rendered correction…");
+                    } else if self.peaks_pending > 0 {
+                        ui.colored_label(
+                            self.palette.text_muted,
+                            format!("Building waveforms ({} remaining)…", self.peaks_pending),
+                        );
+                    } else if let Some(notice) = &self.notice {
+                        ui.label(notice.as_str());
+                    } else {
+                        let count = self.reference.is_some() as usize + self.targets.len();
+                        ui.colored_label(
+                            self.palette.text_muted,
+                            format!(
+                                "{count} recording(s), {} waveform(s) cached",
+                                self.peaks.len()
+                            ),
+                        );
+                    }
+                }
+            }
+            if let Some(report) = self.report.as_ref() {
+                let low = report
+                    .timeline
+                    .iter()
+                    .filter(|s| s.kind == SegmentKind::LowConfidence)
+                    .count();
+                let gaps = report
+                    .timeline
+                    .iter()
+                    .filter(|s| s.kind == SegmentKind::UncoveredReference)
+                    .count();
+                ui.separator();
+                ui.colored_label(
+                    self.palette.text_muted,
+                    format!(
+                        "{:.1} s · {gaps} gap(s), {low} low confidence",
+                        report.timeline_duration
+                    ),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.colored_label(self.palette.text_faint, platform::describe_platform());
             });
+        });
+
+        if self.show_log {
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("log")
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for line in &self.log {
+                        ui.colored_label(self.palette.text_muted, line.as_str());
+                    }
+                });
+        }
     }
 
-    /// The main area: the timeline, the anchor controls and the source details.
+    /// The main workspace: alerts, front-and-center stereo waveform timeline, and tabbed lower dock.
     fn central(&mut self, ui: &mut egui::Ui) {
         self.central_width = ui.available_width();
         if let Some(meta) = self.recovery_available.clone() {
-            let warn = ui.visuals().warn_fg_color;
+            let warn = self.palette.warn;
             egui::Frame::new()
-                .fill(warn.gamma_multiply(0.16))
-                .corner_radius(4.0)
+                .fill(warn.gamma_multiply(0.14))
+                .stroke(eframe::egui::Stroke::new(1.0, warn))
+                .corner_radius(3.0)
                 .inner_margin(8.0)
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -1895,43 +2226,62 @@ impl StageSyncApp {
             ui.add_space(6.0);
         }
         if let Some(error) = self.last_error.clone() {
-            // The colours come from the theme, so the message is legible both
-            // on a light desktop and on a dark one.
-            let foreground = ui.visuals().error_fg_color;
+            let foreground = self.palette.error;
             egui::Frame::new()
-                .fill(foreground.gamma_multiply(0.18))
-                .corner_radius(4.0)
-                .inner_margin(8.0)
+                .fill(foreground.gamma_multiply(0.14))
+                .stroke(eframe::egui::Stroke::new(1.0, foreground))
+                .corner_radius(3.0)
+                .inner_margin(7.0)
                 .show(ui, |ui| {
-                    ui.colored_label(foreground, error);
-                });
-            ui.add_space(6.0);
-        }
-        if let Some(notice) = self.notice.clone() {
-            let foreground = ui.visuals().text_color();
-            egui::Frame::new()
-                .fill(foreground.gamma_multiply(0.18))
-                .corner_radius(4.0)
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.colored_label(foreground, notice);
+                    ui.horizontal(|ui| {
+                        ui.colored_label(foreground, error);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Dismiss").clicked() {
+                                self.last_error = None;
+                            }
+                        });
+                    });
                 });
             ui.add_space(6.0);
         }
 
+        // Front-and-center Timeline.
         self.timeline_section(ui);
-        ui.add_space(8.0);
-        self.mixer_section(ui);
-        ui.add_space(8.0);
-        self.transport_section(ui);
-        ui.add_space(4.0);
-        self.problems_section(ui);
-        ui.add_space(8.0);
-        self.nudge_section(ui);
-        ui.add_space(8.0);
-        self.anchor_section(ui);
-        ui.add_space(8.0);
-        self.detail_section(ui);
+        ui.add_space(6.0);
+        ui.separator();
+
+        // Studio Dock Tabs
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.dock_tab, DockTab::Mixer, "Mixer");
+            ui.selectable_value(&mut self.dock_tab, DockTab::Inspector, "Inspector & Charts");
+            let issues = self.problems().len();
+            let manual_label = if issues > 0 {
+                format!("Issues & Manual Anchor ({issues})")
+            } else {
+                "Issues & Manual Anchor".to_string()
+            };
+            ui.selectable_value(&mut self.dock_tab, DockTab::Manual, manual_label);
+        });
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .id_salt("central_dock_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| match self.dock_tab {
+                DockTab::Mixer => {
+                    self.mixer_section(ui);
+                }
+                DockTab::Inspector => {
+                    self.detail_section(ui);
+                }
+                DockTab::Manual => {
+                    self.problems_section(ui);
+                    ui.add_space(6.0);
+                    self.nudge_section(ui);
+                    ui.add_space(6.0);
+                    self.anchor_section(ui);
+                }
+            });
     }
 
     /// The mixer: one row per recording, with its fader, pan, mute, solo and meter.
@@ -1990,7 +2340,12 @@ impl StageSyncApp {
             })
             .collect();
 
+        let before_mix = serde_json::to_string(&self.mixer.settings()).ok();
         crate::mixer::panel(ui, &mut self.mixer, &infos);
+        let after_mix = serde_json::to_string(&self.mixer.settings()).ok();
+        if before_mix != after_mix {
+            self.mark_dirty();
+        }
         if self.player.is_playing() && self.player.voice() == Some(crate::player::Voice::Mix) {
             let live_members = self.mix_members();
             self.player
@@ -1998,78 +2353,82 @@ impl StageSyncApp {
         }
     }
 
-    /// The waveform timeline: the reference on top, the recordings below it.
-    ///
-    /// The picture *is* the alignment. Every recording is drawn where the sync
-    /// engine put it, so a recording that is out of place is something the user
-    /// can see rather than something they have to be told about. The waveforms
-    /// come from the core's peak cache, which is built by streaming the file, so
-    /// a three-hour recording costs a few megabytes rather than gigabytes.
+    /// The waveform timeline: full-show overview minimap + stereo lanes + coverage legend.
     fn timeline_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Timeline");
-
         let duration = self
             .report
             .as_ref()
             .map(|report| report.timeline_duration.max(1.0))
+            .or_else(|| {
+                self.reference
+                    .as_ref()
+                    .and_then(|r| r.meta.as_ref())
+                    .map(|m| m.duration_secs.max(1.0))
+            })
             .unwrap_or(600.0);
 
-        let mut fit = false;
-        let mut zoom = 0.0f32;
-        // The row is laid out so that it may wrap: a row that is wider than the
-        // panel sets the panel's minimum width, and everything drawn after it is
-        // then laid out too wide and cut off at the panel's edge.
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .button("Start")
-                .on_hover_text("Go to the beginning of the show")
-                .clicked()
-            {
-                self.playhead = 0.0;
-                self.view_start = 0.0;
+            ui.strong("Timeline");
+            ui.separator();
+            timeline::paint_legend(ui, &self.palette);
+            if let Some((start, end)) = self.region {
+                ui.separator();
+                ui.colored_label(
+                    self.palette.accent,
+                    format!("Sel: {:.3}s – {:.3}s ({:.3}s)", start, end, end - start),
+                );
             }
-            if ui.button("-").on_hover_text("Zoom out").clicked() {
-                zoom -= 1.0;
-            }
-            if ui.button("+").on_hover_text("Zoom in").clicked() {
-                zoom += 1.0;
-            }
-            if ui
-                .button("Fit")
-                .on_hover_text("Show the whole show")
-                .clicked()
-            {
-                fit = true;
-            }
-            ui.label(format!(
-                "{:.0} s of {:.0} s on screen",
-                (self.view_end - self.view_start).max(0.0),
-                duration
-            ));
         });
 
-        if fit {
-            self.view_start = 0.0;
-            self.view_end = duration;
-        }
-        if zoom != 0.0 {
-            self.zoom_view(zoom.signum(), self.playhead);
-        }
-
-        timeline::paint_legend(ui);
-        ui.add_space(4.0);
-
         let width = ui.available_width().max(160.0);
-        let height = waveview::height(self.targets.len());
-        let (response, painter) = ui.allocate_painter(
-            egui::Vec2::new(width, height),
+
+        // Overview minimap strip for full-concert situational awareness & scrubbing.
+        let (ov_response, ov_painter) = ui.allocate_painter(
+            egui::Vec2::new(width, waveview::OVERVIEW_HEIGHT),
             egui::Sense::click_and_drag(),
         );
         {
             let view = self.waveform_view();
-            waveview::paint(&painter, response.rect, &view);
+            waveview::paint_overview(
+                &ov_painter,
+                ov_response.rect,
+                &view,
+                duration,
+                &self.palette,
+            );
         }
-        self.handle_timeline_input(ui, &response);
+        if ov_response.clicked() || ov_response.dragged() {
+            if let Some(pos) = ov_response.interact_pointer_pos() {
+                let frac = ((pos.x - ov_response.rect.left()) / ov_response.rect.width().max(1.0))
+                    .clamp(0.0, 1.0) as f64;
+                let center = frac * duration;
+                let half_span = ((self.view_end - self.view_start) * 0.5).max(0.5);
+                self.view_start = (center - half_span).max(0.0);
+                self.view_end = self.view_start + half_span * 2.0;
+                if ov_response.clicked() {
+                    self.playhead = center;
+                }
+            }
+        }
+
+        ui.add_space(3.0);
+
+        let lane_height = waveview::height(self.targets.len());
+        let max_tl_height = (ui.available_height() * 0.56).max(200.0);
+        egui::ScrollArea::vertical()
+            .id_salt("timeline_lanes_scroll")
+            .max_height(max_tl_height)
+            .show(ui, |ui| {
+                let (response, painter) = ui.allocate_painter(
+                    egui::Vec2::new(width, lane_height),
+                    egui::Sense::click_and_drag(),
+                );
+                {
+                    let view = self.waveform_view();
+                    waveview::paint(&painter, response.rect, &view, &self.palette);
+                }
+                self.handle_timeline_input(ui, &response);
+            });
     }
 
     /// What the waveform timeline needs to draw itself.
@@ -2138,20 +2497,31 @@ impl StageSyncApp {
     }
 
     /// What the user does to the timeline: move the playhead, select a region,
-    /// pan, and zoom.
+    /// pan, and zoom smoothly under the cursor.
     fn handle_timeline_input(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
         let rect = response.rect;
         let shift = ui.input(|input| input.modifiers.shift);
         let pointer = response.interact_pointer_pos();
 
-        if let Some(pointer) = pointer {
-            // The wheel zooms around the pointer, so the material under the cursor
-            // stays under the cursor.
-            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-            if scroll.abs() > 0.01 && rect.contains(pointer) {
-                let anchor = waveview::time_at(rect, pointer.x, self.view_start, self.view_end);
-                self.zoom_view(if scroll > 0.0 { -1.0 } else { 1.0 }, anchor);
+        if let Some(hover) = response.hover_pos().or(pointer) {
+            if rect.contains(hover) {
+                let (scroll_y, scroll_x) =
+                    ui.input(|input| (input.smooth_scroll_delta.y, input.smooth_scroll_delta.x));
+                if scroll_y.abs() > 0.01 {
+                    let anchor = waveview::time_at(rect, hover.x, self.view_start, self.view_end);
+                    self.zoom_view(if scroll_y > 0.0 { 1.0 } else { -1.0 }, anchor);
+                }
+                if scroll_x.abs() > 0.01 {
+                    let span = (self.view_end - self.view_start).max(1e-6);
+                    let per_pixel = span / rect.width().max(1.0) as f64;
+                    let moved = scroll_x as f64 * per_pixel;
+                    self.view_start -= moved;
+                    self.view_end -= moved;
+                }
             }
+        }
+
+        if let Some(pointer) = pointer {
             if response.clicked() {
                 self.playhead =
                     waveview::time_at(rect, pointer.x, self.view_start, self.view_end).max(0.0);
@@ -2187,98 +2557,7 @@ impl StageSyncApp {
         self.view_end = self.view_start + new_span;
     }
 
-    /// The transport: what is playing, and what the user can do about it.
-    fn transport_section(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            let playing = self.player.is_playing();
-            if ui
-                .button(if playing { "Stop" } else { "Play" })
-                .on_hover_text("Play from the playhead")
-                .clicked()
-            {
-                if playing {
-                    self.player.stop();
-                } else {
-                    self.play_voice(self.voice);
-                }
-            }
-
-            ui.separator();
-
-            // The A/B switch: the two voices are heard at the same position on
-            // the timeline, so the difference between them is the difference the
-            // correction makes.
-            if ui
-                .selectable_label(self.voice == Voice::Reference, "Reference")
-                .on_hover_text("Play the reference recording, exactly as it was recorded")
-                .clicked()
-            {
-                self.play_voice(Voice::Reference);
-            }
-            if ui
-                .selectable_label(self.voice == Voice::Target, "Corrected target")
-                .on_hover_text("Play the selected recording with the correction applied")
-                .clicked()
-            {
-                self.play_voice(Voice::Target);
-            }
-            if ui
-                .selectable_label(self.voice == Voice::Mix, "Mix")
-                .on_hover_text("Play the recordings the mixer has selected, mixed together")
-                .clicked()
-            {
-                self.play_voice(Voice::Mix);
-            }
-
-            ui.separator();
-
-            if ui
-                .add_enabled(self.region.is_some(), egui::Button::new("Loop selection"))
-                .on_hover_text("Play the selected region over and over")
-                .clicked()
-            {
-                self.loop_region = self.region;
-            }
-            if ui
-                .add_enabled(self.loop_region.is_some(), egui::Button::new("Clear loop"))
-                .clicked()
-            {
-                self.loop_region = None;
-            }
-
-            ui.separator();
-
-            ui.label(format!("Position {}", format_duration(self.playhead)));
-        });
-
-        if let Some(error) = self.player.error() {
-            wrapped(ui, format!("There is no sound: {error}"));
-        }
-        if let (Some((start, end)), Some(kind)) = (self.region, self.selection_kind()) {
-            let _ = kind;
-            wrapped(
-                ui,
-                format!(
-                    "Selected {start:.3} s to {end:.3} s ({:.3} s long).",
-                    end - start
-                ),
-            );
-        }
-    }
-
-    /// What kind of material the selection covers, when it covers one kind.
-    fn selection_kind(&self) -> Option<SegmentKind> {
-        let (start, end) = self.region?;
-        let mut kind = None;
-        for span in self.report.as_ref()?.timeline.iter() {
-            if span.reference_start <= start && span.reference_end >= end {
-                kind = Some(span.kind);
-            }
-        }
-        kind
-    }
-
-    /// Play one of the two voices, from the playhead.
+    /// Play one of the voices from the playhead.
     fn play_voice(&mut self, voice: Voice) {
         self.voice = voice;
         let position = self.playhead;
@@ -2747,166 +3026,6 @@ impl StageSyncApp {
             )
         };
 
-        ui.heading(facts.name.as_str());
-
-        egui::Grid::new("source_facts")
-            .num_columns(2)
-            .show(ui, |ui| {
-                ui.label("Offset at t0");
-                ui.label(match facts.offset_secs {
-                    Some(offset) => format!("{offset:+.4} s"),
-                    None => "no alignment".to_string(),
-                });
-                ui.end_row();
-
-                ui.label("Drift");
-                // The drift is shown with the uncertainty that produced it, or
-                // it is not shown at all: a rate without its precision is a
-                // number, not a measurement. A source whose drift was not
-                // established says so, rather than showing a figure of zero.
-                ui.label(match &facts.drift {
-                    Some(assessment) => match assessment.status {
-                        stagesync_core::matching::drift::DriftStatus::Established => format!(
-                            "{:+.3} ± {:.3} ppm",
-                            assessment.drift_ppm, assessment.slope_se_ppm
-                        ),
-                        stagesync_core::matching::drift::DriftStatus::OffsetOnly => {
-                            "not applied — only the offset was corrected".to_string()
-                        }
-                    },
-                    None => "no alignment".to_string(),
-                });
-                ui.end_row();
-
-                ui.label("Accumulated drift over the source");
-                ui.label(match facts.accumulated_ms {
-                    Some(ms) => format!("{ms:+.2} ms"),
-                    None => "no alignment".to_string(),
-                });
-                ui.end_row();
-
-                ui.label("Coverage");
-                ui.label(format!(
-                    "{:.1}%  ({} covered, {} uncertain, {} uncovered)",
-                    facts.coverage * 100.0,
-                    format_duration(facts.covered_secs),
-                    format_duration(facts.low_secs),
-                    format_duration(facts.uncovered_secs)
-                ));
-                ui.end_row();
-
-                ui.label("Residual p50 / p95 / max");
-                ui.label(format!(
-                    "{:+.2} / {:+.2} / {:.2} ms  ({} match points)",
-                    facts.residuals.0, facts.residuals.1, facts.residuals.2, facts.point_count
-                ));
-                ui.end_row();
-            });
-
-        ui.add_space(4.0);
-        ui.strong("Drift verdict");
-        match drift_verdict(facts.drift.as_ref()) {
-            Some(verdict) => {
-                egui::Grid::new("drift_verdict")
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        ui.label("Status");
-                        ui.label(verdict.status.clone());
-                        ui.end_row();
-
-                        ui.label("Measured by");
-                        ui.label(verdict.method.clone());
-                        ui.end_row();
-
-                        ui.label("Applied drift");
-                        ui.label(verdict.applied.clone());
-                        ui.end_row();
-                    });
-
-                if verdict.envelope.is_some() || verdict.waveform.is_some() {
-                    egui::Grid::new("drift_methods")
-                        .num_columns(4)
-                        .show(ui, |ui| {
-                            ui.strong("Estimator");
-                            ui.strong("Drift");
-                            ui.strong("Residual RMS");
-                            ui.strong("Measurements");
-                            ui.end_row();
-                            if let Some(envelope) = &verdict.envelope {
-                                ui.label("envelope");
-                                ui.label(envelope.drift.clone());
-                                ui.label(format!("{:.2} ms", envelope.residual_rms_ms));
-                                ui.label(envelope.points_used.to_string());
-                                ui.end_row();
-                            }
-                            if let Some(waveform) = &verdict.waveform {
-                                ui.label("waveform (gcc_phat)");
-                                ui.label(waveform.drift.clone());
-                                ui.label(format!("{:.2} ms", waveform.residual_rms_ms));
-                                ui.label(waveform.points_used.to_string());
-                                ui.end_row();
-                            }
-                        });
-                    if let Some(correlation) = verdict
-                        .waveform
-                        .as_ref()
-                        .and_then(|waveform| waveform.mean_correlation)
-                    {
-                        ui.label(format!("mean raw-waveform correlation: {correlation:.3}"));
-                    }
-                }
-
-                for note in &verdict.notes {
-                    ui.colored_label(weak_text(ui), note.as_str());
-                }
-            }
-            None => {
-                ui.label(
-                    "No drift verdict: the analysis found no correspondence between this \
-                     recording and the reference, so there is nothing to report.",
-                );
-            }
-        }
-
-        if !facts.warnings.is_empty() {
-            ui.label("Warnings");
-            for warning in &facts.warnings {
-                ui.colored_label(ui.visuals().warn_fg_color, warning.as_str());
-            }
-        }
-
-        if let Some(holdout) = &facts.holdout {
-            ui.label("Hold-out verification (waveform GCC-PHAT, independent of the fit)");
-            egui::Grid::new("holdout_facts")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    ui.label("Residual p50 / p95 / max");
-                    ui.label(format!(
-                        "{:+.3} / {:+.3} / {:.3} ms",
-                        holdout.p50_ms, holdout.p95_ms, holdout.max_ms
-                    ));
-                    ui.end_row();
-                    ui.label("Counted points");
-                    ui.label(format!("{} of {}", holdout.counted, holdout.points.len()));
-                    ui.end_row();
-                    ui.label("Pitch change");
-                    ui.label(format!("{:+.4} cents", holdout.pitch_cents));
-                    ui.end_row();
-                    if let Some(drift_error) = holdout.drift_error_ppm {
-                        let uncertainty = holdout
-                            .drift_error_se_ppm
-                            .map(|se| format!(" ± {se:.3} ppm"))
-                            .unwrap_or_default();
-                        ui.label("How wrong the applied drift is");
-                        ui.label(format!("{drift_error:+.3} ppm{uncertainty}"));
-                        ui.end_row();
-                    }
-                });
-            for note in &holdout.notes {
-                ui.colored_label(ui.visuals().warn_fg_color, note.as_str());
-            }
-        }
-
         let corrected = self.export_outcome.as_ref().and_then(|outcome| {
             outcome
                 .corrected
@@ -2919,28 +3038,222 @@ impl StageSyncApp {
             .as_ref()
             .is_some_and(|entry| is_wav(&entry.path));
         let can_verify = corrected.is_some() && reference_is_wav && !self.verifying;
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    can_verify,
-                    egui::Button::new("Verify the corrected audio (hold-out)"),
-                )
-                .clicked()
-            {
-                self.start_verification(index);
-            }
-            if corrected.is_none() {
-                ui.label("export the corrected audio to enable the hold-out check");
-            } else if !reference_is_wav {
-                ui.label("the hold-out check needs a WAV reference");
-            }
-        });
+        let mut verify_clicked = false;
+        let palette = self.palette;
 
-        ui.add_space(6.0);
-        chart::paint_lag_plot(ui, &points, model, facts.duration);
-        chart::paint_residual_plot(ui, &points, facts.duration);
-        chart::paint_drift_plot(ui, &points, model, facts.duration);
+        let render_facts = |ui: &mut egui::Ui, verify_clicked: &mut bool| {
+            ui.strong(facts.name.as_str());
+            ui.add_space(2.0);
+
+            egui::Grid::new("source_facts")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Offset at t0");
+                    ui.label(match facts.offset_secs {
+                        Some(offset) => format!("{offset:+.4} s"),
+                        None => "no alignment".to_string(),
+                    });
+                    ui.end_row();
+
+                    ui.label("Drift");
+                    // The drift is shown with the uncertainty that produced it, or
+                    // it is not shown at all: a rate without its precision is a
+                    // number, not a measurement. A source whose drift was not
+                    // established says so, rather than showing a figure of zero.
+                    ui.label(match &facts.drift {
+                        Some(assessment) => match assessment.status {
+                            stagesync_core::matching::drift::DriftStatus::Established => format!(
+                                "{:+.3} ± {:.3} ppm",
+                                assessment.drift_ppm, assessment.slope_se_ppm
+                            ),
+                            stagesync_core::matching::drift::DriftStatus::OffsetOnly => {
+                                "not applied — only the offset was corrected".to_string()
+                            }
+                        },
+                        None => "no alignment".to_string(),
+                    });
+                    ui.end_row();
+
+                    ui.label("Accumulated drift");
+                    ui.label(match facts.accumulated_ms {
+                        Some(ms) => format!("{ms:+.2} ms"),
+                        None => "no alignment".to_string(),
+                    });
+                    ui.end_row();
+
+                    ui.label("Coverage");
+                    ui.label(format!(
+                        "{:.1}%  ({} ok · {} low · {} gap)",
+                        facts.coverage * 100.0,
+                        format_duration(facts.covered_secs),
+                        format_duration(facts.low_secs),
+                        format_duration(facts.uncovered_secs)
+                    ));
+                    ui.end_row();
+
+                    ui.label("Residual p50/p95/max");
+                    ui.label(format!(
+                        "{:+.2} / {:+.2} / {:.2} ms ({} pts)",
+                        facts.residuals.0, facts.residuals.1, facts.residuals.2, facts.point_count
+                    ));
+                    ui.end_row();
+                });
+
+            ui.add_space(4.0);
+            ui.strong("Drift verdict");
+            match drift_verdict(facts.drift.as_ref()) {
+                Some(verdict) => {
+                    egui::Grid::new("drift_verdict")
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            ui.label("Status");
+                            ui.label(verdict.status.clone());
+                            ui.end_row();
+
+                            ui.label("Measured by");
+                            ui.label(verdict.method.clone());
+                            ui.end_row();
+
+                            ui.label("Applied drift");
+                            ui.label(verdict.applied.clone());
+                            ui.end_row();
+                        });
+
+                    if verdict.envelope.is_some() || verdict.waveform.is_some() {
+                        egui::Grid::new("drift_methods")
+                            .num_columns(4)
+                            .show(ui, |ui| {
+                                ui.strong("Estimator");
+                                ui.strong("Drift");
+                                ui.strong("RMS");
+                                ui.strong("Points");
+                                ui.end_row();
+                                if let Some(envelope) = &verdict.envelope {
+                                    ui.label("envelope");
+                                    ui.label(envelope.drift.clone());
+                                    ui.label(format!("{:.2} ms", envelope.residual_rms_ms));
+                                    ui.label(envelope.points_used.to_string());
+                                    ui.end_row();
+                                }
+                                if let Some(waveform) = &verdict.waveform {
+                                    ui.label("waveform (gcc_phat)");
+                                    ui.label(waveform.drift.clone());
+                                    ui.label(format!("{:.2} ms", waveform.residual_rms_ms));
+                                    ui.label(waveform.points_used.to_string());
+                                    ui.end_row();
+                                }
+                            });
+                        if let Some(correlation) = verdict
+                            .waveform
+                            .as_ref()
+                            .and_then(|waveform| waveform.mean_correlation)
+                        {
+                            ui.label(format!("mean raw-waveform correlation: {correlation:.3}"));
+                        }
+                    }
+
+                    for note in &verdict.notes {
+                        ui.colored_label(weak_text(ui), note.as_str());
+                    }
+                }
+                None => {
+                    ui.label(
+                        "No drift verdict: the analysis found no correspondence between this \
+                         recording and the reference, so there is nothing to report.",
+                    );
+                }
+            }
+
+            if !facts.warnings.is_empty() {
+                ui.label("Warnings");
+                for warning in &facts.warnings {
+                    ui.colored_label(ui.visuals().warn_fg_color, warning.as_str());
+                }
+            }
+
+            if let Some(holdout) = &facts.holdout {
+                ui.label("Hold-out verification (waveform GCC-PHAT, independent of the fit)");
+                egui::Grid::new("holdout_facts")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Residual p50 / p95 / max");
+                        ui.label(format!(
+                            "{:+.3} / {:+.3} / {:.3} ms",
+                            holdout.p50_ms, holdout.p95_ms, holdout.max_ms
+                        ));
+                        ui.end_row();
+                        ui.label("Counted points");
+                        ui.label(format!("{} of {}", holdout.counted, holdout.points.len()));
+                        ui.end_row();
+                        ui.label("Pitch change");
+                        ui.label(format!("{:+.4} cents", holdout.pitch_cents));
+                        ui.end_row();
+                        if let Some(drift_error) = holdout.drift_error_ppm {
+                            let uncertainty = holdout
+                                .drift_error_se_ppm
+                                .map(|se| format!(" ± {se:.3} ppm"))
+                                .unwrap_or_default();
+                            ui.label("How wrong the applied drift is");
+                            ui.label(format!("{drift_error:+.3} ppm{uncertainty}"));
+                            ui.end_row();
+                        }
+                    });
+                for note in &holdout.notes {
+                    ui.colored_label(ui.visuals().warn_fg_color, note.as_str());
+                }
+            }
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        can_verify,
+                        egui::Button::new("Verify the corrected audio (hold-out)"),
+                    )
+                    .clicked()
+                {
+                    *verify_clicked = true;
+                }
+                if corrected.is_none() {
+                    ui.label("export the corrected audio to enable the hold-out check");
+                } else if !reference_is_wav {
+                    ui.label("the hold-out check needs a WAV reference");
+                }
+            });
+        };
+
+        if ui.available_width() >= 760.0 {
+            ui.columns(2, |cols| {
+                render_facts(&mut cols[0], &mut verify_clicked);
+                chart::paint_lag_plot(&mut cols[1], &points, model, facts.duration, &palette);
+                chart::paint_residual_plot(&mut cols[1], &points, facts.duration, &palette);
+                chart::paint_drift_plot(&mut cols[1], &points, model, facts.duration, &palette);
+            });
+        } else {
+            render_facts(ui, &mut verify_clicked);
+            ui.add_space(6.0);
+            chart::paint_lag_plot(ui, &points, model, facts.duration, &palette);
+            chart::paint_residual_plot(ui, &points, facts.duration, &palette);
+            chart::paint_drift_plot(ui, &points, model, facts.duration, &palette);
+        }
+
+        if verify_clicked {
+            self.start_verification(index);
+        }
     }
+}
+
+/// Format timeline position cleanly in `H:MM:SS.mmm` for studio transport readout.
+fn format_timecode(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "--:--:--.---".to_string();
+    }
+    let ms_total = (seconds * 1000.0).round() as u64;
+    let ms = ms_total % 1000;
+    let total_secs = ms_total / 1000;
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    format!("{hours}:{mins:02}:{secs:02}.{ms:03}")
 }
 
 /// Construct a `FileEntry` from a resolved `.stagesync` project reference.
@@ -3056,8 +3369,13 @@ fn metrics_line(metrics: &crate::state::TargetMetrics) -> String {
         ),
         // A drift without an uncertainty is not shown: it would be a number
         // with nothing behind it.
-        (Some(offset), None, _, Some(accumulated)) => format!(
+        (Some(offset), None, _, Some(accumulated))
+        | (Some(offset), _, None, Some(accumulated)) => format!(
             "offset {offset:+.3} s · drift not applied · accumulated {accumulated:+.1} ms · coverage {:.1}%",
+            metrics.coverage.unwrap_or(0.0) * 100.0
+        ),
+        (Some(offset), None, _, None) | (Some(offset), _, None, None) => format!(
+            "offset {offset:+.3} s · drift not applied · coverage {:.1}%",
             metrics.coverage.unwrap_or(0.0) * 100.0
         ),
         _ => "no alignment yet".to_string(),
@@ -3137,32 +3455,49 @@ impl StageSyncApp {
         }
 
         self.maybe_autosave();
+        self.handle_shortcuts(ui.ctx());
 
-        // egui sizes a panel to its content and gives it no upper bound of its
-        // own, so a long file name or a wide text box would otherwise squeeze
-        // the centre — the timeline, the anchor controls and the results — out
-        // of existence. The side panels are capped so that the centre always
-        // keeps a usable share of the window, at any window size.
         let window = ui.available_width();
-        let files_max = (window * 0.34).clamp(220.0, 420.0);
-        let export_max = (window * 0.30).clamp(220.0, 360.0);
+        let files_max = (window * 0.28).clamp(210.0, 340.0);
+        let export_max = (window * 0.27).clamp(210.0, 320.0);
 
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("messages")
-            .resizable(true)
-            .default_size(110.0)
-            .show(ui, |ui| self.log_panel(ui));
+        egui::Panel::top("toolbar")
+            .frame(
+                egui::Frame::side_top_panel(&ui.ctx().global_style())
+                    .fill(self.palette.bg_panel)
+                    .inner_margin(egui::Margin::symmetric(8, 5)),
+            )
+            .show(ui, |ui| self.toolbar(ui));
+
+        let bottom_panel = egui::Panel::bottom("messages").resizable(self.show_log);
+        let bottom_panel = if self.show_log {
+            bottom_panel.default_size(135.0)
+        } else {
+            bottom_panel.exact_size(26.0)
+        };
+        bottom_panel.show(ui, |ui| self.log_panel(ui));
+
         egui::Panel::left("files")
             .resizable(true)
-            .default_size(400.0_f32.min(files_max))
+            .default_size(280.0_f32.min(files_max))
             .max_size(files_max)
             .show(ui, |ui| self.file_panel(ui));
-        egui::Panel::right("export")
-            .resizable(true)
-            .default_size(340.0_f32.min(export_max))
-            .max_size(export_max)
-            .show(ui, |ui| self.export_panel(ui));
-        egui::CentralPanel::default().show(ui, |ui| self.central(ui));
+
+        if self.show_export {
+            egui::Panel::right("export")
+                .resizable(true)
+                .default_size(270.0_f32.min(export_max))
+                .max_size(export_max)
+                .show(ui, |ui| self.export_panel(ui));
+        }
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::central_panel(&ui.ctx().global_style())
+                    .fill(self.palette.bg_canvas)
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
+            .show(ui, |ui| self.central(ui));
 
         self.draw_pending_confirm(ui.ctx());
 
@@ -3173,9 +3508,80 @@ impl StageSyncApp {
         }
 
         if self.running.is_some() || self.peaks_pending > 0 {
-            // Keep the progress display moving while a job is running, and keep
-            // the waveforms coming in as they are built.
             ui.ctx().request_repaint();
+        }
+    }
+
+    /// Global keyboard shortcuts (disabled while typing into a text input).
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() || self.pending_confirm.is_some() {
+            return;
+        }
+        let duration = self
+            .report
+            .as_ref()
+            .map(|report| report.timeline_duration.max(1.0))
+            .unwrap_or(600.0);
+
+        let cmd = ctx.input(|i| i.modifiers.command);
+        let shift = ctx.input(|i| i.modifiers.shift);
+        let alt = ctx.input(|i| i.modifiers.alt);
+
+        if cmd && ctx.input(|i| i.key_pressed(egui::Key::N)) {
+            self.request_action(PendingAction::NewProject);
+        } else if cmd && ctx.input(|i| i.key_pressed(egui::Key::O)) {
+            self.request_action(PendingAction::PickOpenProject);
+        } else if cmd && shift && ctx.input(|i| i.key_pressed(egui::Key::S)) {
+            self.browse_save_project(true);
+        } else if cmd && ctx.input(|i| i.key_pressed(egui::Key::S)) {
+            self.browse_save_project(false);
+        } else if cmd && ctx.input(|i| i.key_pressed(egui::Key::E)) {
+            self.start_export();
+        } else if cmd && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+            self.undo_nudge();
+        } else if alt && ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+            if let Some(idx) = self.selected_target_index() {
+                self.nudge(idx, -0.005);
+            }
+        } else if alt && ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            if let Some(idx) = self.selected_target_index() {
+                self.nudge(idx, 0.005);
+            }
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            if self.player.is_playing() {
+                self.player.stop();
+            } else {
+                self.play_voice(self.voice);
+            }
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
+            self.play_voice(Voice::Reference);
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Num2)) {
+            self.play_voice(Voice::Target);
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Num3)) {
+            self.play_voice(Voice::Mix);
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+            let next = match self.voice {
+                Voice::Reference => Voice::Target,
+                _ => Voice::Reference,
+            };
+            self.play_voice(next);
+        } else if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+            if self.loop_region.is_some() {
+                self.loop_region = None;
+            } else if self.region.is_some() {
+                self.loop_region = self.region;
+            }
+        } else if ctx.input(|i| i.key_pressed(egui::Key::F)) {
+            self.view_start = 0.0;
+            self.view_end = duration;
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+            self.playhead = 0.0;
+            self.view_start = 0.0;
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
+        {
+            self.zoom_view(1.0, self.playhead);
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Minus)) {
+            self.zoom_view(-1.0, self.playhead);
         }
     }
 

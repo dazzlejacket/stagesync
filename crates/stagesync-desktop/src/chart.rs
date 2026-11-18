@@ -6,6 +6,8 @@
 use eframe::egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use stagesync_core::matching::{LinearModel, MatchMethod, MatchPoint};
 
+use crate::theme::Palette;
+
 /// Height of one plot, in points.
 pub const PLOT_HEIGHT: f32 = 172.0;
 
@@ -38,12 +40,6 @@ pub struct Series {
     pub points: Vec<(f64, f64, f32)>,
 }
 
-/// The colour of the envelope measurements.
-const ENVELOPE_COLOUR: Color32 = Color32::from_rgb(92, 172, 255);
-
-/// The colour of the waveform measurements.
-const WAVEFORM_COLOUR: Color32 = Color32::from_rgb(238, 196, 92);
-
 /// What one plot shows.
 struct Plot<'a> {
     /// The title, at the top of the plot.
@@ -60,6 +56,8 @@ struct Plot<'a> {
     symmetric: bool,
     /// Whether the legend is drawn.
     legend: bool,
+    /// Active theme palette.
+    palette: &'a Palette,
 }
 
 /// Draw the measured lag against the source time, with the fitted model over it.
@@ -68,10 +66,11 @@ pub fn paint_lag_plot(
     points: &[MatchPoint],
     model: Option<LinearModel>,
     duration: f64,
+    palette: &Palette,
 ) {
     let series = Series {
         label: "measured lag",
-        colour: ENVELOPE_COLOUR,
+        colour: palette.wave_ref,
         marker: Marker::Circle,
         points: points
             .iter()
@@ -89,15 +88,16 @@ pub fn paint_lag_plot(
             x_max: duration,
             symmetric: false,
             legend: false,
+            palette,
         },
     );
 }
 
 /// Draw the residual of every match point against the fitted model.
-pub fn paint_residual_plot(ui: &mut Ui, points: &[MatchPoint], duration: f64) {
+pub fn paint_residual_plot(ui: &mut Ui, points: &[MatchPoint], duration: f64, palette: &Palette) {
     let series = Series {
         label: "residual",
-        colour: ENVELOPE_COLOUR,
+        colour: palette.wave_ref,
         marker: Marker::Circle,
         points: points
             .iter()
@@ -114,26 +114,18 @@ pub fn paint_residual_plot(ui: &mut Ui, points: &[MatchPoint], duration: f64) {
             x_max: duration,
             symmetric: true,
             legend: false,
+            palette,
         },
     );
 }
 
 /// Draw the drift measured at every match point, relative to the fitted model.
-///
-/// The value plotted is the *local* drift: the lag the measurement found minus the lag
-/// the model predicts, divided by the source time and expressed in parts per million.
-/// That is what shows whether the model's slope is right — points scattered around
-/// zero mean the rate is right, and a trend across the plot means it is not.
-///
-/// The envelope points and the waveform (GCC-PHAT) points are drawn differently,
-/// because the waveform points are the independent hold-out measurements: they were
-/// taken at positions the fit did not use, so they are the only ones that can check
-/// the model rather than restate it.
 pub fn paint_drift_plot(
     ui: &mut Ui,
     points: &[MatchPoint],
     model: Option<LinearModel>,
     duration: f64,
+    palette: &Palette,
 ) {
     let Some(model) = model else {
         ui.label("There is no model, so there is nothing to compare the measurements against.");
@@ -157,13 +149,13 @@ pub fn paint_drift_plot(
     let series = [
         Series {
             label: "envelope",
-            colour: ENVELOPE_COLOUR,
+            colour: palette.wave_ref,
             marker: Marker::Circle,
             points: envelope,
         },
         Series {
             label: "waveform (gcc_phat)",
-            colour: WAVEFORM_COLOUR,
+            colour: palette.wave_series_alt,
             marker: Marker::HollowSquare,
             points: waveform,
         },
@@ -178,6 +170,7 @@ pub fn paint_drift_plot(
             x_max: duration,
             symmetric: true,
             legend: true,
+            palette,
         },
     );
 }
@@ -211,17 +204,24 @@ fn paint_plot(ui: &mut Ui, plot: Plot<'_>) {
         x_max,
         symmetric,
         legend,
+        palette,
     } = plot;
     let width = ui.available_width().max(240.0);
     let (response, painter) = ui.allocate_painter(Vec2::new(width, PLOT_HEIGHT), Sense::hover());
     let outer = response.rect;
-    painter.rect_filled(outer, 3.0, Color32::from_gray(24));
+    painter.rect_filled(outer, 3.0, palette.bg_lane);
+    painter.rect_stroke(
+        outer,
+        3.0,
+        Stroke::new(1.0, palette.border_subtle),
+        StrokeKind::Middle,
+    );
     painter.text(
-        Pos2::new(outer.left() + 6.0, outer.top() + 2.0),
+        Pos2::new(outer.left() + 8.0, outer.top() + 3.0),
         Align2::LEFT_TOP,
         title,
-        FontId::proportional(12.0),
-        Color32::from_gray(195),
+        FontId::proportional(11.5),
+        palette.text_primary,
     );
 
     let plot = Rect::from_min_max(
@@ -265,7 +265,7 @@ fn paint_plot(ui: &mut Ui, plot: Plot<'_>) {
     painter.rect_stroke(
         plot,
         2.0,
-        Stroke::new(1.0, Color32::from_gray(70)),
+        Stroke::new(1.0, palette.border_subtle),
         StrokeKind::Middle,
     );
 
@@ -273,7 +273,7 @@ fn paint_plot(ui: &mut Ui, plot: Plot<'_>) {
         let zero = y_of(0.0);
         painter.line_segment(
             [Pos2::new(plot.left(), zero), Pos2::new(plot.right(), zero)],
-            Stroke::new(1.0, Color32::from_gray(95)),
+            Stroke::new(1.0, palette.grid_line),
         );
     }
 
@@ -283,7 +283,7 @@ fn paint_plot(ui: &mut Ui, plot: Plot<'_>) {
                 Pos2::new(x_of(0.0), y_of(line(0.0))),
                 Pos2::new(x_of(x_max), y_of(line(x_max))),
             ],
-            Stroke::new(1.5, Color32::from_rgb(238, 196, 92)),
+            Stroke::new(1.5, palette.wave_series_alt),
         );
     }
 
@@ -299,52 +299,51 @@ fn paint_plot(ui: &mut Ui, plot: Plot<'_>) {
     }
 
     if legend {
-        // The legend is drawn at the right-hand end of the title row, so that
-        // a long title and the legend do not sit on top of one another.
         let width = legend_width(series);
         paint_legend(
             &painter,
             series,
-            Pos2::new(outer.right() - MARGIN_RIGHT - width, outer.top() + 2.0),
+            Pos2::new(outer.right() - MARGIN_RIGHT - width, outer.top() + 3.0),
+            palette,
         );
     }
 
     let label = || FontId::proportional(10.0);
-    let grey = Color32::from_gray(150);
+    let tick_col = palette.text_muted;
     painter.text(
         Pos2::new(plot.left() - 6.0, y_of(y_max)),
         Align2::RIGHT_TOP,
         format!("{y_max:.3}"),
         label(),
-        grey,
+        tick_col,
     );
     painter.text(
         Pos2::new(plot.left() - 6.0, y_of(y_min)),
         Align2::RIGHT_BOTTOM,
         format!("{y_min:.3}"),
         label(),
-        grey,
+        tick_col,
     );
     painter.text(
         Pos2::new(plot.left() - 6.0, plot.center().y),
         Align2::RIGHT_CENTER,
         y_label,
         label(),
-        Color32::from_gray(175),
+        palette.text_primary,
     );
     painter.text(
         Pos2::new(plot.left(), plot.bottom() + 3.0),
         Align2::LEFT_TOP,
         "0 s",
         label(),
-        grey,
+        tick_col,
     );
     painter.text(
         Pos2::new(plot.right(), plot.bottom() + 3.0),
         Align2::RIGHT_TOP,
         format!("{x_max:.1} s"),
         label(),
-        grey,
+        tick_col,
     );
 }
 
@@ -385,7 +384,7 @@ fn legend_width(series: &[Series]) -> f32 {
 }
 
 /// Draw the legend of a plot, at the top of it.
-fn paint_legend(painter: &eframe::egui::Painter, series: &[Series], at: Pos2) {
+fn paint_legend(painter: &eframe::egui::Painter, series: &[Series], at: Pos2, palette: &Palette) {
     let font = FontId::proportional(10.0);
     let mut x = at.x;
     for series in series {
@@ -402,9 +401,8 @@ fn paint_legend(painter: &eframe::egui::Painter, series: &[Series], at: Pos2) {
             Align2::LEFT_CENTER,
             text,
             font.clone(),
-            Color32::from_gray(180),
+            palette.text_muted,
         );
-        // The labels are short and few, so a fixed step keeps the legend simple.
         x += 11.0 + 6.5 * text.chars().count() as f32 + 14.0;
     }
 }

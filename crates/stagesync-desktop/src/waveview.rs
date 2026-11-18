@@ -10,20 +10,24 @@
 //! file. A three-hour recording is never held in memory: what is drawn here is a
 //! few thousand numbers per lane.
 
-use eframe::egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke};
+use eframe::egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, StrokeKind};
 use stagesync_core::audio::PeakCache;
 use stagesync_core::matching::{LinearModel, SegmentKind};
 
+use crate::theme::Palette;
+
+/// The height of the overview minimap bar, in points.
+pub const OVERVIEW_HEIGHT: f32 = 22.0;
 /// The height of the reference lane, in points.
-pub const REFERENCE_HEIGHT: f32 = 104.0;
+pub const REFERENCE_HEIGHT: f32 = 112.0;
 /// The height of one recording lane, in points.
-pub const TARGET_HEIGHT: f32 = 62.0;
+pub const TARGET_HEIGHT: f32 = 74.0;
 /// The height of the caption above a lane, in points.
-pub const CAPTION_HEIGHT: f32 = 15.0;
+pub const CAPTION_HEIGHT: f32 = 16.0;
 /// The vertical gap between two lanes, in points.
-pub const LANE_GAP: f32 = 10.0;
+pub const LANE_GAP: f32 = 8.0;
 /// The height of the coverage strip at the bottom of a lane, in points.
-pub const COVERAGE_HEIGHT: f32 = 7.0;
+pub const COVERAGE_HEIGHT: f32 = 6.0;
 /// The height of the time ruler under the lanes, in points.
 pub const RULER_HEIGHT: f32 = 20.0;
 
@@ -74,18 +78,89 @@ pub fn height(target_count: usize) -> f32 {
 }
 
 /// The colour that stands for each kind of span.
-pub fn kind_color(kind: SegmentKind) -> Color32 {
+pub fn kind_color(kind: SegmentKind, palette: &Palette) -> Color32 {
     match kind {
-        SegmentKind::Matched => Color32::from_rgb(62, 158, 92),
-        SegmentKind::LowConfidence => Color32::from_rgb(214, 168, 44),
-        SegmentKind::UncoveredReference => Color32::from_rgb(198, 58, 58),
-        SegmentKind::BeyondReference => Color32::from_gray(124),
-        SegmentKind::RecorderGap => Color32::from_rgb(108, 20, 20),
+        SegmentKind::Matched => palette.ok,
+        SegmentKind::LowConfidence => palette.warn,
+        SegmentKind::UncoveredReference => palette.error,
+        SegmentKind::BeyondReference => palette.beyond,
+        SegmentKind::RecorderGap => palette.gap_dark,
     }
 }
 
+/// Draw the full-show overview minimap showing coverage and current zoom bracket.
+pub fn paint_overview(
+    painter: &Painter,
+    rect: Rect,
+    view: &WaveformView<'_>,
+    total_duration: f64,
+    palette: &Palette,
+) {
+    let dur = total_duration.max(1.0);
+    painter.rect_filled(rect, 3.0, palette.bg_lane);
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0, palette.border_subtle),
+        StrokeKind::Middle,
+    );
+
+    let x_of = |t: f64| rect.left() + ((t / dur) as f32).clamp(0.0, 1.0) * rect.width();
+
+    if let Some(cache) = view.reference {
+        let wave_rect = rect.shrink2(eframe::egui::vec2(1.0, 3.0));
+        draw_waveform(
+            painter,
+            wave_rect,
+            cache,
+            0.0,
+            dur,
+            x_of,
+            palette.wave_ref.gamma_multiply(0.55),
+            palette.grid_line,
+        );
+    }
+
+    // Coverage indicator bar along bottom 4px of overview.
+    let strip = Rect::from_min_max(
+        Pos2::new(rect.left() + 1.0, rect.bottom() - 4.0),
+        Pos2::new(rect.right() - 1.0, rect.bottom() - 1.0),
+    );
+    for (start, end, kind) in &view.coverage {
+        let x0 = x_of(*start);
+        let x1 = x_of(*end).max(x0 + 1.0);
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(x0, strip.top()), Pos2::new(x1, strip.bottom())),
+            0.0,
+            kind_color(*kind, palette),
+        );
+    }
+
+    // Current viewport bracket.
+    let vx0 = x_of(view.start_secs).max(rect.left());
+    let vx1 = x_of(view.end_secs).min(rect.right()).max(vx0 + 4.0);
+    let bracket = Rect::from_min_max(
+        Pos2::new(vx0, rect.top() + 1.0),
+        Pos2::new(vx1, rect.bottom() - 1.0),
+    );
+    painter.rect_filled(bracket, 2.0, palette.accent_soft);
+    painter.rect_stroke(
+        bracket,
+        2.0,
+        Stroke::new(1.2, palette.accent),
+        StrokeKind::Middle,
+    );
+
+    // Playhead tick on overview.
+    let px = x_of(view.playhead_secs);
+    painter.line_segment(
+        [Pos2::new(px, rect.top()), Pos2::new(px, rect.bottom())],
+        Stroke::new(1.5, palette.playhead),
+    );
+}
+
 /// Draw the whole waveform timeline.
-pub fn paint(painter: &Painter, rect: Rect, view: &WaveformView<'_>) {
+pub fn paint(painter: &Painter, rect: Rect, view: &WaveformView<'_>, palette: &Palette) {
     let span = (view.end_secs - view.start_secs).max(1e-6);
     let width = rect.width().max(1.0);
     let px_per_sec = width / span as f32;
@@ -94,39 +169,42 @@ pub fn paint(painter: &Painter, rect: Rect, view: &WaveformView<'_>) {
     let mut y = rect.top();
 
     // The reference lane.
-    paint_caption(painter, rect, y, "Reference".to_string());
+    let ref_caption = match view.reference {
+        Some(cache) if cache.channels >= 2 => {
+            format!(
+                "Reference  ·  Stereo ({} ch, {:.1} s)",
+                cache.channels,
+                cache.duration_secs()
+            )
+        }
+        Some(cache) => format!("Reference  ·  Mono ({:.1} s)", cache.duration_secs()),
+        None => "Reference".to_string(),
+    };
+    paint_caption(painter, rect, y, ref_caption, false, palette);
     y += CAPTION_HEIGHT;
-    paint_reference_lane(painter, rect, &x_of, y, view);
+    paint_reference_lane(painter, rect, &x_of, y, view, palette);
     y += REFERENCE_HEIGHT + LANE_GAP;
 
     // One lane per recording.
     for lane in &view.targets {
+        let ch_note = lane
+            .peaks
+            .map(|c| if c.channels >= 2 { " · L/R" } else { "" })
+            .unwrap_or("");
         let caption = if lane.selected {
-            format!("{} · selected", lane.name)
+            format!("{}{ch_note} · selected", lane.name)
         } else {
-            lane.name.clone()
+            format!("{}{ch_note}", lane.name)
         };
-        paint_caption(painter, rect, y, caption);
+        paint_caption(painter, rect, y, caption, lane.selected, palette);
         y += CAPTION_HEIGHT;
-        paint_target_lane(painter, rect, &x_of, y, lane, view);
+        paint_target_lane(painter, rect, &x_of, y, lane, view, palette);
         y += TARGET_HEIGHT + LANE_GAP;
     }
 
-    paint_selection(
-        painter,
-        rect,
-        &x_of,
-        view.selection,
-        Color32::from_rgb(90, 150, 230),
-    );
-    paint_loop(
-        painter,
-        rect,
-        &x_of,
-        view.loop_region,
-        Color32::from_rgb(230, 150, 90),
-    );
-    paint_playhead(painter, rect, &x_of, view.playhead_secs);
+    paint_selection(painter, rect, &x_of, view.selection, palette.accent);
+    paint_loop(painter, rect, &x_of, view.loop_region, palette.loop_stroke);
+    paint_playhead(painter, rect, &x_of, view.playhead_secs, palette);
 
     paint_ruler(
         painter,
@@ -135,17 +213,29 @@ pub fn paint(painter: &Painter, rect: Rect, view: &WaveformView<'_>) {
         view.start_secs,
         view.end_secs,
         px_per_sec,
+        palette,
     );
 }
 
 /// Draw the caption of one lane.
-fn paint_caption(painter: &Painter, rect: Rect, y: f32, text: String) {
+fn paint_caption(
+    painter: &Painter,
+    rect: Rect,
+    y: f32,
+    text: String,
+    selected: bool,
+    palette: &Palette,
+) {
     painter.text(
         Pos2::new(rect.left() + 2.0, y),
         Align2::LEFT_TOP,
         text,
         FontId::proportional(11.0),
-        Color32::from_gray(170),
+        if selected {
+            palette.accent
+        } else {
+            palette.text_muted
+        },
     );
 }
 
@@ -156,12 +246,19 @@ fn paint_reference_lane(
     x_of: &impl Fn(f64) -> f32,
     y: f32,
     view: &WaveformView<'_>,
+    palette: &Palette,
 ) {
     let lane = Rect::from_min_max(
         Pos2::new(rect.left(), y),
         Pos2::new(rect.right(), y + REFERENCE_HEIGHT - COVERAGE_HEIGHT),
     );
-    painter.rect_filled(lane, 2.0, Color32::from_gray(24));
+    painter.rect_filled(lane, 2.0, palette.bg_lane);
+    painter.rect_stroke(
+        lane,
+        2.0,
+        Stroke::new(1.0, palette.border_subtle),
+        StrokeKind::Middle,
+    );
 
     if let Some(cache) = view.reference {
         draw_waveform(
@@ -171,17 +268,17 @@ fn paint_reference_lane(
             view.start_secs,
             view.end_secs,
             x_of,
-            Color32::from_rgb(150, 170, 200),
+            palette.wave_ref,
+            palette.grid_line,
         );
     }
 
-    // The coverage strip: what the recordings between them cover, and what they
-    // do not.
+    // The coverage strip: what the recordings between them cover, and what they do not.
     let strip = Rect::from_min_max(
         Pos2::new(rect.left(), y + REFERENCE_HEIGHT - COVERAGE_HEIGHT),
         Pos2::new(rect.right(), y + REFERENCE_HEIGHT),
     );
-    painter.rect_filled(strip, 0.0, Color32::from_gray(40));
+    painter.rect_filled(strip, 0.0, palette.bg_strip);
     for (start, end, kind) in &view.coverage {
         let x0 = x_of(*start);
         let x1 = x_of(*end);
@@ -192,7 +289,7 @@ fn paint_reference_lane(
             Pos2::new(x0, strip.top()),
             Pos2::new(x1.max(x0 + 0.5), strip.bottom()),
         );
-        painter.rect_filled(span, 0.0, kind_color(*kind));
+        painter.rect_filled(span, 0.0, kind_color(*kind, palette));
     }
 }
 
@@ -204,23 +301,41 @@ fn paint_target_lane(
     y: f32,
     lane: &TargetLane<'_>,
     view: &WaveformView<'_>,
+    palette: &Palette,
 ) {
     let area = Rect::from_min_max(
         Pos2::new(rect.left(), y),
         Pos2::new(rect.right(), y + TARGET_HEIGHT - COVERAGE_HEIGHT),
     );
-    painter.rect_filled(area, 2.0, Color32::from_gray(24));
+    painter.rect_filled(
+        area,
+        2.0,
+        if lane.selected {
+            palette.bg_lane_selected
+        } else {
+            palette.bg_lane
+        },
+    );
+    painter.rect_stroke(
+        area,
+        2.0,
+        Stroke::new(
+            1.0,
+            if lane.selected {
+                palette.accent
+            } else {
+                palette.border_subtle
+            },
+        ),
+        StrokeKind::Middle,
+    );
 
     if let (Some(cache), Some(model)) = (lane.peaks, lane.model) {
-        // The part of the recording that belongs in the visible span of the
-        // reference timeline.
         let source_start = (view.start_secs - model.offset) / model.scale;
         let source_end = (view.end_secs - model.offset) / model.scale;
         if source_end > 0.0 && source_start < cache.duration_secs() {
             let from = source_start.max(0.0);
             let to = source_end.min(cache.duration_secs());
-            // The recording is drawn through the model, so the position of every
-            // bucket is the reference time it corresponds to.
             draw_waveform(
                 painter,
                 area,
@@ -228,7 +343,24 @@ fn paint_target_lane(
                 from,
                 to,
                 |t| x_of(model.reference_time(t)),
-                Color32::from_rgb(120, 200, 140),
+                palette.wave_target,
+                palette.grid_line,
+            );
+        }
+    } else if let Some(cache) = lane.peaks {
+        // Before alignment finishes, still render the unaligned preview waveform faintly.
+        let to = view.end_secs.min(cache.duration_secs()).max(0.0);
+        let from = view.start_secs.clamp(0.0, to);
+        if to > from {
+            draw_waveform(
+                painter,
+                area,
+                cache,
+                from,
+                to,
+                x_of,
+                palette.text_faint,
+                palette.grid_line,
             );
         }
     }
@@ -238,7 +370,7 @@ fn paint_target_lane(
         Pos2::new(rect.left(), y + TARGET_HEIGHT - COVERAGE_HEIGHT),
         Pos2::new(rect.right(), y + TARGET_HEIGHT),
     );
-    painter.rect_filled(strip, 0.0, Color32::from_gray(40));
+    painter.rect_filled(strip, 0.0, palette.bg_strip);
     for (start, end, kind) in &lane.segments {
         let x0 = x_of(*start);
         let x1 = x_of(*end);
@@ -249,15 +381,12 @@ fn paint_target_lane(
             Pos2::new(x0, strip.top()),
             Pos2::new(x1.max(x0 + 0.5), strip.bottom()),
         );
-        painter.rect_filled(span, 0.0, kind_color(*kind));
+        painter.rect_filled(span, 0.0, kind_color(*kind, palette));
     }
 }
 
-/// Draw the peaks of a recording.
-///
-/// `place` turns a time in the recording into a position on screen. For the
-/// reference it is the identity; for a recording that has been moved it is the
-/// model, so the picture shows where the recording actually belongs.
+/// Draw the peaks of a recording (split L/R sub-lanes for stereo recordings).
+#[allow(clippy::too_many_arguments)]
 fn draw_waveform(
     painter: &Painter,
     area: Rect,
@@ -266,14 +395,71 @@ fn draw_waveform(
     to_secs: f64,
     place: impl Fn(f64) -> f32,
     colour: Color32,
+    grid_line: Color32,
 ) {
     let buckets = area.width().ceil().max(1.0) as usize;
     let Some(window) = cache.peaks(from_secs, to_secs, buckets) else {
         return;
     };
-    let (low, high) = window.extremes();
-    let span = (high - low).max(1e-4);
+
+    if window.mins.len() >= 2 && window.maxs.len() >= 2 {
+        // Stereo L/R split waveform display.
+        let mid_y = area.center().y;
+        painter.line_segment(
+            [
+                Pos2::new(area.left(), mid_y),
+                Pos2::new(area.right(), mid_y),
+            ],
+            Stroke::new(1.0, grid_line),
+        );
+        let top_rect = Rect::from_min_max(area.left_top(), Pos2::new(area.right(), mid_y - 1.0));
+        let bot_rect = Rect::from_min_max(Pos2::new(area.left(), mid_y + 1.0), area.right_bottom());
+        draw_single_channel(painter, top_rect, &window, 0, &place, colour, grid_line);
+        draw_single_channel(painter, bot_rect, &window, 1, &place, colour, grid_line);
+    } else {
+        draw_single_channel(painter, area, &window, 0, &place, colour, grid_line);
+    }
+}
+
+fn draw_single_channel(
+    painter: &Painter,
+    area: Rect,
+    window: &stagesync_core::audio::PeakWindow,
+    channel: usize,
+    place: &impl Fn(f64) -> f32,
+    colour: Color32,
+    grid_line: Color32,
+) {
+    let Some(mins) = window.mins.get(channel) else {
+        return;
+    };
+    let Some(maxs) = window.maxs.get(channel) else {
+        return;
+    };
+    let mut low = f32::INFINITY;
+    let mut high = f32::NEG_INFINITY;
+    for (&mn, &mx) in mins.iter().zip(maxs.iter()) {
+        if mn.is_finite() {
+            low = low.min(mn);
+        }
+        if mx.is_finite() {
+            high = high.max(mx);
+        }
+    }
+    if !low.is_finite() || !high.is_finite() {
+        return;
+    }
+
     let middle = area.center().y;
+    painter.line_segment(
+        [
+            Pos2::new(area.left(), middle),
+            Pos2::new(area.right(), middle),
+        ],
+        Stroke::new(1.0, grid_line.gamma_multiply(0.5)),
+    );
+
+    let span = (high - low).max(1e-4);
     let half = area.height() * 0.5 - 1.0;
     let centre_value = (low + high) * 0.5;
     let scale = half / (span * 0.5);
@@ -285,16 +471,8 @@ fn draw_waveform(
         if x < area.left() - 1.0 || x > area.right() + 1.0 {
             continue;
         }
-        let min = window
-            .mins
-            .iter()
-            .filter_map(|plane| plane.get(index).copied())
-            .fold(f32::INFINITY, f32::min);
-        let max = window
-            .maxs
-            .iter()
-            .filter_map(|plane| plane.get(index).copied())
-            .fold(f32::NEG_INFINITY, f32::max);
+        let min = mins.get(index).copied().unwrap_or(0.0);
+        let max = maxs.get(index).copied().unwrap_or(0.0);
         if !min.is_finite() || !max.is_finite() {
             continue;
         }
@@ -361,17 +539,31 @@ fn paint_loop(
 }
 
 /// Draw the playhead.
-fn paint_playhead(painter: &Painter, rect: Rect, x_of: &impl Fn(f64) -> f32, position: f64) {
+fn paint_playhead(
+    painter: &Painter,
+    rect: Rect,
+    x_of: &impl Fn(f64) -> f32,
+    position: f64,
+    palette: &Palette,
+) {
     let x = x_of(position);
+    if x < rect.left() - 2.0 || x > rect.right() + 2.0 {
+        return;
+    }
     painter.line_segment(
         [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-        Stroke::new(1.5, Color32::from_rgb(240, 240, 240)),
+        Stroke::new(1.5, palette.playhead),
     );
-    painter.circle_filled(
-        Pos2::new(x, rect.top() + 4.0),
-        4.0,
-        Color32::from_rgb(240, 240, 240),
-    );
+    let head = vec![
+        Pos2::new(x - 4.5, rect.top()),
+        Pos2::new(x + 4.5, rect.top()),
+        Pos2::new(x, rect.top() + 7.0),
+    ];
+    painter.add(eframe::egui::Shape::convex_polygon(
+        head,
+        palette.playhead,
+        Stroke::NONE,
+    ));
 }
 
 /// Draw the time ruler.
@@ -382,8 +574,13 @@ fn paint_ruler(
     start_secs: f64,
     end_secs: f64,
     px_per_sec: f32,
+    palette: &Palette,
 ) {
     let y = rect.bottom() - RULER_HEIGHT;
+    painter.line_segment(
+        [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+        Stroke::new(1.0, palette.border_subtle),
+    );
     let step = tick_step(px_per_sec);
     let mut t = (start_secs / step).floor() * step;
     while t <= end_secs + step {
@@ -391,14 +588,14 @@ fn paint_ruler(
         if x >= rect.left() - 2.0 && x <= rect.right() + 2.0 {
             painter.line_segment(
                 [Pos2::new(x, y), Pos2::new(x, y + 5.0)],
-                Stroke::new(1.0, Color32::from_gray(120)),
+                Stroke::new(1.0, palette.ruler_tick),
             );
             painter.text(
                 Pos2::new(x + 2.0, y + 5.0),
                 Align2::LEFT_TOP,
                 format_tick(t),
                 FontId::proportional(10.0),
-                Color32::from_gray(150),
+                palette.text_muted,
             );
         }
         t += step;

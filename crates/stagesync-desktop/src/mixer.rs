@@ -13,9 +13,11 @@
 //!   assumes every recording reaches its peak at the same instant. It is exactly
 //!   the right thing to warn about clipping with.
 
-use eframe::egui::{self, Color32, Rect, Sense, Stroke, Vec2};
+use eframe::egui::{self, Rect, Sense, Stroke, StrokeKind, Vec2};
 use stagesync_core::audio::PeakCache;
 use stagesync_core::mixer::{db_to_linear, linear_to_db, MixSettings, MixTrack, MonitorMode};
+
+use crate::theme::Palette;
 
 /// What the panel needs to know about one recording.
 #[derive(Debug, Clone)]
@@ -166,12 +168,7 @@ pub fn peak_of(cache: &PeakCache) -> f32 {
 /// and solo buttons and its meter. Above the rows are the monitoring mode, the
 /// master fader and the predicted level of the whole mix.
 pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
-    ui.heading("Mixer");
-    ui.label(
-        "Every recording is placed on the reference timeline with the correction the \
-         analysis measured. The reference itself is never mixed in.",
-    );
-
+    let palette = Palette::for_mode(ui.visuals().dark_mode);
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_label("Monitor")
             .selected_text(state.mode.label())
@@ -181,7 +178,7 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
                         .on_hover_text(mode.description());
                 }
             });
-        ui.label(state.mode.description());
+        ui.colored_label(palette.text_muted, state.mode.description());
     });
 
     // The master fader and the predicted level of the whole mix.
@@ -249,8 +246,11 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
         let info = infos.get(index);
         let channels = info.map(|i| i.channels).unwrap_or(1);
         ui.push_id(index, |ui| {
-            egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(8, 4))
+            egui::Frame::new()
+                .fill(palette.bg_surface)
+                .stroke(Stroke::new(1.0, palette.border_subtle))
+                .corner_radius(3.0)
+                .inner_margin(egui::Margin::symmetric(8, 5))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut track.enabled, "In mix")
@@ -258,25 +258,46 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
                         let name = info
                             .map(|i| i.name.clone())
                             .unwrap_or_else(|| format!("Recording {}", index + 1));
-                        ui.label(name);
+                        ui.strong(name);
                         if let Some(info) = info {
                             if !info.aligned {
-                                ui.colored_label(
-                                    ui.visuals().warn_fg_color,
-                                    "no alignment: it will not be mixed in",
-                                );
+                                ui.colored_label(palette.warn, "no alignment: excluded from mix");
                             }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let solo_btn = egui::Button::new(
+                                egui::RichText::new("S").strong().color(if track.solo {
+                                    palette.warn
+                                } else {
+                                    palette.text_primary
+                                }),
+                            )
+                            .fill(if track.solo {
+                                palette.warn.gamma_multiply(0.18)
+                            } else {
+                                palette.bg_panel
+                            });
                             if ui
-                                .selectable_label(track.solo, "S")
+                                .add(solo_btn)
                                 .on_hover_text("Solo: hear this recording on its own")
                                 .clicked()
                             {
                                 track.solo = !track.solo;
                             }
+                            let mute_btn = egui::Button::new(
+                                egui::RichText::new("M").strong().color(if track.mute {
+                                    palette.error
+                                } else {
+                                    palette.text_primary
+                                }),
+                            )
+                            .fill(if track.mute {
+                                palette.error.gamma_multiply(0.18)
+                            } else {
+                                palette.bg_panel
+                            });
                             if ui
-                                .selectable_label(track.mute, "M")
+                                .add(mute_btn)
                                 .on_hover_text("Mute this recording")
                                 .clicked()
                             {
@@ -367,11 +388,11 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
                     });
 
                     ui.horizontal(|ui| {
-                        ui.label("Meter");
+                        ui.colored_label(palette.text_muted, "Meter");
                         let peak = info.and_then(|i| i.peak).unwrap_or(0.0);
                         let contribution = peak * track.effective_gain(solo_active);
-                        meter(ui, contribution);
-                        ui.label(format!("{:.1} dBFS", linear_to_db(contribution)));
+                        meter(ui, contribution, &palette);
+                        ui.monospace(format!("{:.1} dBFS", linear_to_db(contribution)));
                     });
                 });
         });
@@ -379,12 +400,18 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
 }
 
 /// Draw a level meter.
-fn meter(ui: &mut egui::Ui, peak: f32) {
-    let height = 12.0;
-    let width = 120.0;
+fn meter(ui: &mut egui::Ui, peak: f32, palette: &Palette) {
+    let height = 10.0;
+    let width = 128.0;
     let (rect, _response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, Color32::from_gray(28));
+    painter.rect_filled(rect, 2.0, palette.bg_strip);
+    painter.rect_stroke(
+        rect,
+        2.0,
+        Stroke::new(1.0, palette.border_subtle),
+        StrokeKind::Middle,
+    );
 
     // The scale runs from -60 dBFS to 0 dBFS.
     let db = linear_to_db(peak);
@@ -395,11 +422,11 @@ fn meter(ui: &mut egui::Ui, peak: f32) {
             egui::pos2(rect.left() + rect.width() * fraction, rect.bottom()),
         );
         let colour = if db > -1.0 {
-            Color32::from_rgb(198, 58, 58)
+            palette.error
         } else if db > -12.0 {
-            Color32::from_rgb(214, 168, 44)
+            palette.warn
         } else {
-            Color32::from_rgb(62, 158, 92)
+            palette.ok
         };
         painter.rect_filled(filled, 2.0, colour);
     }
@@ -410,7 +437,7 @@ fn meter(ui: &mut egui::Ui, peak: f32) {
             egui::pos2(zero, rect.top()),
             egui::pos2(zero, rect.bottom()),
         ],
-        Stroke::new(1.0, Color32::from_gray(120)),
+        Stroke::new(1.0, palette.border_strong),
     );
 }
 

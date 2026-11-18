@@ -6,6 +6,8 @@
 use eframe::egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Stroke, Vec2};
 use stagesync_core::matching::{AlignmentReport, SegmentKind};
 
+use crate::theme::Palette;
+
 /// Height of one lane, in points.
 pub const LANE_HEIGHT: f32 = 24.0;
 /// Height of the caption above one lane, in points.
@@ -249,8 +251,8 @@ fn hatch(painter: &Painter, rect: Rect, colour: Color32, spacing: f32) {
     }
 }
 
-/// Draw the colour legend.
-pub fn paint_legend(ui: &mut eframe::egui::Ui) {
+/// Draw the colour legend using the active theme palette.
+pub fn paint_legend(ui: &mut eframe::egui::Ui, palette: &Palette) {
     ui.horizontal_wrapped(|ui| {
         for kind in [
             SegmentKind::Matched,
@@ -259,13 +261,20 @@ pub fn paint_legend(ui: &mut eframe::egui::Ui) {
             SegmentKind::RecorderGap,
             SegmentKind::BeyondReference,
         ] {
-            let (response, painter) = ui.allocate_painter(Vec2::new(13.0, 13.0), Sense::hover());
-            painter.rect_filled(response.rect, 2.0, kind_color(kind));
+            let color = match kind {
+                SegmentKind::Matched => palette.ok,
+                SegmentKind::LowConfidence => palette.warn,
+                SegmentKind::UncoveredReference => palette.error,
+                SegmentKind::BeyondReference => palette.beyond,
+                SegmentKind::RecorderGap => palette.gap_dark,
+            };
+            let (response, painter) = ui.allocate_painter(Vec2::new(12.0, 12.0), Sense::hover());
+            painter.rect_filled(response.rect, 2.0, color);
             if matches!(
                 kind,
                 SegmentKind::UncoveredReference | SegmentKind::RecorderGap
             ) {
-                hatch(&painter, response.rect, Color32::from_black_alpha(130), 5.0);
+                hatch(&painter, response.rect, palette.hatch_alpha, 5.0);
             }
             ui.label(kind.label());
         }

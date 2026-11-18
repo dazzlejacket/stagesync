@@ -186,7 +186,8 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool) -> Palette {
     visuals.code_bg_color = p.bg_surface;
     visuals.warn_fg_color = p.warn;
     visuals.error_fg_color = p.error;
-    visuals.override_text_color = Some(p.text_primary);
+    visuals.override_text_color = None;
+    visuals.weak_text_color = Some(p.text_muted);
 
     visuals.selection.bg_fill = p.accent_soft;
     visuals.selection.stroke = Stroke::new(1.0, p.accent);
@@ -213,10 +214,13 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool) -> Palette {
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.2, p.text_primary);
     visuals.widgets.hovered.corner_radius = r;
 
-    visuals.widgets.active.bg_fill = p.accent;
-    visuals.widgets.active.weak_bg_fill = p.accent;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, p.accent);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.5, Color32::WHITE);
+    // `Visuals::strong_text_color()` reads `widgets.active.fg_stroke.color`,
+    // so keep `widgets.active.fg_stroke` set to `p.text_primary` for legibility
+    // in both Light and Dark modes.
+    visuals.widgets.active.bg_fill = p.accent_soft;
+    visuals.widgets.active.weak_bg_fill = p.accent_soft;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.2, p.accent);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.5, p.text_primary);
     visuals.widgets.active.corner_radius = r;
 
     visuals.widgets.open.bg_fill = p.bg_surface;
