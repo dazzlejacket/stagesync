@@ -19,7 +19,7 @@ is a plan.
 |---|---|---|
 | `stagesync-core` | **complete** | Ingest, features, matching, robust model, calibration, **waveform-domain drift measurement**, segmentation, rendering, holdout verification, exports, **a real multi-track mixer**. |
 | `stagesync-cli` | **complete** | `analyze`, `export`, `verify`, `info`, `level`. |
-| `stagesync-desktop` | **complete** | Native egui/eframe app, **Windows, macOS and Linux from one codebase**: drag-and-drop import, background analysis with real cancellation, **real waveforms** (reference on top, targets below, placed by the alignment), a zoomable and pannable timeline with gaps and uncertain spans shown, **working playback** of the reference and of the corrected target with an A/B switch at the same position and a loop, **a mixer panel with per-track faders, pans, mutes, solos and meters, six monitoring modes, and a preview that plays the mix for real**, manual nudges in milliseconds with undo and a re-check, persisted settings, export. See `DESKTOP_APP_REPORT.md` and §12. |
+| `stagesync-desktop` | **complete (M22)** | Native egui/eframe app, **Windows, macOS and Linux from one codebase**: compact studio header & transport, Light/Dark/System themes, drag-and-drop import (audio & `.stagesync`), **`.stagesync` project save/load with relative paths, SHA-256 staleness checks, Missing/`Relocate…`, recent projects, dirty prompt & crash recovery**, background analysis with real cancellation, **real stereo L/R waveforms & overview minimap**, smooth cursor-centered zoom/pan & keyboard shortcuts, **working A/B/Mix playback with live mixer parameter updates**, **tabbed Mixer / Inspector & Charts / Issues & Manual Anchor dock**, persisted settings & export. See `M22_IMPLEMENTATION.md` and `RELEASE_READINESS.md`. |
 | Exports | **complete** | Corrected WAV (three layouts), **a mixed WAV and synchronised stems**, `syncmap.csv`, `segments.csv`, `report.json`, `drift_graph.svg`, `timeline.txt`, `plan.json`. |
 | End-to-end test suite | **complete** | Hermetic, deterministic, generated in Rust. See §4. |
 | Independent Python verifier | **complete** | `tools/verify_exports.py` — a separate numpy/scipy implementation that never shares code with the Rust core. Its gates were audited against a relaxed variant and the stricter ones were kept; see §2. `tools/verify_mix.py` and `tools/verify_mix_sum.py` do the same for the mixed files; see §12.3. |
@@ -1031,3 +1031,14 @@ statement the mixer can make.
    2.69 hours long and the mix was not run against them.
 5. **RF64 has not been exercised above four gibibytes.** The header is written by hand
    and read back by an independent parser, but a file that big has not been written.
+
+---
+
+## 13. M22 Update (Project Persistence, Studio UI, Themes, Bug Fixes & Packaging)
+
+See [`M22_IMPLEMENTATION.md`](M22_IMPLEMENTATION.md) for the complete M22 engineering log. Verified highlights:
+
+- **Workspace suite (`cargo test --workspace --locked`)**: **264 passed, 0 failed, 0 ignored** (`180` in `stagesync-core`, `84` in `stagesync-desktop`).
+- **Real `.stagesync` projects**: `project.rs` + `tests/project_workflow.rs` verify atomic saves, relative + fallback media paths, SHA-256 + `byte_len` staleness guards, Missing/`Relocate…`, recent project menu, unsaved-changes confirmation modal, crash recovery snapshot (`recovery.stagesync`), CLI open, and project re-export.
+- **UI & Light/Dark/System themes**: Crisp `wgpu` screenshots captured and inspected in `docs/screenshots/stagesync_dark_mixer.png`, `docs/screenshots/stagesync_light_mixer.png`, and `docs/screenshots/stagesync_dark_inspector.png`.
+- **Windows packaging**: `packaging/notices/licenses.json` updated for all `513` locked crates; `packaging/windows/check_nsi.py` passed; `packaging/windows/build.ps1` built `stagesync-desktop.exe` and `stagesync-0.1.0-windows-x64-portable.zip` with `SHA256SUMS.txt` (NSIS `makensis` not installed; macOS Intel/Apple Silicon and Linux packages remain **untested** on this Windows host).

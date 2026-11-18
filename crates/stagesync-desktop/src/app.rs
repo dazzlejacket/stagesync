@@ -2927,19 +2927,21 @@ impl StageSyncApp {
 
                 ui.checkbox(&mut active, "Use this anchor for this recording");
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Source time");
+                    let src_lbl = ui.label("Source time");
                     ui.add(
                         egui::DragValue::new(&mut source_time)
                             .speed(0.05)
                             .range(0.0..=1_000_000.0),
-                    );
+                    )
+                    .labelled_by(src_lbl.id);
                     ui.label("s");
-                    ui.label("Reference time");
+                    let ref_lbl = ui.label("Reference time");
                     ui.add(
                         egui::DragValue::new(&mut reference_time)
                             .speed(0.05)
                             .range(0.0..=1_000_000.0),
-                    );
+                    )
+                    .labelled_by(ref_lbl.id);
                     ui.label("s");
                 });
 

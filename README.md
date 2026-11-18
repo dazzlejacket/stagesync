@@ -77,11 +77,12 @@ cargo build --release
 On Linux the desktop crate needs the usual X11/Wayland development packages; see
 [`BUILDING.md`](BUILDING.md) for the exact list and for the packaging steps.
 
-The test suite is **133 tests**, all passing: 13 core unit tests, 12 alignment
-scenarios, 6 drift-verdict scenarios, 18 DSP tests, 21 render tests, 12 robustness
-tests, and 51 desktop tests. It is **hermetic**: it generates its own fixtures, uses a
-temporary directory, and depends on nothing outside the test - no Python, no network,
-no checked-in media.
+The test suite is **264 tests**, all passing: 180 `stagesync-core` tests (unit, alignment,
+drift verdicts, DSP, rendering, mixer, robustness, short-clip, and RF64 tests) and 84
+`stagesync-desktop` tests (state, player, `.stagesync` project persistence/recovery,
+workflow, mixer workflow, platform/settings, and GUI/theme tests). It is **hermetic**:
+it generates its own fixtures, uses a temporary directory, and depends on nothing outside
+the test — no Python, no network, no checked-in media. See [`M22_IMPLEMENTATION.md`](M22_IMPLEMENTATION.md).
 
 **What is verified, and what is not.** The Windows x64 build and the whole test suite
 were run on a Windows 11 x64 development machine, and the desktop window was launched

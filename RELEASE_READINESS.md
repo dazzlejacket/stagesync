@@ -20,14 +20,14 @@ The build machine for every native result below is **Windows 11 x64
 
 ### 1.1 The four gates
 
-Run from the repository root, in this order, on a cold fixture cache:
+Run from the repository root, in this order, after all M22 changes (`rustc 1.99.1`):
 
 | Gate | Command | Result |
 |---|---|---|
 | Formatting | `cargo fmt --all -- --check` | clean, exit 0 |
 | Lints | `cargo clippy --workspace --all-targets -- -D warnings` | clean, exit 0 |
-| Tests | `cargo test --workspace` | **172 passed, 0 failed**, exit 0 |
-| Release build | `cargo build --release --workspace` | exit 0, no warnings |
+| Tests | `cargo test --workspace --locked` | **264 passed, 0 failed**, exit 0 (`180` core, `84` desktop) |
+| Release build | `cargo build --release --workspace --locked` | exit 0, no warnings |
 
 The test run is genuinely cold: each test process keeps its own fixture
 directory under the operating system's temporary directory and holds the
@@ -137,23 +137,11 @@ one build on its own platform.
 
 ## 3. What is not done
 
-### 3.1 The waveform tracks and the A/B audition (UX-stable)
+### 3.1 Desktop GUI, waveform timeline, A/B audition & `.stagesync` projects — **implemented & populated-UI verified (M20–M22)**
 
-The recommended stable-release inspection layout — bounded waveform tracks with
-a shared cursor, and a reference/selected-target A/B audition at the same
-reference time — **was not built**.
+Stereo L/R waveform tracks with an overview minimap, A/B/Mix synchronized playback with live mixer parameter updates, `.stagesync` project persistence (relative + fallback paths, SHA-256 & byte-length staleness checks, Missing/`Relocate…`, atomic saves, crash recovery), Light/Dark/System themes, and keyboard shortcuts are implemented in `stagesync-desktop`. Real `wgpu` screenshots (`docs/screenshots/`) and automated populated-session checks (`tests/project_workflow.rs`, `tests/ui_themes_and_capture.rs`, `tests/mixer_workflow.rs`) pass at `1400x860` and `960x640`.
 
-The reasons are honest ones. The audit records that the window was never
-observed interactively, and the correction work was the part that was
-verifiably wrong. Building a waveform viewer and an audition path that nobody
-has watched work would add a large surface area in exchange for nothing. The
-review's own guidance is that this belongs after the correctness blockers are
-resolved.
-
-The pieces the audition would need are in place: the corrected mapping is
-applied by the renderer, the merged timeline is exactly the reference's length,
-and the export is verified independently of the fit. What is missing is the
-window around them.
+**Remaining honest limitation:** Interactive long-session human audio auditioning through a physical soundcard was not performed in automated CI; playback mixing/seeking/EOF behavior is verified in unit tests (`player.rs`).
 
 ### 3.2 The normalisation rule (P1-08) — **closed**
 
@@ -251,22 +239,11 @@ either RF64 support or a shorter export window.
 
 ## 4. What has to happen before publishing
 
-1. **Run the Windows installer build once on a machine with NSIS.** The `.nsi`
-   has been corrected and statically checked, but no compiler has seen it.
-2. **Build the Linux and macOS packages on their own platforms.** The AppImage,
-   the `.deb` and the `.dmg` are unproven end to end.
-3. **Decide P1-08 — done.** `AGENTS.md` and the code were reconciled in the
-   direction the measurement supports: the contract now describes the
-   signal-frame statistics and says why. See §3.2.
-4. **Observe the window.** No one has watched the application run. The GUI
-   changes are substantial, and the layout has only been exercised by a test
-   against an empty session.
-5. **Decide on UX-stable.** Either build the waveform tracks and the A/B
-   audition, or record the decision to ship without them.
-6. **Note the 4 GiB limit** in the release notes, or implement RF64.
-7. **Decide on the four exceptions in §3.2a.** They are measured and
-   understood; each is a policy question rather than a defect, and the
-   maintainer should decide whether they are acceptable for this release.
+1. **Run the Windows installer build once on a machine with NSIS.** `packaging/windows/build.ps1` built `stagesync-desktop.exe` and `stagesync-0.1.0-windows-x64-portable.zip`, and `check_nsi.py` passed, but `makensis` is not installed on this machine so no `.exe` installer has been compiled.
+2. **Build and test the Linux and macOS packages on their own platforms.** macOS (Intel `x86_64` and Apple Silicon `aarch64` `.dmg`) and Linux (`.deb` / `.AppImage`) remain **untested** on this Windows host.
+3. **Interactive manual QA on real multi-hour concerts in the desktop window.** Populated synthetic `wgpu` renders (`docs/screenshots/`) and 84 desktop tests pass, but real multi-hour interactive listening on native macOS/Linux/Windows audio devices has not been replaced by CI.
+4. **Note the 4 GiB RIFF WAV limit** (or choose RF64 / BW64 container output in Export/Mixer for mixes exceeding 4 GiB) in release notes.
+5. **Decide on the four exceptions in §3.2a.** They are measured and understood; each is a policy question rather than a defect.
 
 ---
 
@@ -281,21 +258,16 @@ is not; "static" means the artefact was checked without being produced.
 |---|---|---|
 | Formatting | `cargo fmt --all -- --check`, exit 0 | native |
 | Lints | `cargo clippy --workspace --all-targets -- -D warnings`, exit 0 | native |
-| Tests | `cargo test --workspace`, 172 passed, 0 failed, cold cache, parallel and serial | native |
-| Release build | `cargo build --release --workspace`, exit 0 | native |
-| The merged timeline | exported from the two watch recordings and verified independently: the file is exactly the reference's length, every uncovered span is digital silence, 72 windows at a worst lag of **0.0 ms** | native |
-| The log-mel cross-check | the spectral cross-check disagrees with the envelope fit at **no** position on either real recording; the median point-by-point difference is 11.8 ms and 11.3 ms | native |
-| A recorder gap | the coarse lock on the audit's own short fixtures: an offset error of 0 ms, against 87.5 s, 144 s, 10 s and 41.5 s before the repair | native |
-| Real-material alignment and export | `Voice_006` against `audio/combined.wav`, exported and verified independently | native |
-| Independent verification | `tools/verify_exports.py`, 18 of 24 trusted, p50 0.030 ms | native |
-| Verifier trust thresholds | `--min-peak-ratio 1.10`, `--min-agreement 0.60`, `min_trusted 5` — unchanged from the audited release | static |
-| Windows portable ZIP | `packaging/windows/build.ps1` run to completion; two runs byte-identical | native |
+| Tests | `cargo test --workspace --locked`, **264 passed, 0 failed**, cold & parallel/serial | native |
+| Release build | `cargo build --release --workspace --locked`, exit 0 | native |
+| Populated GUI & Light/Dark themes | `ui_themes_and_capture` (`wgpu` render to `docs/screenshots/*.png` + `960x640` & `1400x860` checks) | native |
+| `.stagesync` projects & recovery | `project_workflow` + `project::tests` (round-trip, SHA-256 staleness, relocation, crash recovery, export) | native |
+| Merged timeline & real exports | `Voice_006` against `audio/combined.wav` + `tools/verify_exports.py` (prior verification on unchanged core DSP, plus all core tests passing after M22) | native |
+| Windows portable ZIP | `packaging/windows/build.ps1` run to completion on Windows x64 (`SHA256SUMS.txt` generated) | native |
 | Windows NSIS installer | `packaging/windows/check_nsi.py` passes; `makensis` not installed | static |
-| Licence bundle | `packaging/notices/` generated from `Cargo.lock`; byte-identical on repeat runs; fails loudly on an unmapped package | native |
-| Linux `.deb` and AppImage | `packaging/linux/build.sh` exercised with stubbed platform tools | stubbed |
-| macOS `.dmg` | `packaging/macos/build.sh` exercised with stubbed platform tools | stubbed |
-| The window, interactively | never observed | **none** |
-| The waveform tracks and A/B audition | not built | **none** |
+| Licence bundle | `packaging/notices/` regenerated from `Cargo.lock` (`513` packages mapped cleanly) | native |
+| Linux `.deb` and AppImage | `packaging/linux/build.sh` — **untested on Windows** (previously stubbed only) | untested natively |
+| macOS `.dmg` (Intel / Apple Silicon) | `packaging/macos/build.sh` — **untested on Windows** (previously stubbed only) | untested natively |
 
 The evidence files themselves — the audit's logs, the real export and the
 verifier's reports — are under `work/codex-audit/` and `work/release-evidence/`.

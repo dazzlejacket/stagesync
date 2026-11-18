@@ -10,8 +10,8 @@ The inputs this file was generated from:
 
 | Input | SHA-256 |
 |---|---|
-| `Cargo.lock` | `8aaa974e06219c786297f77863f8abed8c29af15e9b11ef252cd7af143d8ff36` |
-| `packaging/notices/licenses.json` | `d68a05fb1712834e79fa5e79ed0152795acf07202703ff6a6ee6d73e4690ac12` |
+| `Cargo.lock` | `d34a15a8df06f010b82c5ef450a49b0a9fe4fa9452d7a10aa6e7eb6ae83beabd` |
+| `packaging/notices/licenses.json` | `2449e24b76d23af129d8295845780ed8e50111162462c80c1f2fa86de7808710` |
 
 ## What this file is
 
@@ -29,7 +29,7 @@ The project licence texts are copies of the ones in the source tree; the MPL-2.0
 
 ## The dependency graph
 
-`Cargo.lock` pins 495 packages. 3 of them are the StageSync crates themselves; the other 492 are third-party dependencies from crates.io.
+`Cargo.lock` pins 513 packages. 3 of them are the StageSync crates themselves; the other 510 are third-party dependencies from crates.io.
 
 The table lists every package in `Cargo.lock`. `Cargo.lock` does not record which of them a given build links, so this list is a superset of the graph of any single binary.
 
@@ -49,6 +49,8 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `ahash` | `0.8.12` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/tkaitchuck/ahash> |
 | `aho-corasick` | `1.1.5` | `Unlicense OR MIT` | Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/aho-corasick> |
 | `allocator-api2` | `0.2.21` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/zakarumych/allocator-api2> |
+| `alsa` | `0.11.0` | `Apache-2.0/MIT` | SPDX identifier only; upstream repository: <https://github.com/diwic/alsa-rs> |
+| `alsa-sys` | `0.4.0` | `MIT` | SPDX identifier only; upstream repository: <https://github.com/diwic/alsa-sys> |
 | `android-activity` | `0.6.1` | `MIT OR Apache-2.0` | Published crate package: `LICENSE`, `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-mobile/android-activity> |
 | `android-properties` | `0.2.2` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/miklelappo/android-properties> |
 | `android_system_properties` | `0.1.6` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/nical/android_system_properties> |
@@ -113,6 +115,8 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `core-foundation-sys` | `0.8.7` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs> |
 | `core-graphics` | `0.23.2` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs> |
 | `core-graphics-types` | `0.1.3` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/servo/core-foundation-rs> |
+| `coreaudio-rs` | `0.14.2` | `MIT/Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/RustAudio/coreaudio-rs.git> |
+| `cpal` | `0.18.2` | `Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/RustAudio/cpal> |
 | `cpufeatures` | `0.2.17` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/utils> |
 | `crc32fast` | `1.5.3` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/srijs/rust-crc32fast> |
 | `crossbeam-deque` | `0.8.8` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/crossbeam-rs/crossbeam> |
@@ -121,6 +125,7 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `crunchy` | `0.2.4` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/eira-fransham/crunchy> |
 | `crypto-common` | `0.1.7` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/traits> |
 | `cursor-icon` | `1.2.0` | `MIT OR Apache-2.0 OR Zlib` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/rust-windowing/cursor-icon> |
+| `dasp_sample` | `0.11.0` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/rustaudio/sample.git> |
 | `defmt` | `1.2.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/knurling-rs/defmt> |
 | `defmt-macros` | `1.2.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/knurling-rs/defmt> |
 | `defmt-parser` | `1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/knurling-rs/defmt> |
@@ -138,6 +143,7 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `egui-wgpu` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui-wgpu> |
 | `egui-winit` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui-winit> |
 | `egui_glow` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui_glow> |
+| `egui_kittest` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/emilk/egui> |
 | `egui_system_font_provider` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui_system_font_provider> |
 | `either` | `1.19.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rayon-rs/either> |
 | `emath` | `0.37.0` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/emath> |
@@ -225,6 +231,7 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `js-sys` | `0.3.106` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys> |
 | `khronos-egl` | `6.0.0` | `MIT/Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/timothee-haudebourg/khronos-egl> |
 | `khronos_api` | `3.1.0` | `Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/brendanzab/gl-rs/> |
+| `kittest` | `0.5.0` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/rerun-io/kittest> |
 | `kurbo` | `0.13.1` | `Apache-2.0 OR MIT` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/linebender/kurbo> |
 | `lazy_static` | `1.5.1` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang-nursery/lazy-static.rs> |
 | `libc` | `0.2.191` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/libc> |
@@ -238,6 +245,7 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `litrs` | `1.0.1` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/LukasKalbertodt/litrs> |
 | `lock_api` | `0.4.14` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/Amanieu/parking_lot> |
 | `log` | `0.4.34` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/log> |
+| `mach2` | `0.6.0` | `BSD-2-Clause OR MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/JohnTitor/mach2> |
 | `memchr` | `2.8.3` | `Unlicense OR MIT` | Published crate package: `COPYING`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/BurntSushi/memchr> |
 | `memmap2` | `0.9.12` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RazrFalcon/memmap2-rs> |
 | `memoffset` | `0.9.1` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/Gilnaa/memoffset> |
@@ -251,8 +259,11 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `ndk-sys` | `0.6.0+11769913` | `MIT OR Apache-2.0` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/rust-mobile/ndk> |
 | `nohash-hasher` | `0.2.0` | `Apache-2.0 OR MIT` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/paritytech/nohash-hasher> |
 | `nom` | `8.0.0` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/rust-bakery/nom> |
+| `num-bigint` | `0.4.8` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/rust-num/num-bigint> |
 | `num-complex` | `0.4.6` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-complex> |
+| `num-derive` | `0.4.2` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/rust-num/num-derive> |
 | `num-integer` | `0.1.47` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-integer> |
+| `num-rational` | `0.4.2` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/rust-num/num-rational> |
 | `num-traits` | `0.2.19` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-traits> |
 | `num_enum` | `0.7.6` | `BSD-3-Clause OR MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-BSD`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/illicitonion/num_enum> |
 | `num_enum_derive` | `0.7.6` | `BSD-3-Clause OR MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-BSD`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/illicitonion/num_enum> |
@@ -261,8 +272,12 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `objc2` | `0.6.5` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-app-kit` | `0.2.2` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-app-kit` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
+| `objc2-audio-toolbox` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; upstream repository: <https://github.com/madsmtm/objc2> |
+| `objc2-avf-audio` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-cloud-kit` | `0.2.2` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-contacts` | `0.2.2` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
+| `objc2-core-audio` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; upstream repository: <https://github.com/madsmtm/objc2> |
+| `objc2-core-audio-types` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-core-data` | `0.2.2` | `MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-core-foundation` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
 | `objc2-core-graphics` | `0.3.2` | `Zlib OR Apache-2.0 OR MIT` | SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2> |
@@ -342,6 +357,7 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `regex-syntax` | `0.8.11` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/regex> |
 | `renderdoc-sys` | `1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/ebkalderon/renderdoc-rs> |
 | `rfd` | `0.17.2` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/PolyMeilex/rfd> |
+| `rodio` | `0.23.0` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/RustAudio/rodio> |
 | `roxmltree` | `0.21.2` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RazrFalcon/roxmltree> |
 | `rustc-hash` | `1.1.0` | `Apache-2.0/MIT` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang-nursery/rustc-hash> |
 | `rustc-hash` | `2.1.3` | `Apache-2.0 OR MIT` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/rustc-hash> |
@@ -362,6 +378,7 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `serde_derive` | `1.0.229` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/serde-rs/serde> |
 | `serde_json` | `1.0.154` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/serde-rs/json> |
 | `serde_repr` | `0.1.21` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/serde-repr> |
+| `serde_spanned` | `1.1.3` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/toml-rs/toml> |
 | `sha2` | `0.10.9` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/RustCrypto/hashes> |
 | `shlex` | `2.0.1` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/comex/rust-shlex> |
 | `signal-hook-registry` | `1.4.8` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/vorner/signal-hook> |
@@ -414,7 +431,8 @@ The table lists every package in `Cargo.lock`. `Cargo.lock` does not record whic
 | `tiny-skia-path` | `0.11.4` | `BSD-3-Clause` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/RazrFalcon/tiny-skia/tree/master/path> |
 | `tinystr` | `0.8.5` | `Unicode-3.0` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/unicode-org/icu4x> |
 | `tokio` | `1.54.1` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/tokio> |
-| `toml_datetime` | `1.1.2+spec-1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml> |
+| `toml` | `1.2.1+spec-1.1.0` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/toml-rs/toml> |
+| `toml_datetime` | `1.1.3+spec-1.1.0` | `MIT OR Apache-2.0` | SPDX identifier only; upstream repository: <https://github.com/toml-rs/toml> |
 | `toml_edit` | `0.25.17+spec-1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml> |
 | `toml_parser` | `1.1.5+spec-1.1.0` | `MIT OR Apache-2.0` | Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml> |
 | `tracing` | `0.1.44` | `MIT` | Published crate package: `LICENSE` &mdash; upstream repository: <https://github.com/tokio-rs/tracing> |

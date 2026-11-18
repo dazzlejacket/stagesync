@@ -114,6 +114,20 @@
       "kind": "registry"
     },
     {
+      "name": "alsa",
+      "version": "0.11.0",
+      "license": "Apache-2.0/MIT",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/diwic/alsa-rs>",
+      "kind": "registry"
+    },
+    {
+      "name": "alsa-sys",
+      "version": "0.4.0",
+      "license": "MIT",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/diwic/alsa-sys>",
+      "kind": "registry"
+    },
+    {
       "name": "android-activity",
       "version": "0.6.1",
       "license": "MIT OR Apache-2.0",
@@ -562,6 +576,20 @@
       "kind": "registry"
     },
     {
+      "name": "coreaudio-rs",
+      "version": "0.14.2",
+      "license": "MIT/Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/RustAudio/coreaudio-rs.git>",
+      "kind": "registry"
+    },
+    {
+      "name": "cpal",
+      "version": "0.18.2",
+      "license": "Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/RustAudio/cpal>",
+      "kind": "registry"
+    },
+    {
       "name": "cpufeatures",
       "version": "0.2.17",
       "license": "MIT OR Apache-2.0",
@@ -615,6 +643,13 @@
       "version": "1.2.0",
       "license": "MIT OR Apache-2.0 OR Zlib",
       "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-ZLIB` &mdash; upstream repository: <https://github.com/rust-windowing/cursor-icon>",
+      "kind": "registry"
+    },
+    {
+      "name": "dasp_sample",
+      "version": "0.11.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/rustaudio/sample.git>",
       "kind": "registry"
     },
     {
@@ -734,6 +769,13 @@
       "version": "0.37.0",
       "license": "MIT OR Apache-2.0",
       "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/emilk/egui/tree/main/crates/egui_glow>",
+      "kind": "registry"
+    },
+    {
+      "name": "egui_kittest",
+      "version": "0.37.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/emilk/egui>",
       "kind": "registry"
     },
     {
@@ -1346,6 +1388,13 @@
       "kind": "registry"
     },
     {
+      "name": "kittest",
+      "version": "0.5.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/rerun-io/kittest>",
+      "kind": "registry"
+    },
+    {
       "name": "kurbo",
       "version": "0.13.1",
       "license": "Apache-2.0 OR MIT",
@@ -1434,6 +1483,13 @@
       "version": "0.4.34",
       "license": "MIT OR Apache-2.0",
       "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-lang/log>",
+      "kind": "registry"
+    },
+    {
+      "name": "mach2",
+      "version": "0.6.0",
+      "license": "BSD-2-Clause OR MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/JohnTitor/mach2>",
       "kind": "registry"
     },
     {
@@ -1528,6 +1584,13 @@
       "kind": "registry"
     },
     {
+      "name": "num-bigint",
+      "version": "0.4.8",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/rust-num/num-bigint>",
+      "kind": "registry"
+    },
+    {
       "name": "num-complex",
       "version": "0.4.6",
       "license": "MIT OR Apache-2.0",
@@ -1535,10 +1598,24 @@
       "kind": "registry"
     },
     {
+      "name": "num-derive",
+      "version": "0.4.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/rust-num/num-derive>",
+      "kind": "registry"
+    },
+    {
       "name": "num-integer",
       "version": "0.1.47",
       "license": "MIT OR Apache-2.0",
       "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/rust-num/num-integer>",
+      "kind": "registry"
+    },
+    {
+      "name": "num-rational",
+      "version": "0.4.2",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/rust-num/num-rational>",
       "kind": "registry"
     },
     {
@@ -1598,6 +1675,20 @@
       "kind": "registry"
     },
     {
+      "name": "objc2-audio-toolbox",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-avf-audio",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
       "name": "objc2-cloud-kit",
       "version": "0.2.2",
       "license": "MIT",
@@ -1609,6 +1700,20 @@
       "version": "0.2.2",
       "license": "MIT",
       "license_text": "SPDX identifier only; licence text is in the upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-core-audio",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/madsmtm/objc2>",
+      "kind": "registry"
+    },
+    {
+      "name": "objc2-core-audio-types",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/madsmtm/objc2>",
       "kind": "registry"
     },
     {
@@ -2165,6 +2270,13 @@
       "kind": "registry"
     },
     {
+      "name": "rodio",
+      "version": "0.23.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/RustAudio/rodio>",
+      "kind": "registry"
+    },
+    {
       "name": "roxmltree",
       "version": "0.21.2",
       "license": "MIT OR Apache-2.0",
@@ -2302,6 +2414,13 @@
       "version": "0.1.21",
       "license": "MIT OR Apache-2.0",
       "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/dtolnay/serde-repr>",
+      "kind": "registry"
+    },
+    {
+      "name": "serde_spanned",
+      "version": "1.1.3",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/toml-rs/toml>",
       "kind": "registry"
     },
     {
@@ -2669,10 +2788,24 @@
       "kind": "registry"
     },
     {
+      "name": "toml",
+      "version": "1.2.1+spec-1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/toml-rs/toml>",
+      "kind": "registry"
+    },
+    {
       "name": "toml_datetime",
       "version": "1.1.2+spec-1.1.0",
       "license": "MIT OR Apache-2.0",
       "license_text": "Published crate package: `LICENSE-APACHE`, `LICENSE-MIT` &mdash; upstream repository: <https://github.com/toml-rs/toml>",
+      "kind": "registry"
+    },
+    {
+      "name": "toml_datetime",
+      "version": "1.1.3+spec-1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_text": "SPDX identifier only; upstream repository: <https://github.com/toml-rs/toml>",
       "kind": "registry"
     },
     {
