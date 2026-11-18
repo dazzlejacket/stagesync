@@ -75,11 +75,50 @@ commit of the initial working version.
 
 ### Added
 
+- **A real multi-track mixer (M21).** Several recordings are now played and written at
+  once, each placed on the reference timeline with the drift correction the analysis
+  measured. There is a fader, a trim, a mute, a solo and a pan for every recording, a
+  master fader, peak meters, six monitoring modes, and a new `mixdown` export layout
+  with optional synchronised stems. The reference recording is never one of the tracks.
+  See `PROJECT_STATUS.md` §13.
+- **Pan laws that do not destroy a stereo image.** A mono recording is panned with the
+  equal-power law by default, or with a constant-gain law. A stereo recording is
+  *balanced* by default — exact unity in the centre, the channels never mixed — with a
+  stereo-aware mid/side law and an explicit mono-fold law available.
+- **Clipping protection that is opt-in and says what it did.** The mix is written in
+  floating point, so a peak above 0 dBFS is preserved in a 32-bit float file and
+  reported. A soft knee and a single automatic master gain are offered separately, and
+  the number of decibels of gain reduction is reported. Nothing is normalised unless it
+  is asked for.
+- **Optional loudness matching**, separate from the peak protection and off by default.
+  It matches the recordings by their root-mean-square level, which is **not** a
+  perceptual loudness measurement.
+- **RF64 and BW64 containers** for mixed files that do not fit in the four gibibytes a
+  RIFF file can hold, written by hand because a library that only knows 32-bit sizes
+  cannot write them. A file that is asked for in the ordinary RIFF form and does not
+  fit is refused rather than written with a wrapped size.
+- **An independent verifier for mixed files**, `tools/verify_mix.py`, which parses the
+  RIFF, RF64 and BW64 containers by hand and decodes the samples with numpy. It shares
+  no code with the Rust core, so a file it accepts has been read by a second
+  implementation. `tools/verify_mix_sum.py` checks a mix against the sum of its stems.
 - A regression test that lays the desktop window out head-lessly, at any window size, and
   checks that the centre keeps a usable share of it. It fails on the layout that shipped.
 - Regression tests for the export that would overwrite a recording, for the file with no
   sample rate, and for the very low sample rates.
 - `CHANGELOG.md`, `CONTRIBUTING.md` and `SECURITY.md`, and issue templates.
+
+### Fixed
+
+- **The mixer placed a recording at the start of the block it appeared in rather than at
+  the position its alignment gave it.** A recording that began part-way through the
+  reference timeline was heard — and written — up to one block too early, which was
+  0.63 seconds with the default block size. The cursor now hands over the frames for
+  the positions that were asked for, and the material lands exactly where the model says
+  it lands. The desktop preview had the same defect and is fixed the same way.
+- **The constant-gain pan law ignored the sign of the pan.** A recording panned hard
+  left was placed on the right, and one panned to the centre was placed hard right as
+  well. The law now puts the recording where the pan says it goes, and a test covers
+  both directions under both laws.
 
 ### Known limitations
 

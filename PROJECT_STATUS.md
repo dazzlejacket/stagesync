@@ -17,12 +17,12 @@ is a plan.
 
 | Component | State | Notes |
 |---|---|---|
-| `stagesync-core` | **complete** | Ingest, features, matching, robust model, calibration, **waveform-domain drift measurement**, segmentation, rendering, holdout verification, exports. |
+| `stagesync-core` | **complete** | Ingest, features, matching, robust model, calibration, **waveform-domain drift measurement**, segmentation, rendering, holdout verification, exports, **a real multi-track mixer**. |
 | `stagesync-cli` | **complete** | `analyze`, `export`, `verify`, `info`, `level`. |
-| `stagesync-desktop` | **complete** | Native egui/eframe app, **Windows, macOS and Linux from one codebase**: drag-and-drop import, background analysis with real cancellation, **real waveforms** (reference on top, targets below, placed by the alignment), a zoomable and pannable timeline with gaps and uncertain spans shown, **working playback** of the reference and of the corrected target with an A/B switch at the same position and a loop, manual nudges in milliseconds with undo and a re-check, persisted settings, export. See `DESKTOP_APP_REPORT.md`. |
-| Exports | **complete** | Corrected WAV (three layouts), `syncmap.csv`, `segments.csv`, `report.json`, `drift_graph.svg`, `timeline.txt`, `plan.json`. |
+| `stagesync-desktop` | **complete** | Native egui/eframe app, **Windows, macOS and Linux from one codebase**: drag-and-drop import, background analysis with real cancellation, **real waveforms** (reference on top, targets below, placed by the alignment), a zoomable and pannable timeline with gaps and uncertain spans shown, **working playback** of the reference and of the corrected target with an A/B switch at the same position and a loop, **a mixer panel with per-track faders, pans, mutes, solos and meters, six monitoring modes, and a preview that plays the mix for real**, manual nudges in milliseconds with undo and a re-check, persisted settings, export. See `DESKTOP_APP_REPORT.md` and §12. |
+| Exports | **complete** | Corrected WAV (three layouts), **a mixed WAV and synchronised stems**, `syncmap.csv`, `segments.csv`, `report.json`, `drift_graph.svg`, `timeline.txt`, `plan.json`. |
 | End-to-end test suite | **complete** | Hermetic, deterministic, generated in Rust. See §4. |
-| Independent Python verifier | **complete** | `tools/verify_exports.py` — a separate numpy/scipy implementation that never shares code with the Rust core. Its gates were audited against a relaxed variant and the stricter ones were kept; see §2. |
+| Independent Python verifier | **complete** | `tools/verify_exports.py` — a separate numpy/scipy implementation that never shares code with the Rust core. Its gates were audited against a relaxed variant and the stricter ones were kept; see §2. `tools/verify_mix.py` and `tools/verify_mix_sum.py` do the same for the mixed files; see §12.3. |
 | Cross-platform builds | **configured** | Native CI runners for Windows, macOS (x64 and arm64) and Linux, plus packaging scripts for a Windows installer, a macOS `.app`/`.dmg` and a Linux AppImage/`.deb`. The **Windows build and the whole test suite were run locally**; the macOS and Linux builds are **not verified** — see §7. |
 | Camera / video retiming | **not started** | Phase 2. |
 | NLE multicam export | **not started** | Phase 2. |
@@ -842,3 +842,177 @@ three recordings are byte-for-byte unchanged. The full account is in
 3. **A machine with no audio device** is handled and says so; it was not
    exercised on one.
 4. The items 3, 4 and 5 of §10.3 are still open.
+
+---
+
+## 12. M21: the real audio mixer
+
+StageSync now mixes. Several recordings are played **at the same time**, and can be
+written **at the same time**, each one placed on the reference timeline with the drift
+correction the analysis measured for it. The automatic synchronisation is unchanged:
+the mixer is a second consumer of the same models, not a second alignment engine.
+
+### 12.1 What was built
+
+| Where | What |
+|---|---|
+| `stagesync-core/src/mixer/` | The mixer: pan laws, the gain model, the clipping protection, the monitoring modes and the streaming renderer. |
+| `stagesync-core/src/audio/rf64.rs` | The RF64 and BW64 containers, written by hand, with a reader for all three container forms. |
+| `stagesync-core/src/render/mod.rs` | `Geometry`, `Processor` and `SourceCursor` made reusable by the mixer, so the preview and the export are the same arithmetic. |
+| `stagesync-cli` | `--layout mixdown`, `--layout mix-stems`, `--mix-track`, `--mix-config`, `--clip-protection`, `--clip-target-db`, `--match-loudness`, `--stems`, `--container`. |
+| `stagesync-desktop` | A mixer panel under the timeline, and a preview that plays the mix for real. |
+
+**Mixing.** Every recording becomes a track with a fader, a trim, a mute, a solo, a pan
+and a pan law. A master fader sits above them. The mix is written in floating point and
+is streamed block by block: a three-hour concert never enters memory.
+
+**Pan.** A mono recording is panned with the **equal-power** law by default (−3.01 dB
+per side in the centre) or with a constant-gain law, whose two gains add up to one at
+every position. A stereo recording is **balanced** by default: exact unity in the
+centre, and the two channels are never mixed, so the width is not destroyed by
+accident. A stereo-aware mid/side law (centre = exact identity, the side signal
+narrows as the pan moves) and an explicit mono-fold law are available. The mixer
+panel says which law is in force.
+
+**Stereo overlay.** Two stereo recordings are summed as stereo: each keeps its own left
+and right channels, the way they were recorded.
+
+**Clipping protection — opt-in, and it says what it did.**
+
+| Mode | What it does | What it reports |
+|---|---|---|
+| `none` (the default) | Nothing. A peak above 0 dBFS is written as it is into a float file. | The number of samples above 0 dBFS. |
+| `soft-clip` | A hyperbolic-tangent knee above the threshold. | The number of samples it changed. |
+| `auto-gain` | One master gain, chosen so the loudest sample lands on the target. | The number of decibels of gain reduction. |
+
+Nothing is normalised unless it is asked for: the automatic gain only ever turns the mix
+**down**, and a mix already below the target is left alone. The channels are never
+normalised independently of each other.
+
+**Loudness matching** is a separate, explicit opt-in, and it is **not** perceptual: it
+matches the recordings by their root-mean-square level, with no frequency weighting. It
+is off by default.
+
+**Monitoring modes.** Reference only, target only, A/B switching, both synchronised
+together, recorder A left / recorder B right, and several stereo recorders overlaid.
+
+**Export.** The existing layouts are untouched. Two were added: `mixdown` (one mixed
+file on the reference timeline) and `mix-stems` (one synchronised file per chosen
+recording, without the mix). The **reference is never one of the tracks**: it is the
+thing the others were aligned to.
+
+### 12.2 A real defect this work found
+
+The first end-to-end mix was **0.63 seconds early**. The cause was in the cursor the
+mixer and the merged renderer share: a cursor that begins later than the span it is
+asked for handed over the frames it had in hand, and the caller wrote them at the
+start of its own block. A recording that began part-way through the reference timeline
+was therefore placed at the start of the block it appeared in.
+
+Two things are worth stating plainly:
+
+* **The unit tests passed.** The existing test sampled two points — one before the
+  start and one after it — and the block size in that test was small enough that the
+  error fell between them. This is the failure mode `AGENTS.md` warns about: a test
+  that measures the boundary rather than the hole.
+* **The independent verifier found it.** `tools/verify_mix_sum.py` compares a mix with
+  the sum of its stems; the first run disagreed by −10.19 dB of the peak. The stems are
+  rendered by the timeline renderer, which had been correct all along, so the difference
+  was the mixer's.
+
+The fix is in `SourceCursor::take`: the frames handed over always belong to the
+positions the caller asked for, and the frames before a recording's own start are
+silence. Two regression tests were added, and **both were checked to fail without the
+fix**:
+
+* `a_recording_is_placed_exactly_where_its_model_says` — every frame before the
+  recording's start is silent, and the recording is at its own position at the frame
+  its model names, with a block size much larger than the start.
+* `the_mix_is_the_sum_of_the_recordings_on_the_reference_timeline` — the mix and the
+  timeline render of the same recording agree **sample for sample**, every frame.
+
+The desktop preview had the same defect — a recording that started later was heard from
+the playhead instead of from its own position — and is fixed the same way.
+
+### 12.2a A second defect: the constant-gain pan law ignored the sign
+
+The mixer's *predicted* output level — the figure the panel shows to warn about
+clipping — was computed with a two-channel pan matrix for every recording, whether it
+was mono or stereo. That is wrong for a mono recording, whose pan law is not the one a
+stereo recording is panned with.
+
+Correcting it exposed a real defect underneath: the constant-gain law took the
+**magnitude** of the pan and ignored its sign, so a recording panned hard **left** was
+placed on the **right**, and one panned to the centre was placed hard right as well.
+
+The law is now the linear one — the two gains add up to one at every position, so the
+recording's total amplitude does not change as it moves:
+
+| Pan | Left gain | Right gain |
+|---|---|---|
+| −1 (hard left) | 1.0 | 0.0 |
+| 0 (centre) | 0.5 | 0.5 |
+| +1 (hard right) | 0.0 | 1.0 |
+
+A test now covers both directions under both laws, and the predicted level uses the
+recording's own channel count.
+
+### 12.3 What was measured, independently
+
+The mixed files were decoded by `tools/verify_mix.py`, which parses the RIFF, RF64 and
+BW64 containers **by hand** and decodes the samples with numpy. It shares no code with
+the Rust core, so a file it accepts has been read by a second implementation.
+
+The fixtures: a 120 s mono reference at 48 kHz, and four recordings — one mono, one
+stereo, one with +1183 ppm of drift, and one with a gap — all at 44.1 kHz.
+
+| Export | Independently measured | Verdict |
+|---|---|---|
+| The mix of three recordings | 2 channels, 48 kHz, 32-bit float, 5 760 000 frames = 120.000 s, peak **−23.05 dBFS** | Matches the exporter's own figure exactly. |
+| The mix against the sum of its stems | rms difference **−161.57 dB** of the peak, worst difference −142.06 dB | **Bit-identical** to float32 precision. |
+| A recording panned hard left | left peak −27.09 dBFS, right peak **exactly 0** | The pan put the whole recording on one side. |
+| The same recording panned to the centre | −30.10 dBFS in both channels | Exactly **3.01 dB** below the hard pan — the equal-power law, measured. |
+| A mix 40 dB hot, protection `none` | peak **+1.94 dBFS**, 114 samples above 0 dBFS, written as they are | A float file keeps the recoverable peaks. |
+| The same mix, protection `soft-clip` | peak **0.999818**, 826 samples changed | The knee never exceeds full scale. |
+| The same mix, protection `auto-gain` | peak **0.891251 = −1.00 dBFS**, 2.94 dB of gain reduction | The target was hit exactly. |
+| The same mix as 16-bit | peak 1.000000, 114 samples reported as clipped | The 16-bit format's own limit, counted and reported. |
+| The mix in RF64 and in BW64 | RF64 signature, `ds64` chunk, `bext` chunk in the BW64 file only | Both containers read back by the independent parser. |
+
+The stems and the mix are two different renderers — the timeline renderer and the
+mixer's own streaming renderer — and they agree to the last bit. That is the strongest
+statement the mixer can make.
+
+### 12.4 The tests
+
+* `crates/stagesync-core/tests/mixer_tests.rs` — **27 tests**. Mono level, stereo
+  channel preservation, an antiphase stereo source that is not folded, two stereo
+  recordings overlaid, pan, the fader, mute, solo, a float peak above 0 dBFS kept, the
+  automatic gain reaching its target, the soft clipper, a 44.1 kHz source in a 48 kHz
+  mix, a late start, an early end, a 20 s mix in 1024-frame blocks with no click at the
+  block boundaries, the recordings unchanged by the run (hashes), an RF64 mix read back,
+  the container chosen by size, the six monitoring modes, loudness matching on and off,
+  an unaligned source contributing nothing, the constant-gain law, the direction of a
+  hard pan under both laws, a mono mixdown, a refused overwrite, and the two placement
+  tests of §12.2.
+* `crates/stagesync-desktop/tests/mixer_workflow.rs` — **6 tests**. A row per recording,
+  the mute button, the solo button, all six monitoring modes offered and applied, the
+  predicted level, and a `mixdown.wav` of the right length and channel count.
+* `crates/stagesync-desktop/src/player.rs` — the preview: two recordings played at once
+  and mixed, a panned recording on one side only, a recording that starts late silent
+  until its own start, and a recording that ends leaving silence and no click.
+
+### 12.5 What the mixer does not do
+
+1. **No plug-ins, no automation, no time-stretching beyond the drift correction.** This
+   is a mixer for synchronised recordings, not a DAW.
+2. **The loudness match is not LUFS.** It is RMS, with no frequency weighting. It is
+   labelled as such in the interface and in the report.
+3. **The preview is not bit-identical to the export** in general: the preview plays at
+   the device's rate, which is usually not the file's, and the device has its own
+   latency. The *placement*, the pan matrices and the gains are the core's own, so what
+   is heard is what is written.
+4. **The mixer has not been run on the real concert material.** It was exercised on
+   synthetic fixtures with known ground truth. The real recordings in `audio/` are
+   2.69 hours long and the mix was not run against them.
+5. **RF64 has not been exercised above four gibibytes.** The header is written by hand
+   and read back by an independent parser, but a file that big has not been written.
