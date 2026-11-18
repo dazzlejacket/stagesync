@@ -518,8 +518,24 @@ pub fn choose_container(
     }
 }
 
+/// Compute relative dB adjustments (`source_index -> gain_db`) so every source
+/// matches the loudest measured RMS level in `levels`.
+pub fn loudness_offsets_db(levels: &[(usize, f64)]) -> Vec<(usize, f64)> {
+    let loudest = levels
+        .iter()
+        .map(|(_, level)| *level)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !loudest.is_finite() {
+        return Vec::new();
+    }
+    levels
+        .iter()
+        .map(|&(idx, level)| (idx, loudest - level))
+        .collect()
+}
+
 /// Measure the level of every recording, and say how far each one has to be moved.
-fn loudness_gains(
+pub fn loudness_gains(
     report: &AlignmentReport,
     settings: &MixSettings,
     loudness: LoudnessMatch,
@@ -538,21 +554,17 @@ fn loudness_gains(
             .with_context(|| format!("failed to measure {}", alignment.source.file_name))?;
         levels.push((track.source_index, level));
     }
-    let loudest = levels
-        .iter()
-        .map(|(_, level)| *level)
-        .fold(f64::NEG_INFINITY, f64::max);
-    if !loudest.is_finite() {
+    let offsets = loudness_offsets_db(&levels);
+    if offsets.is_empty() {
         notes
             .push("the loudness match could not be applied: the recordings are silent".to_string());
         return Ok((gains, notes));
     }
     for (index, track) in settings.tracks.iter().enumerate() {
-        let Some((_, level)) = levels.iter().find(|(i, _)| *i == track.source_index) else {
+        let Some((_, gain_db)) = offsets.iter().find(|(i, _)| *i == track.source_index) else {
             continue;
         };
-        let gain_db = loudest - level;
-        gains[index] = gain_db;
+        gains[index] = *gain_db;
         if gain_db.abs() > 0.01 {
             notes.push(format!(
                 "the RMS loudness match moved recording {} by {gain_db:+.2} dB",
@@ -561,6 +573,41 @@ fn loudness_gains(
         }
     }
     Ok((gains, notes))
+}
+
+/// Measure the exact two-pass master trim factor required by [`ClippingProtection::AutoGain`]
+/// given `settings.master_gain` and `loudness_db`.
+pub fn measure_autogain_trim(
+    report: &AlignmentReport,
+    settings: &MixSettings,
+    options: &MixOptions,
+    loudness_db: &[f64],
+) -> Result<(f32, f32)> {
+    let output_rate = options
+        .sample_rate
+        .unwrap_or(report.reference.sample_rate)
+        .max(1);
+    let total_frames = (report.timeline_duration * output_rate as f64)
+        .round()
+        .max(0.0) as u64;
+    let output_channels = options.channels.clamp(1, 2);
+    let payload_bytes = total_frames
+        .saturating_mul(output_channels as u64)
+        .saturating_mul(options.format.bytes_per_sample());
+    let (container, _) = choose_container(options.container, payload_bytes)?;
+    let measured = mix_pass(
+        report,
+        settings,
+        options,
+        output_rate,
+        total_frames,
+        loudness_db,
+        settings.master_gain,
+        container,
+        None,
+    )?;
+    let trim = options.protection.master_gain(measured.peak);
+    Ok((trim, measured.peak))
 }
 
 /// Open the recordings of the mix and place them on the reference timeline.
@@ -859,9 +906,8 @@ pub fn render_mix(
     }
 
     // The automatic gain needs the peak of the mix before it can apply it, so the
-    // material is measured first. The measurement is the same arithmetic as the
-    // write, so the peak it works from is the peak of the file that is written.
-    let (master_gain, measured) = match options.protection {
+    // material is measured first with `settings.master_gain` in place.
+    let (master_gain, measured_peak) = match options.protection {
         ClippingProtection::AutoGain { .. } => {
             let measured = mix_pass(
                 report,
@@ -870,17 +916,17 @@ pub fn render_mix(
                 output_rate,
                 total_frames,
                 &loudness,
-                1.0,
+                settings.master_gain,
                 container,
                 None,
             )?;
-            let gain = options.protection.master_gain(measured.mix_peak);
-            let reduction_db = -options.protection.gain_reduction_db(measured.mix_peak);
+            let trim = options.protection.master_gain(measured.peak);
+            let reduction_db = -options.protection.gain_reduction_db(measured.peak);
             if reduction_db > 0.0 {
                 notes.push(format!(
                     "the peak of the mix was {:.2} dBFS; {:.2} dB of gain reduction was \
                      applied to bring it to the {:.2} dBFS target",
-                    linear_to_db(measured.mix_peak),
+                    linear_to_db(measured.peak),
                     reduction_db,
                     options.protection.target_dbfs()
                 ));
@@ -891,13 +937,13 @@ pub fn render_mix(
                 notes.push(format!(
                     "the peak of the mix was {:.2} dBFS, below the {:.2} dBFS target, so no \
                      gain reduction was needed",
-                    linear_to_db(measured.mix_peak),
+                    linear_to_db(measured.peak),
                     options.protection.target_dbfs()
                 ));
             }
-            (gain, Some(measured))
+            (settings.master_gain * trim, Some(measured.peak))
         }
-        _ => (1.0, None),
+        _ => (settings.master_gain, None),
     };
 
     let written = mix_pass(
@@ -912,9 +958,9 @@ pub fn render_mix(
         Some(out_path),
     )?;
 
-    let gain_reduction_db = match &measured {
-        Some(measured) => options.protection.gain_reduction_db(measured.mix_peak),
-        None => options.protection.gain_reduction_db(written.mix_peak),
+    let gain_reduction_db = match measured_peak {
+        Some(peak) => options.protection.gain_reduction_db(peak),
+        None => options.protection.gain_reduction_db(written.peak),
     };
     notes.extend(written.notes.clone());
 

@@ -157,6 +157,10 @@ pub struct StageSyncApp {
     /// The player: the reference, the corrected recording, and the switch between
     /// them.
     player: Player,
+    /// Per-path cached RMS dBFS levels for loudness-matched mix preview.
+    rms_cache: HashMap<PathBuf, f64>,
+    /// Cached two-pass AutoGain trim (`(mix_hash_key, trim)`).
+    autogain_cache: Option<(u64, f32)>,
     /// The waveform peaks of each recording, by path.
     ///
     /// The peaks are built on a thread of their own, because building them means
@@ -262,6 +266,8 @@ impl StageSyncApp {
             rx,
             voice: Voice::Reference,
             player: Player::new(),
+            rms_cache: HashMap::new(),
+            autogain_cache: None,
             peaks: HashMap::new(),
             peaks_pending: 0,
             view_start: 0.0,
@@ -442,6 +448,8 @@ impl StageSyncApp {
     fn invalidate_session(&mut self) {
         self.session_gen = self.session_gen.wrapping_add(1).max(1);
         self.latest_probe_jobs.clear();
+        self.rms_cache.clear();
+        self.autogain_cache = None;
         self.cancel_active_jobs();
     }
 
@@ -588,6 +596,7 @@ impl StageSyncApp {
                         self.view_end = report.timeline_duration.max(1.0);
                     }
                     self.report = Some(*report);
+                    self.autogain_cache = None;
                     self.mark_dirty();
                     self.last_error = None;
                     self.notice = Some("Analysis finished.".to_string());
@@ -780,6 +789,8 @@ impl StageSyncApp {
 
         if invalidated_ref {
             self.cancel_active_jobs();
+            self.rms_cache.remove(&path);
+            self.autogain_cache = None;
             self.report = None;
             self.export_outcome = None;
             self.anchors.fill(AnchorFields::default());
@@ -791,6 +802,8 @@ impl StageSyncApp {
             );
         } else if let Some(idx) = invalidated_target {
             self.cancel_active_jobs();
+            self.rms_cache.remove(&path);
+            self.autogain_cache = None;
             self.report = None;
             self.export_outcome = None;
             if let Some(anchor) = self.anchors.get_mut(idx) {
@@ -1301,6 +1314,8 @@ impl StageSyncApp {
         } else if let Some(report) = self.report.as_mut() {
             report.reference.path = new_path.clone();
         }
+        self.rms_cache.remove(&new_path);
+        self.autogain_cache = None;
         self.spawn_probe_and_peaks(new_path);
         self.mark_dirty();
         self.last_error = None;
@@ -1335,6 +1350,8 @@ impl StageSyncApp {
         {
             alignment.source.path = new_path.clone();
         }
+        self.rms_cache.remove(&new_path);
+        self.autogain_cache = None;
         self.spawn_probe_and_peaks(new_path);
         self.mark_dirty();
         self.last_error = None;
@@ -2057,8 +2074,18 @@ impl StageSyncApp {
         });
 
         if changed {
+            self.autogain_cache = None;
             self.mark_dirty();
             self.persist_settings();
+            if self.player.is_playing() && self.player.voice() == Some(crate::player::Voice::Mix) {
+                let (live_members, autogain_trim) = self.resolve_preview_mix(false);
+                self.player.update_live_mix(
+                    self.mixer.master_gain,
+                    self.settings.protection,
+                    autogain_trim,
+                    &live_members,
+                );
+            }
         }
         if start {
             self.start_analysis();
@@ -2537,8 +2564,18 @@ impl StageSyncApp {
             });
 
         if changed {
+            self.autogain_cache = None;
             self.mark_dirty();
             self.persist_settings();
+            if self.player.is_playing() && self.player.voice() == Some(crate::player::Voice::Mix) {
+                let (live_members, autogain_trim) = self.resolve_preview_mix(false);
+                self.player.update_live_mix(
+                    self.mixer.master_gain,
+                    self.settings.protection,
+                    autogain_trim,
+                    &live_members,
+                );
+            }
         }
     }
 
@@ -2779,12 +2816,17 @@ impl StageSyncApp {
         crate::mixer::panel(ui, &mut self.mixer, &infos);
         let after_mix = serde_json::to_string(&self.mixer.settings()).ok();
         if before_mix != after_mix {
+            self.autogain_cache = None;
             self.mark_dirty();
         }
         if self.player.is_playing() && self.player.voice() == Some(crate::player::Voice::Mix) {
-            let live_members = self.mix_members();
-            self.player
-                .update_live_mix(self.mixer.master_gain, &live_members);
+            let (live_members, autogain_trim) = self.resolve_preview_mix(false);
+            self.player.update_live_mix(
+                self.mixer.master_gain,
+                self.settings.protection,
+                autogain_trim,
+                &live_members,
+            );
         }
     }
 
@@ -3052,7 +3094,10 @@ impl StageSyncApp {
                         return;
                     }
                     let master = self.mixer.master_gain;
-                    self.player.play_mix(&members, master, position)
+                    let protection = self.settings.protection;
+                    let trim = self.preview_autogain_trim();
+                    self.player
+                        .play_mix(&members, master, protection, trim, position)
                 }
             }
         };
@@ -3068,11 +3113,155 @@ impl StageSyncApp {
         }
     }
 
-    /// The recordings the mixer plays, with their corrections.
+    /// Compute cached per-track RMS loudness adjustments matching [`stagesync_core::mixer::loudness_gains`].
+    fn loudness_gains_for_mixer(&mut self) -> Vec<f64> {
+        let mut gains = vec![0.0f64; self.mixer.tracks.len()];
+        if self.settings.loudness == stagesync_core::mixer::LoudnessMatch::None {
+            return gains;
+        }
+        let Some(report) = self.report.as_ref() else {
+            return gains;
+        };
+        let mut levels: Vec<(usize, f64)> = Vec::new();
+        for track in &self.mixer.tracks {
+            let Some(alignment) = report.sources.get(track.source_index) else {
+                continue;
+            };
+            let level = if let Some(&cached) = self.rms_cache.get(&alignment.source.path) {
+                cached
+            } else if let Ok(measured) =
+                stagesync_core::mixer::measure_rms_dbfs(&alignment.source.path)
+            {
+                self.rms_cache
+                    .insert(alignment.source.path.clone(), measured);
+                measured
+            } else {
+                continue;
+            };
+            levels.push((track.source_index, level));
+        }
+        let offsets = stagesync_core::mixer::loudness_offsets_db(&levels);
+        for (idx, track) in self.mixer.tracks.iter().enumerate() {
+            if let Some((_, db)) = offsets.iter().find(|(s, _)| *s == track.source_index) {
+                gains[idx] = *db;
+            }
+        }
+        gains
+    }
+
+    /// Fingerprint of active mixer, loudness, protection, and nudge parameters for caching AutoGain.
+    fn mix_cache_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.mixer.master_gain.to_bits().hash(&mut hasher);
+        self.mixer.mode.label().hash(&mut hasher);
+        std::mem::discriminant(&self.settings.loudness).hash(&mut hasher);
+        std::mem::discriminant(&self.settings.protection).hash(&mut hasher);
+        self.settings
+            .protection
+            .target_dbfs()
+            .to_bits()
+            .hash(&mut hasher);
+        self.settings.sample_rate.hash(&mut hasher);
+        for t in &self.mixer.tracks {
+            t.source_index.hash(&mut hasher);
+            t.enabled.hash(&mut hasher);
+            t.mute.hash(&mut hasher);
+            t.solo.hash(&mut hasher);
+            t.gain.to_bits().hash(&mut hasher);
+            t.trim.to_bits().hash(&mut hasher);
+            t.pan.to_bits().hash(&mut hasher);
+            std::mem::discriminant(&t.pan_law).hash(&mut hasher);
+            std::mem::discriminant(&t.stereo_pan).hash(&mut hasher);
+        }
+        for n in &self.nudges {
+            n.to_bits().hash(&mut hasher);
+        }
+        if let Some(report) = &self.report {
+            report.timeline_duration.to_bits().hash(&mut hasher);
+            for s in &report.sources {
+                s.source.sha256.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    /// Compute the two-pass `AutoGain` trim for preview using the exact exported mix arithmetic.
+    fn preview_autogain_trim(&mut self) -> f32 {
+        if !matches!(
+            self.settings.protection,
+            stagesync_core::mixer::ClippingProtection::AutoGain { .. }
+        ) {
+            return 1.0;
+        }
+        let key = self.mix_cache_key();
+        if let Some((cached_key, trim)) = self.autogain_cache {
+            if cached_key == key {
+                return trim;
+            }
+        }
+        let Some(base_report) = self.report.as_ref() else {
+            return 1.0;
+        };
+        let eff_report = self.effective_report_for_export(base_report);
+        let loudness_db = self.loudness_gains_for_mixer();
+        let mix_settings = self.mixer.settings();
+        let mix_opts = stagesync_core::mixer::MixOptions {
+            sample_rate: Some(
+                self.settings
+                    .sample_rate
+                    .unwrap_or_else(|| self.player.output_rate())
+                    .max(1),
+            ),
+            channels: 2,
+            format: self.settings.format,
+            protection: self.settings.protection,
+            loudness: self.settings.loudness,
+            container: self.settings.container,
+            block_frames: 65_536,
+            ..Default::default()
+        };
+        if let Ok((trim, _)) = stagesync_core::mixer::measure_autogain_trim(
+            &eff_report,
+            &mix_settings,
+            &mix_opts,
+            &loudness_db,
+        ) {
+            self.autogain_cache = Some((key, trim));
+            trim
+        } else {
+            1.0
+        }
+    }
+
+    /// Build mix members and optional auto-gain trim (`compute_autogain = false` during slider drags).
+    fn resolve_preview_mix(
+        &mut self,
+        compute_autogain: bool,
+    ) -> (Vec<crate::player::MixMember>, f32) {
+        let members = self.mix_members();
+        let trim = if compute_autogain {
+            self.preview_autogain_trim()
+        } else if matches!(
+            self.settings.protection,
+            stagesync_core::mixer::ClippingProtection::AutoGain { .. }
+        ) {
+            let key = self.mix_cache_key();
+            self.autogain_cache
+                .and_then(|(k, t)| (k == key).then_some(t))
+                .unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        (members, trim)
+    }
+
+    /// The recordings the mixer plays, with their corrections and RMS loudness matching.
     ///
     /// The reference is never among them: it is the thing the other recordings were
     /// aligned to, and mixing it in would double every one of them.
-    fn mix_members(&self) -> Vec<crate::player::MixMember> {
+    fn mix_members(&mut self) -> Vec<crate::player::MixMember> {
+        let loudness_db = self.loudness_gains_for_mixer();
         let Some(report) = self.report.as_ref() else {
             return Vec::new();
         };
@@ -3092,9 +3281,17 @@ impl StageSyncApp {
                 model.scale,
                 model.offset + self.nudges.get(track.source_index).copied().unwrap_or(0.0),
             );
+            let track_loudness_db = self
+                .mixer
+                .tracks
+                .iter()
+                .position(|t| t.source_index == track.source_index)
+                .and_then(|pos| loudness_db.get(pos).copied())
+                .unwrap_or(0.0);
             let mut member =
                 crate::player::MixMember::from_track(alignment.source.path.clone(), model, &track);
-            member.gain = track.effective_gain(solo_active);
+            member.gain = track.effective_gain(solo_active)
+                * stagesync_core::mixer::db_to_linear(track_loudness_db);
             members.push(member);
         }
         members
@@ -4978,5 +5175,151 @@ mod tests {
         );
         let _ = outcome;
         let _ = src_offset;
+    }
+
+    #[test]
+    fn p2_02_app_mix_preview_matches_exported_mixdown_across_loudness_pan_and_protection() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let _settings = SettingsGuard::new(&dir);
+        let rate = 8_000u32;
+
+        // Reference + 2 sources at different levels (one quiet 0.125, one loud 0.9) and different rates/pans.
+        let n = rate as usize;
+        let ref_samples = vec![0.0f32; n];
+        let s1: Vec<f32> = (0..n)
+            .map(|i| 0.9 * (2.0 * std::f32::consts::PI * 190.0 * i as f32 / rate as f32).sin())
+            .collect();
+        let s2: Vec<f32> = (0..n)
+            .map(|i| 0.125 * (2.0 * std::f32::consts::PI * 310.0 * i as f32 / rate as f32).sin())
+            .collect();
+        let ref_path = dir.path().join("ref.wav");
+        let p1 = dir.path().join("t1.wav");
+        let p2 = dir.path().join("t2.wav");
+        write_wav(&ref_path, &ref_samples, rate);
+        write_wav(&p1, &s1, rate);
+        write_wav(&p2, &s2, rate);
+
+        let meta_ref = stagesync_core::audio::AudioDecoder::open(&ref_path)
+            .unwrap()
+            .meta()
+            .clone();
+        let meta1 = stagesync_core::audio::AudioDecoder::open(&p1)
+            .unwrap()
+            .meta()
+            .clone();
+        let meta2 = stagesync_core::audio::AudioDecoder::open(&p2)
+            .unwrap()
+            .meta()
+            .clone();
+
+        let m = stagesync_core::matching::LinearModel::new(1.0, 0.0);
+        let make_align = |meta: SourceMeta| stagesync_core::matching::SourceAlignment {
+            source: meta,
+            map: stagesync_core::matching::TimeMap::from_linear(m, 1.0),
+            coarse: None,
+            fine_measured: 1,
+            fine_skipped: 0,
+            fine_skip_reasons: Default::default(),
+            direct_model: Some(m),
+            calibrated_model: Some(m),
+            drift: None,
+            points: vec![],
+            segments: vec![],
+            coverage: stagesync_core::matching::Coverage {
+                covered_seconds: 1.0,
+                low_confidence_seconds: 0.0,
+                uncovered_seconds: 0.0,
+                fraction: 1.0,
+            },
+            holdout: None,
+            override_state: None,
+            warnings: vec![],
+        };
+        let report = AlignmentReport {
+            reference: meta_ref,
+            sources: vec![make_align(meta1), make_align(meta2)],
+            timeline: vec![],
+            timeline_duration: 1.0,
+        };
+
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        app.open_files(vec![ref_path, p1, p2]);
+        app.report = Some(report.clone());
+        app.mixer.mode = stagesync_core::mixer::MonitorMode::Both;
+        app.mixer.master_gain = 1.25;
+        app.mixer.tracks[0].pan = -0.5;
+        app.mixer.tracks[1].pan = 0.6;
+        app.settings.sample_rate = Some(rate);
+        app.settings.format = stagesync_core::audio::WavFormat::Float32;
+        app.settings.loudness = stagesync_core::mixer::LoudnessMatch::MatchToLoudest;
+
+        for (tag, protection) in [
+            ("none_hot", stagesync_core::mixer::ClippingProtection::None),
+            (
+                "soft_clip",
+                stagesync_core::mixer::ClippingProtection::SoftClip { threshold: 0.9 },
+            ),
+            (
+                "auto_gain",
+                stagesync_core::mixer::ClippingProtection::AutoGain { target_dbfs: -1.0 },
+            ),
+        ] {
+            app.settings.protection = protection;
+            app.autogain_cache = None;
+            let (members, autogain_trim) = app.resolve_preview_mix(true);
+            let preview = crate::player::collect_preview_mix_frames(
+                &members,
+                app.mixer.master_gain,
+                app.settings.protection,
+                autogain_trim,
+                0.0,
+                rate,
+                n,
+            )
+            .expect("preview mix frames");
+
+            let out_wav = dir.path().join(format!("mix_{tag}.wav"));
+            let mix_settings = app.mixer.settings();
+            let mix_opts = stagesync_core::mixer::MixOptions {
+                sample_rate: Some(rate),
+                channels: 2,
+                format: stagesync_core::audio::WavFormat::Float32,
+                protection,
+                loudness: app.settings.loudness,
+                container: stagesync_core::mixer::ContainerChoice::Auto,
+                block_frames: 4096,
+                ..Default::default()
+            };
+            let res =
+                stagesync_core::mixer::render_mix(&report, &mix_settings, &mix_opts, &out_wav)
+                    .expect("render_mix");
+            let mut reader = stagesync_core::audio::WavReader::open(&out_wav).expect("open mix");
+            let exported = reader.read_frames(0, n).expect("read mix frames");
+
+            let mut max_diff = 0.0f32;
+            let mut max_peak = 0.0f32;
+            for i in 128..(n - 128) {
+                let dl = (preview[i][0] - exported[0][i]).abs();
+                let dr = (preview[i][1] - exported[1][i]).abs();
+                max_diff = max_diff.max(dl).max(dr);
+                max_peak = max_peak.max(preview[i][0].abs()).max(preview[i][1].abs());
+            }
+            assert!(
+                max_diff < 1e-4,
+                "[{tag}] preview vs export max sample divergence {max_diff} exceeded 1e-4"
+            );
+            if matches!(protection, stagesync_core::mixer::ClippingProtection::None) {
+                assert!(
+                    max_peak > 1.0 && res.peak > 1.0,
+                    "[{tag}] expected unclipped Float32 peak > 1.0, got preview={max_peak}, export={}",
+                    res.peak
+                );
+            } else {
+                assert!(
+                    max_peak <= 1.0 + 1e-4,
+                    "[{tag}] clipping protection exceeded 1.0: preview={max_peak}"
+                );
+            }
+        }
     }
 }

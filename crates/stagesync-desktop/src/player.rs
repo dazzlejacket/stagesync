@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use rodio::{DeviceSinkBuilder, Player as RodioPlayer, Source};
 use stagesync_core::audio::AudioDecoder;
 use stagesync_core::matching::LinearModel;
-use stagesync_core::mixer::{MixTrack, PanMatrix};
+use stagesync_core::mixer::{ClippingProtection, MixTrack, PanMatrix};
 use stagesync_core::resample::StreamingResampler;
 
 /// The resampling quality, the same filter the renderer uses.
@@ -117,6 +117,8 @@ pub struct LiveTrackUpdate {
 #[derive(Debug, Clone, Default)]
 struct LiveMixUpdate {
     master_gain: f32,
+    protection: ClippingProtection,
+    autogain_trim: f32,
     tracks: Vec<LiveTrackUpdate>,
 }
 
@@ -509,7 +511,13 @@ impl Player {
     }
 
     /// Push live master/track mix parameter updates without restarting the stream.
-    pub fn update_live_mix(&self, master_gain: f32, members: &[MixMember]) {
+    pub fn update_live_mix(
+        &self,
+        master_gain: f32,
+        protection: ClippingProtection,
+        autogain_trim: f32,
+        members: &[MixMember],
+    ) {
         let Some(playing) = &self.playing else {
             return;
         };
@@ -518,6 +526,8 @@ impl Player {
         };
         if let Ok(mut guard) = shared.1.lock() {
             guard.master_gain = master_gain;
+            guard.protection = protection;
+            guard.autogain_trim = autogain_trim;
             guard.tracks = members
                 .iter()
                 .map(|m| LiveTrackUpdate {
@@ -623,11 +633,13 @@ impl Player {
         Ok(())
     }
 
-    /// Play several recordings at once, mixed.
+    /// Play several recordings at once, mixed with the chosen clipping protection and trim.
     pub fn play_mix(
         &mut self,
         members: &[MixMember],
         master_gain: f32,
+        protection: ClippingProtection,
+        autogain_trim: f32,
         from_secs: f64,
     ) -> Result<(), anyhow::Error> {
         let rate = self.rate;
@@ -638,6 +650,8 @@ impl Player {
             AtomicU64::new(0),
             Mutex::new(LiveMixUpdate {
                 master_gain,
+                protection,
+                autogain_trim,
                 tracks: members
                     .iter()
                     .map(|m| LiveTrackUpdate {
@@ -649,9 +663,11 @@ impl Player {
                     .collect(),
             }),
         ));
-        let source = MixSource::open_with_live(
+        let source = MixSource::open_with_options(
             members,
             master_gain,
+            protection,
+            autogain_trim,
             from_secs,
             rate,
             published_peak,
@@ -1020,6 +1036,10 @@ struct MixSource {
     rate: u32,
     /// The master fader.
     master_gain: f32,
+    /// Export clipping protection applied identically in preview.
+    protection: ClippingProtection,
+    /// Two-pass automatic gain reduction trim (`1.0` unless AutoGain measured a trim).
+    autogain_trim: f32,
     /// The loudest sample the mix has produced.
     peak: f32,
     /// How many samples above 0 dBFS the mix has produced.
@@ -1042,9 +1062,11 @@ impl MixSource {
         out_rate: u32,
         published_peak: Arc<AtomicU32>,
     ) -> Result<Self, anyhow::Error> {
-        Self::open_with_live(
+        Self::open_with_options(
             members,
             master_gain,
+            ClippingProtection::None,
+            1.0,
             from_secs,
             out_rate,
             published_peak,
@@ -1052,10 +1074,34 @@ impl MixSource {
         )
     }
 
-    /// Open the mix with an optional shared live-parameter update handle.
+    #[allow(dead_code)]
     fn open_with_live(
         members: &[MixMember],
         master_gain: f32,
+        from_secs: f64,
+        out_rate: u32,
+        published_peak: Arc<AtomicU32>,
+        live_mix: Option<LiveMixShared>,
+    ) -> Result<Self, anyhow::Error> {
+        Self::open_with_options(
+            members,
+            master_gain,
+            ClippingProtection::None,
+            1.0,
+            from_secs,
+            out_rate,
+            published_peak,
+            live_mix,
+        )
+    }
+
+    /// Open the mix with full clipping protection, auto-gain trim, and optional live updates.
+    #[allow(clippy::too_many_arguments)]
+    fn open_with_options(
+        members: &[MixMember],
+        master_gain: f32,
+        protection: ClippingProtection,
+        autogain_trim: f32,
         from_secs: f64,
         out_rate: u32,
         published_peak: Arc<AtomicU32>,
@@ -1087,6 +1133,8 @@ impl MixSource {
             ready: VecDeque::new(),
             rate: out_rate,
             master_gain,
+            protection,
+            autogain_trim,
             peak: 0.0,
             overs: 0,
             published_peak,
@@ -1102,6 +1150,8 @@ impl MixSource {
             if ver != self.applied_version {
                 if let Ok(guard) = shared.1.try_lock() {
                     self.master_gain = guard.master_gain;
+                    self.protection = guard.protection;
+                    self.autogain_trim = guard.autogain_trim;
                     for (member, upd) in self.members.iter_mut().zip(guard.tracks.iter()) {
                         member.gain = upd.gain;
                         member.matrix = PanMatrix::for_source(
@@ -1135,8 +1185,9 @@ impl MixSource {
             return false;
         }
 
-        let left = left * self.master_gain;
-        let right = right * self.master_gain;
+        let effective_master = self.master_gain * self.autogain_trim;
+        let left = self.protection.apply(left, effective_master);
+        let right = self.protection.apply(right, effective_master);
         self.peak = self.peak.max(left.abs()).max(right.abs());
         // The peak is published as it grows, so the interface can show what the
         // mix is actually doing rather than what it is expected to do.
@@ -1152,6 +1203,39 @@ impl MixSource {
         self.ready.push_back(right);
         true
     }
+}
+
+/// Render stereo frames from [`MixSource`] using the exact real-time preview pipeline
+/// (used to verify sample-level parity with exported mixes in unit tests).
+#[cfg(test)]
+pub(crate) fn collect_preview_mix_frames(
+    members: &[MixMember],
+    master_gain: f32,
+    protection: ClippingProtection,
+    autogain_trim: f32,
+    from_secs: f64,
+    rate: u32,
+    max_frames: usize,
+) -> Result<Vec<[f32; 2]>, anyhow::Error> {
+    let mut source = MixSource::open_with_options(
+        members,
+        master_gain,
+        protection,
+        autogain_trim,
+        from_secs,
+        rate,
+        Arc::new(AtomicU32::new(0)),
+        None,
+    )?;
+    let mut frames = Vec::with_capacity(max_frames);
+    for _ in 0..max_frames {
+        let Some(l) = source.next() else {
+            break;
+        };
+        let r = source.next().unwrap_or(0.0);
+        frames.push([l, r]);
+    }
+    Ok(frames)
 }
 
 impl Iterator for MixSource {
@@ -1428,6 +1512,8 @@ mod tests {
             AtomicU64::new(0),
             Mutex::new(LiveMixUpdate {
                 master_gain: 1.0,
+                protection: ClippingProtection::None,
+                autogain_trim: 1.0,
                 tracks: vec![LiveTrackUpdate {
                     gain: 1.0,
                     pan: 0.0,

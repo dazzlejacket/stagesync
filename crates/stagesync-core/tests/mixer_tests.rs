@@ -1295,3 +1295,79 @@ fn the_mix_does_not_overwrite_a_recording() {
         "the mix was allowed to overwrite a recording"
     );
 }
+
+#[test]
+fn render_mix_applies_master_gain_with_none_soft_clip_and_auto_gain() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let rate = 8_000;
+    let source_path = dir.path().join("source.wav");
+    let reference_path = dir.path().join("reference.wav");
+    write_mono(&source_path, &constant(0.6, rate as usize), rate);
+    write_mono(&reference_path, &constant(0.0, rate as usize), rate);
+
+    let rep = report(
+        &reference_path,
+        rate,
+        1.0,
+        vec![alignment(
+            &source_path,
+            rate,
+            1,
+            rate as u64,
+            LinearModel::new(1.0, 0.0),
+        )],
+    );
+    let mut settings = MixSettings::of_sources(&[0]);
+    settings.master_gain = 0.25;
+
+    let out_none = dir.path().join("mix_none.wav");
+    let res_none =
+        stagesync_core::mixer::render_mix(&rep, &settings, &options(), &out_none).expect("mix");
+    let (planes, _) = read(&out_none);
+    let expected = 0.6 * 0.5f32.sqrt() * 0.25;
+    assert!(
+        (planes[0][1000] - expected).abs() < 1e-4,
+        "render_mix ignored master_gain: got {}, expected {expected} (reported peak {})",
+        planes[0][1000],
+        res_none.peak
+    );
+
+    // AutoGain with attenuated master_gain = 0.25 stays attenuated (no boost to -1 dBFS).
+    let mut opts_auto = options();
+    opts_auto.protection =
+        stagesync_core::mixer::ClippingProtection::AutoGain { target_dbfs: -1.0 };
+    let out_auto_low = dir.path().join("mix_auto_low.wav");
+    stagesync_core::mixer::render_mix(&rep, &settings, &opts_auto, &out_auto_low)
+        .expect("mix auto low");
+    let (planes_low, _) = read(&out_auto_low);
+    assert!(
+        (planes_low[0][1000] - expected).abs() < 1e-4,
+        "AutoGain boosted or ignored low master_gain: got {}, expected {expected}",
+        planes_low[0][1000]
+    );
+
+    // AutoGain with hot master_gain = 4.0 turns it down cleanly to -1.0 dBFS target (~0.89125).
+    settings.master_gain = 4.0;
+    let out_auto_hot = dir.path().join("mix_auto_hot.wav");
+    let res_hot = stagesync_core::mixer::render_mix(&rep, &settings, &opts_auto, &out_auto_hot)
+        .expect("mix auto hot");
+    let target_lin = stagesync_core::mixer::db_to_linear(-1.0);
+    assert!(
+        res_hot.peak <= target_lin + 1e-3 && res_hot.peak >= target_lin - 0.05,
+        "AutoGain with hot master_gain missed target_dbfs: peak={}, target={target_lin}",
+        res_hot.peak
+    );
+
+    // SoftClip with hot master_gain = 4.0 compresses below 1.0 instead of writing > 1.0.
+    let mut opts_soft = options();
+    opts_soft.protection = stagesync_core::mixer::ClippingProtection::SoftClip { threshold: 0.9 };
+    let out_soft = dir.path().join("mix_soft.wav");
+    let res_soft = stagesync_core::mixer::render_mix(&rep, &settings, &opts_soft, &out_soft)
+        .expect("mix soft");
+    assert!(
+        res_soft.peak <= 1.0 && res_soft.clipped_samples > 0,
+        "SoftClip with master_gain=4.0 failed to compress: peak={}, clipped={}",
+        res_soft.peak,
+        res_soft.clipped_samples
+    );
+}
