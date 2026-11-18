@@ -126,6 +126,29 @@ pub fn ncc_correlate_masked(
     reference: &[f32],
     mask: Option<&[bool]>,
 ) -> Correlation {
+    correlate_masked_impl(query, reference, mask, false)
+}
+
+/// Zero-mean Pearson correlation with some of the query's samples excluded.
+///
+/// Unlike [`ncc_correlate_masked`], this subtracts the active-overlap means of both the
+/// query and the reference window at every lag, making the coarse global lock invariant
+/// to local DC shifts caused by differently sized z-score windows (such as a short clip
+/// compared against a multi-minute reference).
+pub fn pearson_correlate_masked(
+    query: &[f32],
+    reference: &[f32],
+    mask: Option<&[bool]>,
+) -> Correlation {
+    correlate_masked_impl(query, reference, mask, true)
+}
+
+fn correlate_masked_impl(
+    query: &[f32],
+    reference: &[f32],
+    mask: Option<&[bool]>,
+    zero_mean: bool,
+) -> Correlation {
     let la = query.len();
     let lb = reference.len();
     if la == 0 || lb == 0 {
@@ -164,10 +187,9 @@ pub fn ncc_correlate_masked(
     ifft.process(&mut a);
     let scale = 1.0 / n as f32;
 
-    // The reference's energy under the *shifted* mask: e[j] = sum_n mask[n] * ref[n+j]^2.
-    // It is a second correlation of the mask against the squared reference, so it costs
-    // one more transform pair rather than a loop over every lag.
+    // The reference's energy (and optionally sum) under the *shifted* mask.
     let masked = mask.is_some();
+    let mut masked_ref_sum: Vec<f32> = Vec::new();
     let mut masked_ref_energy: Vec<f32> = Vec::new();
     if masked {
         let mask = mask.expect("checked above");
@@ -183,8 +205,27 @@ pub fn ncc_correlate_masked(
         }
         fft.process(&mut m);
         fft.process(&mut r2);
+        let mut m_r: Vec<Complex32> = if zero_mean {
+            (0..n).map(|i| m[i].conj() * b[i]).collect()
+        } else {
+            Vec::new()
+        };
         for i in 0..n {
             m[i] = m[i].conj() * r2[i];
+        }
+        if zero_mean {
+            ifft.process(&mut m_r);
+            masked_ref_sum = (0..total)
+                .map(|k| {
+                    let j = k as i64 + lag_min;
+                    let idx = if j >= 0 {
+                        j as usize
+                    } else {
+                        (n as i64 + j) as usize
+                    };
+                    m_r[idx].re * scale
+                })
+                .collect();
         }
         ifft.process(&mut m);
         masked_ref_energy = (0..total)
@@ -200,39 +241,60 @@ pub fn ncc_correlate_masked(
             .collect();
     }
 
-    // Prefix sums of squares for energy normalisation.
+    // Prefix sums of values and squares for energy/variance normalisation.
+    let mut pre_q_sum = vec![0.0f64; la + 1];
     let mut pre_q = vec![0.0f64; la + 1];
+    let mut pre_q_masked_sum = vec![0.0f64; la + 1];
     let mut pre_q_masked = vec![0.0f64; la + 1];
     let mut pre_mask_count = vec![0usize; la + 1];
     for i in 0..la {
         let v = query[i] as f64;
+        pre_q_sum[i + 1] = pre_q_sum[i] + v;
         pre_q[i + 1] = pre_q[i] + v * v;
         let excluded = mask.is_some_and(|m| m.get(i).copied().unwrap_or(false));
+        pre_q_masked_sum[i + 1] = pre_q_masked_sum[i] + if excluded { 0.0 } else { v };
         pre_q_masked[i + 1] = pre_q_masked[i] + if excluded { 0.0 } else { v * v };
         pre_mask_count[i + 1] = pre_mask_count[i] + usize::from(!excluded);
     }
+    let mut pre_r_sum = vec![0.0f64; lb + 1];
     let mut pre_r = vec![0.0f64; lb + 1];
     for i in 0..lb {
-        pre_r[i + 1] = pre_r[i] + (reference[i] as f64).powi(2);
+        let v = reference[i] as f64;
+        pre_r_sum[i + 1] = pre_r_sum[i] + v;
+        pre_r[i + 1] = pre_r[i] + v * v;
     }
 
     let lag_min = -(la as i64 - 1);
     let total = la + lb - 1;
     let mut values = vec![0.0f32; total];
     let mut fixed = vec![0.0f32; total];
-    let total_q = if masked {
-        pre_q_masked[la]
+    let usable_samples = if masked { pre_mask_count[la] } else { la };
+    let total_q = if zero_mean {
+        let (s, sq) = if masked {
+            (pre_q_masked_sum[la], pre_q_masked[la])
+        } else {
+            (pre_q_sum[la], pre_q[la])
+        };
+        if usable_samples > 0 {
+            (sq - s * s / usable_samples as f64).max(0.0)
+        } else {
+            0.0
+        }
+    } else if masked {
+        pre_q_masked[la].max(0.0)
     } else {
-        pre_q[la] - pre_q[0]
-    }
-    .max(0.0);
-    let total_r = (pre_r[lb] - pre_r[0]).max(0.0);
+        (pre_q[la] - pre_q[0]).max(0.0)
+    };
+    let total_r = if zero_mean && lb > 0 {
+        (pre_r[lb] - pre_r_sum[lb] * pre_r_sum[lb] / lb as f64).max(0.0)
+    } else {
+        (pre_r[lb] - pre_r[0]).max(0.0)
+    };
     let fixed_denom = (total_q * total_r).sqrt();
 
     // The overlap must be at least half of the shorter signal for the normalised
     // correlation to mean anything. With a mask, the overlap counts the samples that
     // were actually compared.
-    let usable_samples = if masked { pre_mask_count[la] } else { la };
     let min_overlap = (usable_samples.min(lb) / 2).max(1);
     let mut first_valid: Option<i64> = None;
     let mut last_valid: i64 = lag_min;
@@ -261,21 +323,41 @@ pub fn ncc_correlate_masked(
             *slot = 0.0;
             continue;
         }
-        let sum_q = if masked {
+        let sum_q2 = if masked {
             pre_q_masked[hi_q] - pre_q_masked[lo_q]
         } else {
             pre_q[hi_q] - pre_q[lo_q]
         };
-        let sum_r = if masked {
+        let sum_r2 = if masked {
             masked_ref_energy[k].max(0.0) as f64
         } else {
             let lo_r = (lo_q as i64 + lag) as usize;
             let hi_r = (hi_q as i64 + lag) as usize;
             pre_r[hi_r] - pre_r[lo_r]
         };
-        let denom = (sum_q * sum_r).sqrt();
+        let (num, denom) = if zero_mean {
+            let sum_q = if masked {
+                pre_q_masked_sum[hi_q] - pre_q_masked_sum[lo_q]
+            } else {
+                pre_q_sum[hi_q] - pre_q_sum[lo_q]
+            };
+            let sum_r = if masked {
+                masked_ref_sum[k] as f64
+            } else {
+                let lo_r = (lo_q as i64 + lag) as usize;
+                let hi_r = (hi_q as i64 + lag) as usize;
+                pre_r_sum[hi_r] - pre_r_sum[lo_r]
+            };
+            let inv_n = 1.0 / overlap as f64;
+            let cov = raw as f64 - sum_q * sum_r * inv_n;
+            let var_q = (sum_q2 - sum_q * sum_q * inv_n).max(0.0);
+            let var_r = (sum_r2 - sum_r * sum_r * inv_n).max(0.0);
+            (cov, (var_q * var_r).sqrt())
+        } else {
+            (raw as f64, (sum_q2 * sum_r2).sqrt())
+        };
         *slot = if denom > 1e-12 {
-            (raw as f64 / denom) as f32
+            (num / denom) as f32
         } else {
             0.0
         };
@@ -286,7 +368,7 @@ pub fn ncc_correlate_masked(
             }
             last_valid = lag;
             fixed[k] = if fixed_denom > 1e-12 {
-                (raw as f64 / fixed_denom) as f32
+                (num / fixed_denom) as f32
             } else {
                 0.0
             };

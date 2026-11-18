@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::dsp::{find_peaks_by_ncc, ncc_correlate_masked};
+use super::dsp::{find_peaks_by_ncc, pearson_correlate_masked};
 use super::model::LinearModel;
 use crate::features::Envelope;
 
@@ -94,8 +94,11 @@ pub struct CoarseLock {
     pub model: Option<LinearModel>,
     /// Lag of the best whole-file correlation (an independent sanity check).
     pub full_range_lag_secs: Option<f64>,
-    /// Score of the best whole-file correlation.
+    /// Matched-filter score of the best whole-file correlation.
     pub full_range_score: f32,
+    /// Overlap-normalised Pearson correlation of the best whole-file peak.
+    #[serde(default)]
+    pub full_range_ncc: f32,
     /// `true` when the lock succeeded.
     pub locked: bool,
     /// Explanation when the lock did not succeed.
@@ -117,17 +120,26 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
             model: None,
             full_range_lag_secs: None,
             full_range_score: 0.0,
+            full_range_ncc: 0.0,
             locked: false,
             reason: Some("source or reference is too short to correlate".into()),
         };
     }
 
-    let window_len = ((config.window_secs * rate).round() as usize).max(8);
+    let default_window_len = ((config.window_secs * rate).round() as usize).max(8);
+    let min_sub_window = ((4.0 * rate).round() as usize).max(8);
 
-    // A recording shorter than the correlation window cannot be windowed at all. Clamp
-    // the window to the material that is actually there instead of slicing past the end
-    // of the buffer.
-    let window_len = window_len.min(src_dec.len()).min(ref_dec.len());
+    // A recording shorter than the correlation window cannot be corroborated if the
+    // single window equals the whole file. Split clips at least 8 s long into
+    // overlapping sub-windows so multiple windows must agree (or disagree).
+    let window_len = if src_dec.len() <= default_window_len && src_dec.len() >= min_sub_window * 2
+    {
+        (src_dec.len() / 2).max(min_sub_window)
+    } else {
+        default_window_len
+    }
+    .min(src_dec.len())
+    .min(ref_dec.len());
     if window_len < 8 {
         return CoarseLock {
             candidates: Vec::new(),
@@ -135,6 +147,7 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
             model: None,
             full_range_lag_secs: None,
             full_range_score: 0.0,
+            full_range_ncc: 0.0,
             locked: false,
             reason: Some(
                 "source or reference is shorter than the coarse correlation window".into(),
@@ -180,6 +193,7 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
             active >= config.min_active_fraction
         })
         .collect();
+    let total_windows = all_positions.len();
     let positions = if active.is_empty() {
         all_positions
     } else {
@@ -197,7 +211,7 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
         // sides of the comparison keeps a recorder gap from dragging the correlation
         // peak away from the true position.
         let mask = &src_quiet_dec[pos..pos + window_len];
-        let corr = ncc_correlate_masked(query, &ref_dec, Some(mask));
+        let corr = pearson_correlate_masked(query, &ref_dec, Some(mask));
         let peaks = find_peaks_by_ncc(&corr, config.max_candidates, min_sep_samples.max(1));
         let centre = (pos as f64 + window_len as f64 / 2.0) / rate;
 
@@ -303,29 +317,37 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
     // the comparison exactly as it is excluded from the window correlations — the
     // reference's energy is measured over precisely the same positions, so the two
     // sides are always compared over the same material.
-    let (full_lag, full_score) = full_range_correlation(&src_dec, &ref_dec, &src_quiet_dec, rate);
+    let (full_lag, full_score, full_ncc) =
+        full_range_correlation(&src_dec, &ref_dec, &src_quiet_dec, rate);
 
     // Choose the candidate that the whole-file correlation agrees with. Without that
     // agreement, a candidate needs support from at least two windows before it is
     // trusted: a single window can match the wrong place in a long recording.
+    //
+    // Crucially, do NOT count whole-file correlation as independent corroboration when
+    // there was only one coarse window spanning the entire source — that would merely
+    // compare the same correlation against itself.
     let agreement = config.whole_file_agreement_secs;
     let mut chosen: Option<CoarseCandidate> = None;
     let mut whole_file_anchored = false;
+    let whole_file_is_independent = total_windows >= 2 && window_len < src_dec.len();
 
-    if let Some(lag) = full_lag {
-        if full_score >= config.min_whole_file_score {
-            if let Some(c) = candidates
-                .iter()
-                .filter(|c| (c.lag_secs - lag).abs() <= agreement)
-                .min_by(|a, b| {
-                    (a.lag_secs - lag)
-                        .abs()
-                        .partial_cmp(&(b.lag_secs - lag).abs())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-            {
-                chosen = Some(c.clone());
-                whole_file_anchored = true;
+    if whole_file_is_independent {
+        if let Some(lag) = full_lag {
+            if full_score >= config.min_whole_file_score {
+                if let Some(c) = candidates
+                    .iter()
+                    .filter(|c| (c.lag_secs - lag).abs() <= agreement)
+                    .min_by(|a, b| {
+                        (a.lag_secs - lag)
+                            .abs()
+                            .partial_cmp(&(b.lag_secs - lag).abs())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                {
+                    chosen = Some(c.clone());
+                    whole_file_anchored = true;
+                }
             }
         }
     }
@@ -375,6 +397,7 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
         model,
         full_range_lag_secs: full_lag,
         full_range_score: full_score,
+        full_range_ncc: full_ncc,
         locked,
         reason,
     }
@@ -390,12 +413,12 @@ fn full_range_correlation(
     ref_dec: &[f32],
     src_quiet_dec: &[bool],
     rate: f64,
-) -> (Option<f64>, f32) {
-    let corr = ncc_correlate_masked(src_dec, ref_dec, Some(src_quiet_dec));
+) -> (Option<f64>, f32, f32) {
+    let corr = pearson_correlate_masked(src_dec, ref_dec, Some(src_quiet_dec));
     let peaks = find_peaks_by_ncc(&corr, 1, 1);
     match peaks.first() {
-        Some(p) => (Some(p.lag as f64 / rate), p.value),
-        None => (None, 0.0),
+        Some(p) => (Some(p.lag as f64 / rate), p.value, p.ncc),
+        None => (None, 0.0, 0.0),
     }
 }
 

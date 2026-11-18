@@ -307,6 +307,7 @@ fn very_short_twelve_second_and_twenty_second_clips_are_aligned() {
         common::write_wav(&source, &src, RATE, WavFormat::Float32);
 
         let report = analyse(&reference, std::slice::from_ref(&source), &config());
+        common::describe(&report);
         let alignment = &report.sources[0];
         assert!(
             alignment.coarse.as_ref().is_some_and(|c| c.locked),
@@ -327,4 +328,69 @@ fn very_short_twelve_second_and_twenty_second_clips_are_aligned() {
             "{label} clip offset error {err_ms:.2} ms exceeded 15 ms"
         );
     }
+}
+
+/// Codex P1-03 counterexample 1: an exact 12-second excerpt at 8 kHz (true offset +10 s)
+/// analyzed with default AnalysisConfig must NOT expose a grossly wrong applied offset
+/// (it previously returned offset ~+44 s with zero trusted points and zero coverage).
+#[test]
+fn short_twelve_second_excerpt_does_not_apply_grossly_wrong_offset() {
+    let dir = TempDir::new().expect("temp dir");
+    let rate = 8000u32;
+    let samples = reference_signal(rate, 120.0, 0xBEEF02);
+    let reference = dir.path().join("reference.wav");
+    common::write_wav(&reference, &samples, rate, WavFormat::Float32);
+
+    let excerpt = &samples[80_000..176_000];
+    let source = dir.path().join("excerpt_12s.wav");
+    common::write_wav(&source, excerpt, rate, WavFormat::Float32);
+
+    let report = analyse(
+        &reference,
+        std::slice::from_ref(&source),
+        &stagesync_core::pipeline::AnalysisConfig::default(),
+    );
+    common::describe(&report);
+    let alignment = &report.sources[0];
+    if let Some(model) = alignment.model() {
+        let err_ms = (model.offset - 10.0).abs() * 1000.0;
+        assert!(
+            err_ms < 50.0,
+            "12s excerpt applied wrong offset {:.3} s (error {err_ms:.1} ms; truth +10.0 s)",
+            model.offset
+        );
+    }
+}
+
+/// Codex P1-03 counterexample 2: an independently seeded, unrelated 20-second recording
+/// must be refused (`model() == None`, zero coverage) rather than receiving a bogus offset.
+#[test]
+fn unrelated_twenty_second_signal_is_refused() {
+    let dir = TempDir::new().expect("temp dir");
+    let rate = 8000u32;
+    let reference_samples = reference_signal(rate, 120.0, 0xBEEF02);
+    let reference = dir.path().join("reference.wav");
+    common::write_wav(&reference, &reference_samples, rate, WavFormat::Float32);
+
+    let unrelated = reference_signal(rate, 20.0, 0x9E37_79B9);
+    let source = dir.path().join("unrelated_20s.wav");
+    common::write_wav(&source, &unrelated, rate, WavFormat::Float32);
+
+    let report = analyse(
+        &reference,
+        std::slice::from_ref(&source),
+        &stagesync_core::pipeline::AnalysisConfig::default(),
+    );
+    common::describe(&report);
+    let alignment = &report.sources[0];
+    assert!(
+        alignment.model().is_none(),
+        "unrelated 20s signal should be refused, got model {:?}",
+        alignment.model()
+    );
+    assert!(
+        alignment.coverage.fraction < 1e-6,
+        "unrelated 20s signal should have zero coverage, got {}",
+        alignment.coverage.fraction
+    );
 }

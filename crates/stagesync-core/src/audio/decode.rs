@@ -147,22 +147,20 @@ impl AudioDecoder {
             .clone()
             .ok_or_else(|| anyhow!("audio track in {} has no codec parameters", path.display()))?;
 
-        let (codec_name, sample_rate, channels, sample_format, bits_per_sample) =
-            match &codec_params {
-                CodecParameters::Audio(p) => (
-                    format!("{:?}", p.codec).to_lowercase(),
-                    p.sample_rate.unwrap_or(0),
-                    p.channels.as_ref().map_or(0, |c| c.count()),
-                    p.sample_format.map(|f| format!("{f:?}").to_lowercase()),
-                    p.bits_per_sample,
-                ),
-                _ => {
-                    return Err(anyhow!(
-                        "unsupported (non-audio) track in {}",
-                        path.display()
-                    ))
-                }
-            };
+        let (sample_rate, channels, sample_format, bits_per_sample) = match &codec_params {
+            CodecParameters::Audio(p) => (
+                p.sample_rate.unwrap_or(0),
+                p.channels.as_ref().map_or(0, |c| c.count()),
+                p.sample_format.map(|f| format!("{f:?}").to_lowercase()),
+                p.bits_per_sample,
+            ),
+            _ => {
+                return Err(anyhow!(
+                    "unsupported (non-audio) track in {}",
+                    path.display()
+                ))
+            }
+        };
 
         // A file with no sample rate, or with one so low that the analysis
         // has no band to work with, cannot be analysed. It is refused here,
@@ -184,6 +182,8 @@ impl AudioDecoder {
                 &AudioDecoderOptions::default(),
             )
             .map_err(|e| anyhow!("no decoder for {}: {}", path.display(), e))?;
+        let codec_info = decoder.codec_info();
+        let codec_name = human_codec_name(codec_info.short_name, codec_info.long_name);
 
         let byte_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         let sha256 = sha256_file(path)?;
@@ -415,6 +415,26 @@ impl AudioDecoder {
     }
 }
 
+/// Map Symphonia's codec short/long names to a clean human-readable label.
+fn human_codec_name(short_name: &str, long_name: &str) -> String {
+    match short_name.to_ascii_lowercase().as_str() {
+        "pcm_f32le" | "pcm_f32be" => "PCM 32-bit float".to_string(),
+        "pcm_f64le" | "pcm_f64be" => "PCM 64-bit float".to_string(),
+        "pcm_s32le" | "pcm_s32be" => "PCM 32-bit".to_string(),
+        "pcm_s24le" | "pcm_s24be" => "PCM 24-bit".to_string(),
+        "pcm_s16le" | "pcm_s16be" => "PCM 16-bit".to_string(),
+        "pcm_u8" | "pcm_s8" => "PCM 8-bit".to_string(),
+        "aac" => "AAC".to_string(),
+        "flac" => "FLAC".to_string(),
+        "vorbis" => "Vorbis".to_string(),
+        "mp3" => "MP3".to_string(),
+        "opus" => "Opus".to_string(),
+        "alac" => "ALAC".to_string(),
+        _ if !long_name.is_empty() => long_name.to_string(),
+        _ => short_name.to_string(),
+    }
+}
+
 /// Convert a decoded buffer into per-channel `f32` planes.
 fn planes_of(buf: &GenericAudioBufferRef<'_>) -> Vec<Vec<f32>> {
     let frames = buf.frames();
@@ -485,5 +505,20 @@ mod tests {
             reached <= 1000,
             "the seek past the end reached frame {reached}"
         );
+    }
+
+    #[test]
+    fn codec_name_is_human_readable_not_raw_id() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("ramp.wav");
+        ramp_file(&path, 8000, 1000);
+
+        let decoder = AudioDecoder::open(&path).expect("open");
+        let codec = &decoder.meta().codec;
+        assert!(
+            !codec.contains("audiocodecid"),
+            "codec name leaked raw debug id: {codec}"
+        );
+        assert_eq!(codec, "PCM 32-bit float");
     }
 }

@@ -128,7 +128,13 @@ pub fn fine_match(
     // probes at the full window size. Scale the probe window to half the source
     // (at least 4 s) with a 40% hop so short clips still produce several
     // overlapping probes while sub-8 s fragments continue to report no fine points.
-    let (win, hop) = if source.len() < default_win {
+    let short_clip = source.len() < default_win;
+    let search_secs = if short_clip {
+        options.search_secs.max(4.0)
+    } else {
+        options.search_secs
+    };
+    let (win, hop) = if short_clip {
         let short_win = (source.len() / 3)
             .max((4.0 * rate).round() as usize)
             .min(source.len())
@@ -156,8 +162,8 @@ pub fn fine_match(
         }
         // Reference region around the model prediction.
         let predicted = model.reference_time(p as f64 / rate);
-        let region_start = predicted - (half as f64 / rate) - options.search_secs;
-        let region_end = predicted + (half as f64 / rate) + options.search_secs;
+        let region_start = predicted - (half as f64 / rate) - search_secs;
+        let region_end = predicted + (half as f64 / rate) + search_secs;
         let i0 = reference.index_at(region_start.max(0.0));
         let i1 = reference
             .index_at(region_end)
@@ -177,7 +183,11 @@ pub fn fine_match(
         // same material.
         let mask = &source.quiet[p - half..p + half];
         let corr = ncc_correlate_masked(window, region, Some(mask));
-        let min_sep = ((options.search_secs * rate * 0.5) as i64).max(1);
+        let min_sep = if short_clip {
+            ((search_secs * rate * 0.25) as i64).max(1)
+        } else {
+            ((options.search_secs * rate * 0.5) as i64).max(1)
+        };
         let peaks = find_peaks(&corr, 1, min_sep);
         let Some(peak) = peaks.first() else {
             skipped += 1;

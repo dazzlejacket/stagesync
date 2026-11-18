@@ -439,6 +439,82 @@ pub fn analyze(
             .map(|p| (p.source_time, p.reference_time))
             .collect();
 
+        // Require credible position evidence before exposing an exportable model.
+        // Without a manual anchor:
+        // - Clips too short for fine probes (< 8 s) cannot be corroborated automatically.
+        // - Clips shorter than the default coarse window (< 60 s) require either a
+        //   corroborated fine fit (`fine.model.is_some()` with >= 3 trusted probes) or,
+        //   when a single-point outlier caused `fit_rejection`, a strict majority
+        //   (>= 2 and > half) of trusted probes supporting `seed_model`.
+        // - Longer recordings require at least one trustworthy fine probe (never 0%
+        //   coverage) and, if the fine fit was rejected, at least one trustworthy probe
+        //   supporting the coarse lock.
+        let fine_ran = source_env.duration_secs >= 8.0;
+        let short_recording = source_env.duration_secs < config.coarse.window_secs;
+        let tol = config.fine.support_tolerance_ms / 1000.0;
+        let (_, seed_support) =
+            crate::matching::fine::corroboration_support(&trusted, &seed_model, tol);
+        let all_fine_pts: Vec<(f64, f64)> = fine
+            .points
+            .iter()
+            .map(|p| (p.source_time, p.reference_time))
+            .collect();
+        let (_, fine_seed_support) =
+            crate::matching::fine::corroboration_support(&all_fine_pts, &seed_model, 0.050);
+        let has_credible_evidence = if anchor.is_some() {
+            true
+        } else if !fine_ran {
+            false
+        } else if short_recording {
+            if fine.model.is_some() && trusted.len() >= 3 {
+                true
+            } else if fine.fit_rejection.is_some()
+                && seed_support >= 2
+                && seed_support * 2 > trusted.len()
+            {
+                true
+            } else {
+                // Very short clips (e.g. 12 s) can suffer LowPeakSeparation in the
+                // narrow 4 s fine window; accept only when the whole-file shape lock
+                // is very strong (>= 0.90) AND a strict majority of >= 3 fine probes
+                // land within 50 ms of the coarse offset.
+                lock.full_range_ncc >= 0.90
+                    && fine.points.len() >= 3
+                    && fine_seed_support >= 2
+                    && fine_seed_support * 2 > fine.points.len()
+            }
+        } else if trusted.is_empty() {
+            false
+        } else if fine.fit_rejection.is_some() {
+            seed_support >= 1
+        } else {
+            true
+        };
+
+        if !has_credible_evidence {
+            warnings.push(
+                "no credible position evidence was found for this source; supply an explicit \
+                 manual anchor to place it"
+                    .into(),
+            );
+            work.push(SourceWork {
+                path: source_path.clone(),
+                meta: source_meta,
+                lock: Some(lock),
+                warnings,
+                matched: false,
+                points,
+                fine,
+                direct_model: LinearModel::new(1.0, 0.0),
+                calibrated: LinearModel::new(1.0, 0.0),
+                trusted: Vec::new(),
+                anchor: None,
+                automatic_offset: 0.0,
+                envelope: source_env,
+            });
+            continue;
+        }
+
         work.push(SourceWork {
             path: source_path.clone(),
             meta: source_meta,
