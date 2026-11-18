@@ -132,14 +132,14 @@ pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfi
     // A recording shorter than the correlation window cannot be corroborated if the
     // single window equals the whole file. Split clips at least 8 s long into
     // overlapping sub-windows so multiple windows must agree (or disagree).
-    let window_len = if src_dec.len() <= default_window_len && src_dec.len() >= min_sub_window * 2
-    {
-        (src_dec.len() / 2).max(min_sub_window)
-    } else {
-        default_window_len
-    }
-    .min(src_dec.len())
-    .min(ref_dec.len());
+    let window_len =
+        if src_dec.len() <= default_window_len && src_dec.len() >= min_sub_window * 2 {
+            (src_dec.len() / 2).max(min_sub_window)
+        } else {
+            default_window_len
+        }
+        .min(src_dec.len())
+        .min(ref_dec.len());
     if window_len < 8 {
         return CoarseLock {
             candidates: Vec::new(),

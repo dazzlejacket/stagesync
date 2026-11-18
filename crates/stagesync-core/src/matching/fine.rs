@@ -124,11 +124,12 @@ pub fn fine_match(
         };
     }
 
-    // Recordings between 8 s and the 30 s default window would yield zero fine
-    // probes at the full window size. Scale the probe window to half the source
-    // (at least 4 s) with a 40% hop so short clips still produce several
-    // overlapping probes while sub-8 s fragments continue to report no fine points.
-    let short_clip = source.len() < default_win;
+    // Recordings shorter than one window plus one hop (default < 45 s) cannot yield
+    // at least 2–3 probes at the full 30 s window size. Scale the probe window to a
+    // third of the source (at least 4 s) with a 40% hop so 8–45 s clips produce
+    // multiple overlapping probes while sub-8 s fragments continue to report no fine points.
+    let hop_frames = (options.hop_secs * rate).round() as usize;
+    let short_clip = source.len() < default_win.saturating_add(hop_frames);
     let search_secs = if short_clip {
         options.search_secs.max(4.0)
     } else {
