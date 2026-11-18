@@ -571,8 +571,10 @@ fn p1_01_export_refuses_tampered_audio_before_render() {
     bytes[idx] ^= 0xFF;
     fs::write(&src_path, &bytes).unwrap();
 
-    let mut settings = stagesync_desktop::state::ExportSettings::default();
-    settings.dir = temp.path().join("out").display().to_string();
+    let settings = stagesync_desktop::state::ExportSettings {
+        dir: temp.path().join("out").display().to_string(),
+        ..Default::default()
+    };
     let cancel = AtomicBool::new(false);
     let err = jobs::export_report(&report, &settings, &cancel, &mut |_| {})
         .expect_err("export must refuse tampered audio file");

@@ -641,23 +641,6 @@ fn tick_step(px_per_sec: f32) -> f64 {
     step
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn concert_ruler_labels_keep_minimum_pixel_separation() {
-        for (duration, width) in [(9_685.0, 420.0f32), (9_685.0, 800.0), (86_400.0, 300.0)] {
-            let step = ruler_tick_step(duration, width);
-            let px_gap = step * (width as f64 / duration);
-            assert!(
-                px_gap >= 84.0,
-                "ruler ticks collapsed to {px_gap:.1} px at {duration}s / {width}px (step={step}s)"
-            );
-        }
-    }
-}
-
 /// A short label for a ruler tick.
 fn format_tick(seconds: f64) -> String {
     let total = seconds.round() as i64;
@@ -687,4 +670,21 @@ pub fn time_at(rect: Rect, x: f32, start_secs: f64, end_secs: f64) -> f64 {
     let span = (end_secs - start_secs).max(1e-6);
     let per_pixel = span / rect.width().max(1.0) as f64;
     start_secs + (x - rect.left()) as f64 * per_pixel
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concert_ruler_labels_keep_minimum_pixel_separation() {
+        for (duration, width) in [(9_685.0, 420.0f32), (9_685.0, 800.0), (86_400.0, 300.0)] {
+            let step = ruler_tick_step(duration, width);
+            let px_gap = step * (width as f64 / duration);
+            assert!(
+                px_gap >= 84.0,
+                "ruler ticks collapsed to {px_gap:.1} px at {duration}s / {width}px (step={step}s)"
+            );
+        }
+    }
 }

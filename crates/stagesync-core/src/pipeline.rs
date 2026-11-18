@@ -466,20 +466,12 @@ pub fn analyze(
         } else if !fine_ran {
             false
         } else if short_recording {
-            if fine.model.is_some() && trusted.len() >= 3 {
-                true
-            } else if seed_support >= 2 && seed_support * 2 > trusted.len() {
-                true
-            } else {
-                // Short clips (< 60 s) can suffer LowPeakSeparation in narrow windows
-                // (or fit only 2 fine probes in 30–45 s clips); accept only when the
-                // whole-file shape lock is very strong (>= 0.90) AND a strict majority
-                // of >= 2 fine probes land within 50 ms of the coarse offset.
-                lock.full_range_ncc >= 0.90
+            (fine.model.is_some() && trusted.len() >= 3)
+                || (seed_support >= 2 && seed_support * 2 > trusted.len())
+                || (lock.full_range_ncc >= 0.90
                     && fine.points.len() >= 2
                     && fine_seed_support >= 2
-                    && fine_seed_support * 2 > fine.points.len()
-            }
+                    && fine_seed_support * 2 > fine.points.len())
         } else if trusted.is_empty() {
             false
         } else if fine.fit_rejection.is_some() {
