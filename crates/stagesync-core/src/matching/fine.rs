@@ -101,6 +101,14 @@ pub fn fine_match(
     model: &LinearModel,
     options: &FineOptions,
 ) -> FineResult {
+    if (source.rate_hz - reference.rate_hz).abs() > 1e-9 {
+        return fine_match(
+            &source.at_rate(reference.rate_hz),
+            reference,
+            model,
+            options,
+        );
+    }
     let mut points: Vec<MatchPoint> = Vec::new();
     let mut skipped = 0usize;
     let mut reasons = SkipReasons::default();

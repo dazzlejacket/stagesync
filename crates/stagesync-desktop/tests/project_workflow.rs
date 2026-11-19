@@ -588,3 +588,23 @@ fn p1_01_export_refuses_tampered_audio_before_render() {
         other => panic!("expected Failed error, got {other:?}"),
     }
 }
+
+#[test]
+fn final_beta_save_staging_preserves_loaded_input() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let _cfg = ConfigDirGuard::set(temp.path());
+    let input = temp
+        .path()
+        .join(format!(".collision.stagesync.{}.tmp", std::process::id()));
+    write_wav(&input, &make_signal(1.0, 8000), 8000);
+    let before = fs::read(&input).unwrap();
+    let mut app = StageSyncApp::new();
+    app.open_files(vec![input.clone()]);
+    app.save_project_to(&temp.path().join("collision.stagesync"))
+        .unwrap();
+    assert_eq!(
+        fs::read(&input).ok(),
+        Some(before),
+        "loaded input was removed/truncated by Save staging"
+    );
+}

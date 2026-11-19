@@ -240,7 +240,7 @@ fn populated_ui_supports_dark_light_tabs_and_responsive_sizes() {
     harness.run();
     assert!(harness.query_by_label("Analyze").is_some());
     let tc_rect = harness
-        .query_by_label_contains("0:00:")
+        .query_by_label_contains("Playhead ")
         .expect("timecode readout present at 960x640")
         .rect();
     let fit_rect = harness

@@ -439,18 +439,14 @@ pub fn analyze(
             .map(|p| (p.source_time, p.reference_time))
             .collect();
 
-        // Require credible position evidence before exposing an exportable model.
-        // Without a manual anchor:
-        // - Clips too short for fine probes (< 8 s) cannot be corroborated automatically.
-        // - Clips shorter than the default coarse window (< 60 s) require either a
-        //   corroborated fine fit (`fine.model.is_some()` with >= 3 trusted probes) or,
-        //   when a single-point outlier caused `fit_rejection`, a strict majority
-        //   (>= 2 and > half) of trusted probes supporting `seed_model`.
-        // - Longer recordings require at least one trustworthy fine probe (never 0%
-        //   coverage) and, if the fine fit was rejected, at least one trustworthy probe
-        //   supporting the coarse lock.
+        // Coincident peaks from one or two overlapping probes cannot establish
+        // a placement. Require multiple trusted positions, and on short clips four probes and a
+        // two-thirds consensus across all probes as well. A nearly exact whole-
+        // file match still needs independent fine-position agreement. Manual
+        // anchors remain explicit overrides; no waveform correlation is required
+        // of independent microphones.
         let fine_ran = source_env.duration_secs >= 8.0;
-        let short_recording = source_env.duration_secs < config.coarse.window_secs;
+        let short_recording = source_env.duration_secs <= config.coarse.window_secs;
         let tol = config.fine.support_tolerance_ms / 1000.0;
         let (_, seed_support) =
             crate::matching::fine::corroboration_support(&trusted, &seed_model, tol);
@@ -461,21 +457,97 @@ pub fn analyze(
             .collect();
         let (_, fine_seed_support) =
             crate::matching::fine::corroboration_support(&all_fine_pts, &seed_model, 0.050);
+        let (_, measured_support) = crate::matching::fine::corroboration_support(
+            &all_fine_pts,
+            &direct_model,
+            tol.min(0.050),
+        );
+        // Short or gapped surviving material can leave too few full-size probes. Corroborate
+        // placement on surviving material with shorter windows, without changing
+        // the original fit, quiet mask, drift uncertainty, or its holdout positions.
+        // Recognize numerical digital silence only; never change the noise floor or quiet mask.
+        let digital_silence = source_env.db.iter().filter(|db| **db <= -120.0).count();
+        let mut position_corroborated = false;
+        let mapped_start = seed_model.reference_time(0.0);
+        let mapped_end = seed_model.reference_time(source_env.duration_secs);
+        let overlap = (mapped_end.min(reference_duration) - mapped_start.max(0.0)).max(0.0);
+        // Dense probes around one edge coincidence cannot supply a global lock.
+        // Most of the query must overlap, and multiple coarse windows must agree
+        // unless actual recorder silence left fewer usable windows.
+        let global_support = overlap * 3.0 >= (mapped_end - mapped_start) * 2.0
+            && (lock.chosen.as_ref().is_some_and(|c| c.votes >= 2)
+                || digital_silence * 5 > source_env.len());
+        if !short_recording && global_support && (trusted.len() < 3 || fine.fit_rejection.is_some())
+        {
+            for window_secs in [config.fine.window_secs, 20.0_f64, 10.0] {
+                let position_options = crate::matching::fine::FineOptions {
+                    window_secs: config.fine.window_secs.min(window_secs),
+                    hop_secs: config.fine.hop_secs.min(2.5),
+                    ..config.fine
+                };
+                let corroboration =
+                    fine_match(&source_env, &reference_env, &seed_model, &position_options);
+                let positions: Vec<_> = corroboration
+                    .points
+                    .iter()
+                    .filter(|p| p.confidence.is_trustworthy())
+                    .map(|p| (p.source_time, p.reference_time))
+                    .collect();
+                let (_, support) =
+                    crate::matching::fine::corroboration_support(&positions, &seed_model, tol);
+                let all_positions: Vec<_> = corroboration
+                    .points
+                    .iter()
+                    .map(|p| (p.source_time, p.reference_time))
+                    .collect();
+                let (_, all_support) =
+                    crate::matching::fine::corroboration_support(&all_positions, &seed_model, tol);
+                let all_agree = if digital_silence * 5 > source_env.len() {
+                    all_support * 2 > all_positions.len()
+                } else {
+                    all_support * 3 >= all_positions.len() * 2
+                };
+                if support >= 3 && support * 3 >= positions.len() * 2 && all_agree {
+                    position_corroborated = true;
+                    warnings.push(format!("placement corroborated by {support} additional envelope probes across surviving material; these position checks were not used to fit drift"));
+                    points.extend(corroboration.points.into_iter().map(|mut p| {
+                        p.note = "supplemental placement check; not used to fit drift".into();
+                        p
+                    }));
+                    break;
+                }
+            }
+        }
+
         let has_credible_evidence = if anchor.is_some() {
             true
         } else if !fine_ran {
             false
         } else if short_recording {
-            (fine.model.is_some() && trusted.len() >= 3)
-                || (seed_support >= 2 && seed_support * 2 > trusted.len())
+            (fine.model.is_some()
+                && trusted.len() >= 4
+                && measured_support * 3 >= all_fine_pts.len() * 2
+                && trusted.len() * 3 >= all_fine_pts.len() * 2)
+                || (fine.fit_rejection.is_some()
+                    && seed_support >= 3
+                    && seed_support * 2 > trusted.len())
                 || (lock.full_range_ncc >= 0.90
                     && fine.points.len() >= 2
                     && fine_seed_support >= 2
                     && fine_seed_support * 2 > fine.points.len())
-        } else if trusted.is_empty() {
+        } else if position_corroborated
+            || (lock.full_range_ncc >= 0.90
+                && lock
+                    .chosen
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.votes >= 2)
+                && seed_support >= 1)
+        {
+            true
+        } else if trusted.len() < 3 {
             false
         } else if fine.fit_rejection.is_some() {
-            seed_support >= 1
+            seed_support >= 3
         } else {
             true
         };
@@ -652,17 +724,26 @@ pub fn analyze(
             None => {}
         }
 
+        let offset_points: Vec<_> = item
+            .trusted
+            .iter()
+            .copied()
+            .filter(|(s, r)| {
+                (item.direct_model.reference_time(*s) - r).abs()
+                    <= config.fine.support_tolerance_ms / 1000.0
+            })
+            .collect();
+        let offset_model = fit_offset_only(&offset_points).unwrap_or(item.calibrated);
         let mut assessment = assess(
             envelope_figures,
             waveform_figures,
             config.measure_waveform_drift,
-            item.calibrated,
+            offset_model,
             &config.drift,
         );
 
         if config.force_offset_only {
-            let offset =
-                fit_offset_only(&item.trusted).map_or(item.calibrated.offset, |m| m.offset);
+            let offset = offset_model.offset;
             // The evidence is still reported, but the notes must not describe a
             // decision the user overrode.
             let mut notes = vec![

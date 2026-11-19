@@ -60,7 +60,10 @@ impl Voice {
 }
 
 /// One recording of the mix, with the way it is placed in the field.
+#[derive(Clone)]
 pub struct MixMember {
+    /// Bind audition to the analyzed content when a report supplied this member.
+    pub expected_sha256: Option<String>,
     /// The recording to read.
     pub path: std::path::PathBuf,
     /// The correction to apply.
@@ -80,6 +83,7 @@ impl MixMember {
     pub fn new(path: std::path::PathBuf, model: LinearModel) -> Self {
         Self {
             path,
+            expected_sha256: None,
             model,
             gain: 1.0,
             pan: 0.0,
@@ -92,6 +96,7 @@ impl MixMember {
     pub fn from_track(path: std::path::PathBuf, model: LinearModel, track: &MixTrack) -> Self {
         Self {
             path,
+            expected_sha256: None,
             model,
             gain: track.gain * track.trim,
             pan: track.pan,
@@ -310,10 +315,14 @@ impl Drop for StoppableSource {
     }
 }
 
+type AudioSource = Box<dyn Source<Item = f32> + Send>;
+type SourceFactory = Box<dyn FnOnce(Arc<AtomicBool>) -> anyhow::Result<AudioSource> + Send>;
+
 enum BackendCmd {
     Play {
         cmd_id: u64,
-        source: Box<dyn Source<Item = f32> + Send>,
+        prepare: Box<dyn FnOnce() -> anyhow::Result<AudioSource> + Send>,
+        cancelled: Arc<AtomicBool>,
         volume: f32,
     },
     Stop {
@@ -498,7 +507,10 @@ impl Player {
                 self.stall_reported = true;
                 if let Ok(mut guard) = self.runtime_error.lock() {
                     if guard.is_none() {
-                        *guard = Some("audio output device stalled or disconnected".to_string());
+                        *guard = Some(
+                            "audio preparation or output is still pending (over 2 seconds)"
+                                .to_string(),
+                        );
                     }
                 }
             }
@@ -567,9 +579,34 @@ impl Player {
 
     /// Play the reference recording from a position on the reference timeline.
     pub fn play_reference(&mut self, path: &Path, from_secs: f64) -> Result<(), anyhow::Error> {
+        self.play_reference_checked(path, from_secs, None)
+    }
+
+    pub(crate) fn play_reference_checked(
+        &mut self,
+        path: &Path,
+        from_secs: f64,
+        expected: Option<String>,
+    ) -> Result<(), anyhow::Error> {
         let rate = self.rate;
-        let source = ResampledSource::open(path, from_secs.max(0.0), rate, None)?;
-        self.start(Voice::Reference, from_secs.max(0.0), Box::new(source), None)
+        let path = path.to_path_buf();
+        let from_secs = from_secs.max(0.0);
+        self.start(
+            Voice::Reference,
+            from_secs,
+            Box::new(move |cancel| {
+                let source =
+                    ResampledSource::open_cancellable(&path, from_secs, rate, None, Some(cancel))?;
+                anyhow::ensure!(
+                    expected
+                        .as_ref()
+                        .is_none_or(|hash| *hash == source.decoder.meta().sha256),
+                    "reference changed since analysis"
+                );
+                Ok(Box::new(source))
+            }),
+            None,
+        )
     }
 
     /// Play a target recording with the correction applied, from a position on the
@@ -584,10 +621,41 @@ impl Player {
         model: &LinearModel,
         from_secs: f64,
     ) -> Result<(), anyhow::Error> {
+        self.play_target_checked(path, model, from_secs, None)
+    }
+
+    pub(crate) fn play_target_checked(
+        &mut self,
+        path: &Path,
+        model: &LinearModel,
+        from_secs: f64,
+        expected: Option<String>,
+    ) -> Result<(), anyhow::Error> {
         let rate = self.rate;
         let from_secs = from_secs.max(0.0);
-        let source = ResampledSource::open(path, from_secs, rate, Some(model))?;
-        self.start(Voice::Target, from_secs, Box::new(source), None)
+        let path = path.to_path_buf();
+        let model = *model;
+        self.start(
+            Voice::Target,
+            from_secs,
+            Box::new(move |cancel| {
+                let source = ResampledSource::open_cancellable(
+                    &path,
+                    from_secs,
+                    rate,
+                    Some(&model),
+                    Some(cancel),
+                )?;
+                anyhow::ensure!(
+                    expected
+                        .as_ref()
+                        .is_none_or(|hash| *hash == source.decoder.meta().sha256),
+                    "target changed since analysis"
+                );
+                Ok(Box::new(source))
+            }),
+            None,
+        )
     }
 
     /// Put a source on the player backend and start tracking consumed frames.
@@ -595,7 +663,7 @@ impl Player {
         &mut self,
         voice: Voice,
         from_secs: f64,
-        source: Box<dyn Source<Item = f32> + Send>,
+        prepare: SourceFactory,
         live_mix: Option<LiveMixShared>,
     ) -> Result<(), anyhow::Error> {
         if !self.available {
@@ -610,16 +678,29 @@ impl Player {
         let cancelled = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
         let frames_played = Arc::new(AtomicU64::new(0));
-        let wrapped = StoppableSource::wrap(
-            source,
-            Arc::clone(&cancelled),
-            Arc::clone(&finished),
-            Arc::clone(&frames_played),
-        );
+        let cancel_worker = Arc::clone(&cancelled);
+        let finished_worker = Arc::clone(&finished);
+        let frames_worker = Arc::clone(&frames_played);
         let volume = self.volume;
+        let cancel_command = Arc::clone(&cancelled);
         self.send_cmd(move |cmd_id| BackendCmd::Play {
             cmd_id,
-            source: Box::new(wrapped),
+            prepare: Box::new(move || {
+                let source = prepare(Arc::clone(&cancel_worker));
+                match source {
+                    Ok(source) => Ok(Box::new(StoppableSource::wrap(
+                        source,
+                        cancel_worker,
+                        finished_worker,
+                        frames_worker,
+                    )) as AudioSource),
+                    Err(error) => {
+                        finished_worker.store(true, Ordering::Release);
+                        Err(error)
+                    }
+                }
+            }),
+            cancelled: cancel_command,
             volume,
         });
         self.playing = Some(Playing {
@@ -663,17 +744,26 @@ impl Player {
                     .collect(),
             }),
         ));
-        let source = MixSource::open_with_options(
-            members,
-            master_gain,
-            protection,
-            autogain_trim,
+        let members = members.to_vec();
+        let live_worker = Arc::clone(&live_mix);
+        self.start(
+            Voice::Mix,
             from_secs,
-            rate,
-            published_peak,
-            Some(Arc::clone(&live_mix)),
-        )?;
-        self.start(Voice::Mix, from_secs, Box::new(source), Some(live_mix))
+            Box::new(move |cancel| {
+                Ok(Box::new(MixSource::open_cancellable(
+                    &members,
+                    master_gain,
+                    protection,
+                    autogain_trim,
+                    from_secs,
+                    rate,
+                    published_peak,
+                    Some(live_worker),
+                    Some(cancel),
+                )?))
+            }),
+            Some(live_mix),
+        )
     }
 }
 
@@ -735,10 +825,23 @@ fn thread_spawn_worker<B: AudioBackend, F: FnOnce() -> B + Send + 'static>(
                 }
                 if let Some(cmd) = latest_cmd {
                     match cmd {
-                        BackendCmd::Play { source, volume, .. } => {
-                            if let Err(err) = backend.play(source, volume) {
-                                if let Ok(mut guard) = runtime_error.lock() {
-                                    *guard = Some(err);
+                        BackendCmd::Play {
+                            prepare,
+                            cancelled,
+                            volume,
+                            ..
+                        } => {
+                            if !cancelled.load(Ordering::Acquire) {
+                                let result = prepare();
+                                if !cancelled.load(Ordering::Acquire) {
+                                    let result = result
+                                        .map_err(|e| format!("audio preparation failed: {e:#}"))
+                                        .and_then(|source| backend.play(source, volume));
+                                    if let Err(err) = result {
+                                        if let Ok(mut guard) = runtime_error.lock() {
+                                            *guard = Some(err);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -803,13 +906,24 @@ impl ResampledSource {
     /// it: a recording that has not started yet at the given position contributes
     /// silence until the position its model says it starts at, and the material is
     /// read from the fraction of a frame the model puts it at.
+    #[cfg(test)]
     fn open(
         path: &Path,
         from_secs: f64,
         out_rate: u32,
         model: Option<&LinearModel>,
     ) -> Result<Self, anyhow::Error> {
-        let mut decoder = AudioDecoder::open(path)?;
+        Self::open_cancellable(path, from_secs, out_rate, model, None)
+    }
+
+    fn open_cancellable(
+        path: &Path,
+        from_secs: f64,
+        out_rate: u32,
+        model: Option<&LinearModel>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, anyhow::Error> {
+        let mut decoder = AudioDecoder::open_cancellable(path, cancel)?;
         let in_rate = decoder.meta().sample_rate;
         let channels = decoder.meta().channels.max(1);
 
@@ -849,19 +963,19 @@ impl ResampledSource {
         }
         let (start_frame, fraction, delay) = match model {
             None => {
-                let start = position.floor().max(0.0);
+                let start = (position.floor() - TAPS as f64).max(0.0);
                 (start as u64, position - start, 0)
             }
             Some(model) => {
                 if position >= 0.0 {
-                    let start = position.floor();
+                    let start = (position.floor() - TAPS as f64).max(0.0);
                     (start as u64, position - start, 0)
                 } else {
                     // The recording has not started yet at this position: it stays
                     // silent until the position its model gives it.
                     let start_at = model.offset;
                     let delay = ((start_at - from_secs).max(0.0) * out_rate as f64).round() as u64;
-                    (0, 0.0, delay)
+                    (0, position + alpha * delay as f64, delay)
                 }
             }
         };
@@ -870,8 +984,19 @@ impl ResampledSource {
 
         // The resampler is given the fraction of the frame the material starts on,
         // so the preview reads the same position the export does.
+        let end_secs = model.map_or(decoder.meta().duration_secs, |m| {
+            m.reference_time(decoder.meta().duration_secs)
+        });
+        let content_frames = ((end_secs * out_rate as f64).round()
+            - (from_secs * out_rate as f64).round()
+            - delay as f64)
+            .max(0.0) as u64;
         let resamplers = (0..channels)
-            .map(|_| StreamingResampler::new(alpha, fraction, TAPS, PHASES))
+            .map(|_| {
+                let mut resampler = StreamingResampler::new(alpha, fraction, TAPS, PHASES);
+                resampler.set_output_limit(content_frames);
+                resampler
+            })
             .collect();
 
         Ok(Self {
@@ -1107,10 +1232,48 @@ impl MixSource {
         published_peak: Arc<AtomicU32>,
         live_mix: Option<LiveMixShared>,
     ) -> Result<Self, anyhow::Error> {
+        Self::open_cancellable(
+            members,
+            master_gain,
+            protection,
+            autogain_trim,
+            from_secs,
+            out_rate,
+            published_peak,
+            live_mix,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_cancellable(
+        members: &[MixMember],
+        master_gain: f32,
+        protection: ClippingProtection,
+        autogain_trim: f32,
+        from_secs: f64,
+        out_rate: u32,
+        published_peak: Arc<AtomicU32>,
+        live_mix: Option<LiveMixShared>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, anyhow::Error> {
         let mut sources = Vec::with_capacity(members.len());
         for member in members {
-            let source =
-                ResampledSource::open(&member.path, from_secs, out_rate, Some(&member.model))?;
+            let source = ResampledSource::open_cancellable(
+                &member.path,
+                from_secs,
+                out_rate,
+                Some(&member.model),
+                cancel.clone(),
+            )?;
+            anyhow::ensure!(
+                member
+                    .expected_sha256
+                    .as_ref()
+                    .is_none_or(|hash| *hash == source.decoder.meta().sha256),
+                "{} changed since analysis",
+                member.path.display()
+            );
             // The matrix is the core's own, so the preview and the export place the
             // recording in the field in exactly the same way.
             let channels = source.channels as usize;
@@ -1711,5 +1874,90 @@ mod tests {
             t0.elapsed()
         );
         assert!(!player.is_playing());
+    }
+    #[test]
+    fn final_beta_fractional_onset_matches_export() {
+        use stagesync_core::{
+            audio::{WavFormat, WavReader, WavWriter},
+            render::{render_reference_timeline, RenderOptions},
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        for channels in [1, 2] {
+            let path = dir.path().join("source.wav");
+            let mut w = WavWriter::create(&path, 8000, channels, WavFormat::Float32).unwrap();
+            w.write_planar(&vec![vec![0.8; 16000]; channels]).unwrap();
+            w.finalize().unwrap();
+            for offset in [2.0, -0.3, 0.1250625] {
+                let model = LinearModel::new(1.0, offset);
+                let out = dir.path().join("export.wav");
+                render_reference_timeline(&path, &model, 4.0, &out, &RenderOptions::default())
+                    .unwrap();
+                for seek in [0.0, 0.75, 1.99, 2.5] {
+                    let mut source =
+                        ResampledSource::open(&path, seek, 8000, Some(&model)).unwrap();
+                    let expected = WavReader::open(&out)
+                        .unwrap()
+                        .read_frames((seek * 8000.0) as u64, 4000)
+                        .unwrap();
+                    for frame in 0..4000 {
+                        for (channel, plane) in expected.iter().enumerate() {
+                            let actual = source.next().unwrap_or(0.0);
+                            assert!((actual-plane[frame]).abs()<1e-5,"offset {offset} seek {seek} frame {frame} channel {channel}: {actual} vs {}",plane[frame]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn final_beta_preparation_is_async_and_cancellable() {
+        struct Backend;
+        impl AudioBackend for Backend {
+            fn sample_rate(&self) -> u32 {
+                8000
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn init_error(&self) -> Option<&str> {
+                None
+            }
+            fn play(&mut self, _source: AudioSource, _volume: f32) -> Result<(), String> {
+                panic!("cancelled preparation reached backend")
+            }
+            fn stop(&mut self) {}
+            fn set_volume(&mut self, _volume: f32) {}
+        }
+        let mut player = Player::with_backend(Backend);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (left_tx, left_rx) = mpsc::channel();
+        let start = Instant::now();
+        player
+            .start(
+                Voice::Reference,
+                0.0,
+                Box::new(move |cancel| {
+                    entered_tx.send(()).unwrap();
+                    while !cancel.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                    left_tx.send(()).unwrap();
+                    anyhow::bail!("cancelled slow preparation")
+                }),
+                None,
+            )
+            .unwrap();
+        assert!(start.elapsed() < Duration::from_millis(100));
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let start = Instant::now();
+        player.stop();
+        assert!(start.elapsed() < Duration::from_millis(100));
+        left_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!player.is_playing());
+        assert!(
+            player.take_error().is_none(),
+            "cancelled work leaked an error into current playback"
+        );
     }
 }

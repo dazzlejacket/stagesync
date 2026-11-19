@@ -634,12 +634,37 @@ pub fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("project");
-    let tmp = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
-    fs::write(&tmp, data).with_context(|| format!("write temporary file {}", tmp.display()))?;
-    if let Err(err) = fs::rename(&tmp, path) {
+    // Exclusive creation is essential: a pre-existing sibling can itself be a
+    // loaded recording (or an alias of one). Never truncate it, even on a retry.
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let (tmp, mut file) = loop {
+        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".{file_name}.{}.{serial}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err).context("create exclusive project staging file"),
+        }
+    };
+    let result = (|| -> Result<()> {
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
         let _ = fs::remove_file(&tmp);
-        return Err(err).with_context(|| format!("replace {}", path.display()));
     }
+    result?;
     Ok(())
 }
 

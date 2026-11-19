@@ -86,6 +86,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4.4.0
 
+      - name: Check Linux package checksums
+        if: runner.os == 'Linux'
+        run: bash packaging/linux/test_checksums.sh
+
       - name: Install the Linux build dependencies
         if: runner.os == 'Linux'
         run: |

@@ -25,6 +25,10 @@
 //! larger than a block of one recording is ever held in memory.
 
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -287,6 +291,8 @@ pub enum ContainerChoice {
 /// How the mix is written.
 #[derive(Debug, Clone)]
 pub struct MixOptions {
+    /// Interrupt whole-file preparation between reads and mix blocks.
+    pub cancel: Option<Arc<AtomicBool>>,
     /// The output sample rate; `None` means the reference's own rate.
     pub sample_rate: Option<u32>,
     /// The number of output channels: one or two.
@@ -313,6 +319,7 @@ pub struct MixOptions {
 impl Default for MixOptions {
     fn default() -> Self {
         Self {
+            cancel: None,
             sample_rate: None,
             channels: 2,
             format: WavFormat::Float32,
@@ -460,7 +467,12 @@ pub fn resolve_source(report: &AlignmentReport, name: &str) -> Result<usize> {
 /// This is an RMS measurement over the whole recording, not a perceptual loudness
 /// measurement: it applies no frequency weighting.
 pub fn measure_rms_dbfs(path: &Path) -> Result<f64> {
-    let mut decoder = AudioDecoder::open(path)?;
+    measure_rms_dbfs_cancellable(path, None)
+}
+
+/// Allow loudness preparation to be cancelled without dropping integrity checks.
+pub fn measure_rms_dbfs_cancellable(path: &Path, cancel: Option<Arc<AtomicBool>>) -> Result<f64> {
+    let mut decoder = AudioDecoder::open_cancellable(path, cancel)?;
     let mut sum = 0f64;
     let mut count = 0f64;
     decoder.for_each_block(1 << 16, |block| {
@@ -540,6 +552,16 @@ pub fn loudness_gains(
     settings: &MixSettings,
     loudness: LoudnessMatch,
 ) -> Result<(Vec<f64>, Vec<String>)> {
+    loudness_gains_cancellable(report, settings, loudness, None)
+}
+
+/// Prepare RMS gains on a cancellable worker using the export arithmetic.
+pub fn loudness_gains_cancellable(
+    report: &AlignmentReport,
+    settings: &MixSettings,
+    loudness: LoudnessMatch,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<(Vec<f64>, Vec<String>)> {
     let mut gains = vec![0.0f64; settings.tracks.len()];
     let mut notes = Vec::new();
     if loudness == LoudnessMatch::None {
@@ -550,7 +572,7 @@ pub fn loudness_gains(
         let Some(alignment) = report.sources.get(track.source_index) else {
             continue;
         };
-        let level = measure_rms_dbfs(&alignment.source.path)
+        let level = measure_rms_dbfs_cancellable(&alignment.source.path, cancel.clone())
             .with_context(|| format!("failed to measure {}", alignment.source.file_name))?;
         levels.push((track.source_index, level));
     }
@@ -645,9 +667,11 @@ fn open_tracks(
             ));
             continue;
         };
-        let decoder = AudioDecoder::open(&alignment.source.path).with_context(|| {
-            format!("failed to open {} for the mix", alignment.source.file_name)
-        })?;
+        let decoder =
+            AudioDecoder::open_cancellable(&alignment.source.path, options.cancel.clone())
+                .with_context(|| {
+                    format!("failed to open {} for the mix", alignment.source.file_name)
+                })?;
         let source_rate = decoder.meta().sample_rate;
         let source_channels = decoder.meta().channels.max(1);
         if source_channels > 2 {
@@ -747,6 +771,13 @@ fn mix_pass(
 
     let mut start = 0u64;
     while start < total_frames {
+        if options
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            anyhow::bail!("mix preparation cancelled");
+        }
         let end = (start + block as u64).min(total_frames);
         let count = (end - start) as usize;
         left[..count].fill(0.0);

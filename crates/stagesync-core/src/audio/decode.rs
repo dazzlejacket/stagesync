@@ -12,6 +12,10 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,7 +28,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
-use super::hash::sha256_file;
+use super::hash::sha256_file_cancellable;
 
 /// Static description of an ingested source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,11 +117,17 @@ pub struct AudioDecoder {
     eof: bool,
     /// Frames the container claims it holds (may be `None` for streaming formats).
     expected_frames: Option<u64>,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl AudioDecoder {
     /// Probe and open a media file for sequential decoding.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_cancellable(path, None)
+    }
+
+    /// Hash and decode on a worker, observing cancellation between bounded reads.
+    pub fn open_cancellable(path: &Path, cancel: Option<Arc<AtomicBool>>) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("failed to open audio file: {}", path.display()))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -186,7 +196,7 @@ impl AudioDecoder {
         let codec_name = human_codec_name(codec_info.short_name, codec_info.long_name);
 
         let byte_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        let sha256 = sha256_file(path)?;
+        let sha256 = sha256_file_cancellable(path, cancel.as_deref())?;
 
         let float_format = matches!(sample_format.as_deref(), Some("f32") | Some("f64"));
         let mut meta = SourceMeta {
@@ -225,6 +235,7 @@ impl AudioDecoder {
             pending_frames: 0,
             eof: false,
             expected_frames,
+            cancel,
         })
     }
 
@@ -283,6 +294,13 @@ impl AudioDecoder {
 
         // Decode forward to the requested frame, dropping what comes before it.
         while self.frames_decoded < frame {
+            if self
+                .cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                anyhow::bail!("audio preparation cancelled");
+            }
             let before_packet = self.frames_decoded;
             self.decode_next_packet()?;
             let produced = self.frames_decoded - before_packet;
@@ -306,6 +324,13 @@ impl AudioDecoder {
     ///
     /// Returns `None` at end of stream. The returned block is guaranteed to be non-empty.
     pub fn read_block(&mut self, min_frames: usize) -> Result<Option<DecodedBlock>> {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            anyhow::bail!("audio preparation cancelled");
+        }
         let min_frames = min_frames.max(1);
         while self.pending_frames < min_frames && !self.eof {
             self.decode_next_packet()?;

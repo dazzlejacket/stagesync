@@ -96,6 +96,38 @@ impl Envelope {
         ((t * self.rate_hz).round() as i64).clamp(0, self.len() as i64 - 1) as usize
     }
 
+    /// Put features on a shared physical-time grid before correlation. Sample hops
+    /// are rounded independently per file, so equal nominal hops are not equal clocks.
+    pub fn at_rate(&self, rate_hz: f64) -> Self {
+        let len = if self.is_empty() {
+            0
+        } else {
+            (((self.len() - 1) as f64 * rate_hz / self.rate_hz).floor() as usize) + 1
+        };
+        let interpolate = |values: &[f32], position: f64| {
+            let lo = (position.floor() as usize).min(values.len() - 1);
+            let hi = (lo + 1).min(values.len() - 1);
+            let f = (position - lo as f64) as f32;
+            values[lo] * (1.0 - f) + values[hi] * f
+        };
+        let mut result = self.clone();
+        result.rate_hz = rate_hz;
+        result.db = (0..len)
+            .map(|i| interpolate(&self.db, i as f64 * self.rate_hz / rate_hz))
+            .collect();
+        result.norm = (0..len)
+            .map(|i| interpolate(&self.norm, i as f64 * self.rate_hz / rate_hz))
+            .collect();
+        result.quiet = (0..len)
+            .map(|i| {
+                let index = ((i as f64 * self.rate_hz / rate_hz).round() as usize)
+                    .min(self.quiet.len() - 1);
+                self.quiet[index]
+            })
+            .collect();
+        result
+    }
+
     /// Fraction of frames that are not marked quiet.
     pub fn active_fraction(&self) -> f64 {
         if self.quiet.is_empty() {
@@ -175,7 +207,7 @@ impl EnvelopeExtractor {
 
     /// Finalise the envelope: compute the noise floor, quiet flags and local z-score.
     pub fn finish(self) -> Envelope {
-        let rate_hz = 1000.0 / self.config.hop_ms;
+        let rate_hz = self.sample_rate as f64 / self.hop_len as f64;
         let db = self.db;
 
         // Noise floor: a low percentile of the frame levels, so that it lands on genuine

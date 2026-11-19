@@ -107,6 +107,9 @@ pub struct CoarseLock {
 
 /// Attempt the coarse global lock of `source` against `reference`.
 pub fn coarse_lock(source: &Envelope, reference: &Envelope, config: &CoarseConfig) -> CoarseLock {
+    if (source.rate_hz - reference.rate_hz).abs() > 1e-9 {
+        return coarse_lock(&source.at_rate(reference.rate_hz), reference, config);
+    }
     let dec = config.decimation.max(1);
     let src_dec = decimate(&source.norm, dec);
     let ref_dec = decimate(&reference.norm, dec);

@@ -86,6 +86,21 @@ struct RunningJob {
     cancel: Arc<AtomicBool>,
 }
 
+type PreviewResult = Result<(Vec<f64>, f32), String>;
+
+struct PreviewJob {
+    session_gen: u64,
+    key: u64,
+    cancel: Arc<AtomicBool>,
+    rx: Receiver<PreviewResult>,
+}
+
+impl Drop for PreviewJob {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 /// The figures of one source, copied out of the report.
 ///
 /// The copy lets the detail panel offer buttons that change the report without holding
@@ -157,10 +172,10 @@ pub struct StageSyncApp {
     /// The player: the reference, the corrected recording, and the switch between
     /// them.
     player: Player,
-    /// Per-path cached RMS dBFS levels for loudness-matched mix preview.
-    rms_cache: HashMap<PathBuf, f64>,
     /// Cached two-pass AutoGain trim (`(mix_hash_key, trim)`).
     autogain_cache: Option<(u64, f32)>,
+    preview_levels: Option<(u64, Vec<f64>)>,
+    preview_job: Option<PreviewJob>,
     /// The waveform peaks of each recording, by path.
     ///
     /// The peaks are built on a thread of their own, because building them means
@@ -266,8 +281,9 @@ impl StageSyncApp {
             rx,
             voice: Voice::Reference,
             player: Player::new(),
-            rms_cache: HashMap::new(),
             autogain_cache: None,
+            preview_levels: None,
+            preview_job: None,
             peaks: HashMap::new(),
             peaks_pending: 0,
             view_start: 0.0,
@@ -446,9 +462,11 @@ impl StageSyncApp {
     /// Advance `session_gen` and cancel active jobs so stale workers from any prior
     /// project or reset workspace can never write into the new session.
     fn invalidate_session(&mut self) {
+        self.preview_job = None;
+        self.preview_levels = None;
+        self.stop_playback();
         self.session_gen = self.session_gen.wrapping_add(1).max(1);
         self.latest_probe_jobs.clear();
-        self.rms_cache.clear();
         self.autogain_cache = None;
         self.cancel_active_jobs();
     }
@@ -513,6 +531,7 @@ impl StageSyncApp {
 
     /// Apply everything the background workers have reported since the last frame.
     fn drain_events(&mut self) {
+        self.poll_preview();
         while let Ok(ScopedJobEvent { scope, event }) = self.rx.try_recv() {
             if scope.session_gen != self.session_gen {
                 continue;
@@ -789,7 +808,6 @@ impl StageSyncApp {
 
         if invalidated_ref {
             self.cancel_active_jobs();
-            self.rms_cache.remove(&path);
             self.autogain_cache = None;
             self.report = None;
             self.export_outcome = None;
@@ -802,7 +820,6 @@ impl StageSyncApp {
             );
         } else if let Some(idx) = invalidated_target {
             self.cancel_active_jobs();
-            self.rms_cache.remove(&path);
             self.autogain_cache = None;
             self.report = None;
             self.export_outcome = None;
@@ -1170,7 +1187,7 @@ impl StageSyncApp {
         source_path: Option<PathBuf>,
     ) {
         self.invalidate_session();
-        self.player.stop();
+        self.stop_playback();
         self.peaks.clear();
         self.peaks_pending = 0;
         self.export_outcome = None;
@@ -1273,7 +1290,7 @@ impl StageSyncApp {
     /// Reset to a blank project.
     pub fn new_project(&mut self) {
         self.invalidate_session();
-        self.player.stop();
+        self.stop_playback();
         self.reference = None;
         self.targets.clear();
         self.anchors.clear();
@@ -1314,7 +1331,6 @@ impl StageSyncApp {
         } else if let Some(report) = self.report.as_mut() {
             report.reference.path = new_path.clone();
         }
-        self.rms_cache.remove(&new_path);
         self.autogain_cache = None;
         self.spawn_probe_and_peaks(new_path);
         self.mark_dirty();
@@ -1350,7 +1366,6 @@ impl StageSyncApp {
         {
             alignment.source.path = new_path.clone();
         }
-        self.rms_cache.remove(&new_path);
         self.autogain_cache = None;
         self.spawn_probe_and_peaks(new_path);
         self.mark_dirty();
@@ -2016,7 +2031,7 @@ impl StageSyncApp {
         let mut requested_seek: Option<f64> = None;
 
         ui.horizontal_wrapped(|ui| {
-            let playing = self.player.is_playing();
+            let playing = self.player.is_playing() || self.preview_job.is_some();
             let play_btn =
                 egui::Button::new(if playing { "Stop" } else { "Play" }).fill(if playing {
                     self.palette.playhead.gamma_multiply(0.22)
@@ -2029,7 +2044,7 @@ impl StageSyncApp {
                 .clicked()
             {
                 if playing {
-                    self.player.stop();
+                    self.stop_playback();
                 } else {
                     self.play_voice(self.voice);
                 }
@@ -2086,7 +2101,10 @@ impl StageSyncApp {
             }
 
             ui.separator();
-            ui.monospace(format_timecode(self.playhead));
+            ui.label(
+                egui::RichText::new(format!("Playhead {}", format_timecode(self.playhead)))
+                    .monospace(),
+            );
 
             if !compact_transport {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3109,8 +3127,47 @@ impl StageSyncApp {
         self.view_end = self.view_start + new_span;
     }
 
+    fn stop_playback(&mut self) {
+        self.preview_job = None;
+        self.player.stop();
+    }
+
+    fn poll_preview(&mut self) {
+        let Some(job) = &self.preview_job else {
+            return;
+        };
+        if job.session_gen != self.session_gen || job.key != self.mix_cache_key() {
+            self.preview_job = None;
+            if self.voice == Voice::Mix {
+                self.resolve_preview_mix(false);
+            }
+            return;
+        }
+        let result = match job.rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("preview preparation worker stopped unexpectedly".into())
+            }
+        };
+        let key = job.key;
+        self.preview_job = None;
+        match result {
+            Ok((levels, trim)) => {
+                self.preview_levels = Some((key, levels));
+                self.autogain_cache = Some((key, trim));
+                self.play_voice(Voice::Mix);
+            }
+            Err(error) => {
+                self.stop_playback();
+                self.last_error = Some(format!("Preview preparation failed: {error}"));
+            }
+        }
+    }
+
     /// Play one of the voices from the playhead.
     fn play_voice(&mut self, voice: Voice) {
+        self.preview_job = None;
         self.voice = voice;
         let position = self.playhead;
         let result = match voice {
@@ -3119,7 +3176,14 @@ impl StageSyncApp {
                     self.last_error = Some("There is no reference recording.".to_string());
                     return;
                 };
-                self.player.play_reference(&path, position)
+                self.player.play_reference_checked(
+                    &path,
+                    position,
+                    self.reference
+                        .as_ref()
+                        .and_then(|entry| entry.meta.as_ref())
+                        .map(|meta| meta.sha256.clone()),
+                )
             }
             Voice::Target => {
                 let Some(index) = self.selected_target_index() else {
@@ -3146,7 +3210,12 @@ impl StageSyncApp {
                     model.scale,
                     model.offset + self.nudges.get(index).copied().unwrap_or(0.0),
                 );
-                self.player.play_target(&path, &model, position)
+                self.player.play_target_checked(
+                    &path,
+                    &model,
+                    position,
+                    Some(alignment.source.sha256.clone()),
+                )
             }
             Voice::Mix => {
                 if self.mixer.mode == stagesync_core::mixer::MonitorMode::ReferenceOnly {
@@ -3156,9 +3225,19 @@ impl StageSyncApp {
                         self.last_error = Some("There is no reference recording.".to_string());
                         return;
                     };
-                    self.player.play_reference(&path, position)
+                    self.player.play_reference_checked(
+                        &path,
+                        position,
+                        self.reference
+                            .as_ref()
+                            .and_then(|entry| entry.meta.as_ref())
+                            .map(|meta| meta.sha256.clone()),
+                    )
                 } else {
-                    let members = self.mix_members();
+                    let (members, trim) = self.resolve_preview_mix(true);
+                    if self.preview_job.is_some() {
+                        return;
+                    }
                     if members.is_empty() {
                         self.last_error = Some(
                             "There is nothing to mix: run the analysis and choose the \
@@ -3169,7 +3248,6 @@ impl StageSyncApp {
                     }
                     let master = self.mixer.master_gain;
                     let protection = self.settings.protection;
-                    let trim = self.preview_autogain_trim();
                     self.player
                         .play_mix(&members, master, protection, trim, position)
                 }
@@ -3181,46 +3259,10 @@ impl StageSyncApp {
                 self.notice = Some(format!("Playing the {}.", voice.label().to_lowercase()));
             }
             Err(error) => {
-                self.player.stop();
+                self.stop_playback();
                 self.last_error = Some(format!("Playback failed: {error:#}"));
             }
         }
-    }
-
-    /// Compute cached per-track RMS loudness adjustments matching [`stagesync_core::mixer::loudness_gains`].
-    fn loudness_gains_for_mixer(&mut self) -> Vec<f64> {
-        let mut gains = vec![0.0f64; self.mixer.tracks.len()];
-        if self.settings.loudness == stagesync_core::mixer::LoudnessMatch::None {
-            return gains;
-        }
-        let Some(report) = self.report.as_ref() else {
-            return gains;
-        };
-        let mut levels: Vec<(usize, f64)> = Vec::new();
-        for track in &self.mixer.tracks {
-            let Some(alignment) = report.sources.get(track.source_index) else {
-                continue;
-            };
-            let level = if let Some(&cached) = self.rms_cache.get(&alignment.source.path) {
-                cached
-            } else if let Ok(measured) =
-                stagesync_core::mixer::measure_rms_dbfs(&alignment.source.path)
-            {
-                self.rms_cache
-                    .insert(alignment.source.path.clone(), measured);
-                measured
-            } else {
-                continue;
-            };
-            levels.push((track.source_index, level));
-        }
-        let offsets = stagesync_core::mixer::loudness_offsets_db(&levels);
-        for (idx, track) in self.mixer.tracks.iter().enumerate() {
-            if let Some((_, db)) = offsets.iter().find(|(s, _)| *s == track.source_index) {
-                gains[idx] = *db;
-            }
-        }
-        gains
     }
 
     /// Fingerprint of active mixer, loudness, protection, and nudge parameters for caching AutoGain.
@@ -3237,6 +3279,13 @@ impl StageSyncApp {
             .to_bits()
             .hash(&mut hasher);
         self.settings.sample_rate.hash(&mut hasher);
+        self.player.output_rate().hash(&mut hasher);
+        // Model, paths, hashes, frame counts and reference identity all belong to the request.
+        if let Some(report) = &self.report {
+            serde_json::to_vec(report)
+                .unwrap_or_default()
+                .hash(&mut hasher);
+        }
         for t in &self.mixer.tracks {
             t.source_index.hash(&mut hasher);
             t.enabled.hash(&mut hasher);
@@ -3260,74 +3309,140 @@ impl StageSyncApp {
         hasher.finish()
     }
 
-    /// Compute the two-pass `AutoGain` trim for preview using the exact exported mix arithmetic.
-    fn preview_autogain_trim(&mut self) -> f32 {
-        if !matches!(
-            self.settings.protection,
-            stagesync_core::mixer::ClippingProtection::AutoGain { .. }
-        ) {
-            return 1.0;
-        }
-        let key = self.mix_cache_key();
-        if let Some((cached_key, trim)) = self.autogain_cache {
-            if cached_key == key {
-                return trim;
-            }
-        }
-        let Some(base_report) = self.report.as_ref() else {
-            return 1.0;
-        };
-        let eff_report = self.effective_report_for_export(base_report);
-        let loudness_db = self.loudness_gains_for_mixer();
-        let mix_settings = self.mixer.settings();
-        let mix_opts = stagesync_core::mixer::MixOptions {
-            sample_rate: Some(
-                self.settings
-                    .sample_rate
-                    .unwrap_or_else(|| self.player.output_rate())
-                    .max(1),
-            ),
-            channels: 2,
-            format: self.settings.format,
-            protection: self.settings.protection,
-            loudness: self.settings.loudness,
-            container: self.settings.container,
-            block_frames: 65_536,
-            ..Default::default()
-        };
-        if let Ok((trim, _)) = stagesync_core::mixer::measure_autogain_trim(
-            &eff_report,
-            &mix_settings,
-            &mix_opts,
-            &loudness_db,
-        ) {
-            self.autogain_cache = Some((key, trim));
-            trim
-        } else {
-            1.0
-        }
-    }
-
-    /// Build mix members and optional auto-gain trim (`compute_autogain = false` during slider drags).
+    /// A missing processed-preview result pauses audition and schedules measurement.
+    /// Unity is never substituted for an unknown or failed protection trim.
     fn resolve_preview_mix(
         &mut self,
-        compute_autogain: bool,
+        _compute_autogain: bool,
     ) -> (Vec<crate::player::MixMember>, f32) {
-        let members = self.mix_members();
-        let trim = if compute_autogain {
-            self.preview_autogain_trim()
-        } else if matches!(
-            self.settings.protection,
-            stagesync_core::mixer::ClippingProtection::AutoGain { .. }
-        ) {
-            let key = self.mix_cache_key();
-            self.autogain_cache
-                .and_then(|(k, t)| (k == key).then_some(t))
-                .unwrap_or(1.0)
-        } else {
-            1.0
+        let key = self.mix_cache_key();
+        let processed = self.settings.loudness != stagesync_core::mixer::LoudnessMatch::None
+            || matches!(
+                self.settings.protection,
+                stagesync_core::mixer::ClippingProtection::AutoGain { .. }
+            );
+        if !processed {
+            return (self.mix_members(), 1.0);
+        }
+        if let Some((cached_key, trim)) = self.autogain_cache {
+            if cached_key == key && self.preview_levels.as_ref().is_some_and(|(k, _)| *k == key) {
+                return (self.mix_members(), trim);
+            }
+        }
+        if self.player.is_playing() {
+            self.playhead = self.player.position();
+        }
+        self.player.stop();
+        if self
+            .preview_job
+            .as_ref()
+            .is_some_and(|job| job.key == key && job.session_gen == self.session_gen)
+        {
+            return (Vec::new(), 0.0);
+        }
+        self.preview_job = None;
+        let Some(base_report) = self.report.as_ref() else {
+            return (Vec::new(), 0.0);
         };
-        (members, trim)
+        let report = self.effective_report_for_export(base_report);
+        let settings = self.mixer.settings();
+        let monitor_mode = self.mixer.mode;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let options = stagesync_core::mixer::MixOptions {
+            // Measure the samples that the device will actually audition.
+            sample_rate: Some(self.player.output_rate()),
+            channels: 2,
+            protection: self.settings.protection,
+            loudness: self.settings.loudness,
+            cancel: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        let worker_cancel = Arc::clone(&cancel);
+        let spawn = std::thread::Builder::new()
+            .name("stagesync-preview-measure".into())
+            .spawn(move || {
+                let result = (|| -> anyhow::Result<(Vec<f64>, f32)> {
+                    let verify = || -> anyhow::Result<()> {
+                        for meta in std::iter::once(&report.reference)
+                            .chain(report.sources.iter().map(|s| &s.source))
+                        {
+                            let hash = stagesync_core::audio::hash::sha256_file_cancellable(
+                                &meta.path,
+                                Some(&worker_cancel),
+                            )?;
+                            anyhow::ensure!(
+                                hash == meta.sha256
+                                    && std::fs::metadata(&meta.path)?.len() == meta.byte_len,
+                                "{} changed since analysis; analyze again before auditioning",
+                                meta.path.display()
+                            );
+                        }
+                        Ok(())
+                    };
+                    verify()?;
+                    let (levels, _) = stagesync_core::mixer::loudness_gains_cancellable(
+                        &report,
+                        &settings,
+                        options.loudness,
+                        Some(Arc::clone(&worker_cancel)),
+                    )?;
+                    let trim = if matches!(
+                        options.protection,
+                        stagesync_core::mixer::ClippingProtection::AutoGain { .. }
+                    ) {
+                        let monitored = stagesync_core::mixer::MixSettings {
+                            tracks: stagesync_core::mixer::MixSettings::for_mode(
+                                monitor_mode,
+                                &settings.tracks,
+                            ),
+                            master_gain: settings.master_gain,
+                        };
+                        let monitored_levels: Vec<_> = monitored
+                            .tracks
+                            .iter()
+                            .map(|track| {
+                                settings
+                                    .tracks
+                                    .iter()
+                                    .position(|t| t.source_index == track.source_index)
+                                    .map_or(0.0, |index| levels[index])
+                            })
+                            .collect();
+                        stagesync_core::mixer::measure_autogain_trim(
+                            &report,
+                            &monitored,
+                            &options,
+                            &monitored_levels,
+                        )?
+                        .0
+                    } else {
+                        1.0
+                    };
+                    verify()?;
+                    Ok((levels, trim))
+                })()
+                .map_err(|error| format!("{error:#}"));
+                let _ = tx.send(result);
+            });
+        match spawn {
+            Ok(_) => {
+                self.preview_job = Some(PreviewJob {
+                    session_gen: self.session_gen,
+                    key,
+                    cancel,
+                    rx,
+                });
+                self.notice = Some(
+                    "Preparing processed preview: measuring levels and protection. Stop cancels."
+                        .into(),
+                );
+            }
+            Err(error) => {
+                self.last_error = Some(format!("Cannot start preview preparation: {error}"))
+            }
+        }
+        (Vec::new(), 0.0)
     }
 
     /// The recordings the mixer plays, with their corrections and RMS loudness matching.
@@ -3335,7 +3450,13 @@ impl StageSyncApp {
     /// The reference is never among them: it is the thing the other recordings were
     /// aligned to, and mixing it in would double every one of them.
     fn mix_members(&mut self) -> Vec<crate::player::MixMember> {
-        let loudness_db = self.loudness_gains_for_mixer();
+        let key = self.mix_cache_key();
+        let loudness_db = self
+            .preview_levels
+            .as_ref()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, levels)| levels.clone())
+            .unwrap_or_else(|| vec![0.0; self.mixer.tracks.len()]);
         let Some(report) = self.report.as_ref() else {
             return Vec::new();
         };
@@ -3364,6 +3485,7 @@ impl StageSyncApp {
                 .unwrap_or(0.0);
             let mut member =
                 crate::player::MixMember::from_track(alignment.source.path.clone(), model, &track);
+            member.expected_sha256 = Some(alignment.source.sha256.clone());
             member.gain = track.effective_gain(solo_active)
                 * stagesync_core::mixer::db_to_linear(track_loudness_db);
             members.push(member);
@@ -4209,7 +4331,11 @@ impl StageSyncApp {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
-        if self.running.is_some() || self.peaks_pending > 0 || self.verifying {
+        if self.running.is_some()
+            || self.peaks_pending > 0
+            || self.verifying
+            || self.preview_job.is_some()
+        {
             ui.ctx().request_repaint();
         } else if self.player.is_playing() {
             ui.ctx()
@@ -4253,8 +4379,8 @@ impl StageSyncApp {
                 self.nudge(idx, 0.005);
             }
         } else if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            if self.player.is_playing() {
-                self.player.stop();
+            if self.player.is_playing() || self.preview_job.is_some() {
+                self.stop_playback();
             } else {
                 self.play_voice(self.voice);
             }
@@ -4329,7 +4455,7 @@ impl StageSyncApp {
     /// Seek the playhead and restart active audio playback at the new position.
     fn seek_playhead(&mut self, position: f64) {
         self.playhead = position.max(0.0);
-        if self.player.is_playing() {
+        if self.player.is_playing() || self.preview_job.is_some() {
             let voice = self.voice;
             self.play_voice(voice);
         }
@@ -5323,6 +5449,28 @@ mod tests {
         app.mixer.master_gain = 1.25;
         app.mixer.tracks[0].pan = -0.5;
         app.mixer.tracks[1].pan = 0.6;
+        struct Backend;
+        impl crate::player::AudioBackend for Backend {
+            fn sample_rate(&self) -> u32 {
+                8000
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn init_error(&self) -> Option<&str> {
+                None
+            }
+            fn play(
+                &mut self,
+                _source: Box<dyn rodio::Source<Item = f32> + Send>,
+                _volume: f32,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn stop(&mut self) {}
+            fn set_volume(&mut self, _volume: f32) {}
+        }
+        app.player = Player::with_backend(Backend);
         app.settings.sample_rate = Some(rate);
         app.settings.format = stagesync_core::audio::WavFormat::Float32;
         app.settings.loudness = stagesync_core::mixer::LoudnessMatch::MatchToLoudest;
@@ -5340,6 +5488,23 @@ mod tests {
         ] {
             app.settings.protection = protection;
             app.autogain_cache = None;
+            let started = std::time::Instant::now();
+            let (pending, trim) = app.resolve_preview_mix(true);
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(100),
+                "preparation blocked UI"
+            );
+            assert!(
+                pending.is_empty() && trim == 0.0,
+                "processed audio escaped before measurement"
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while app.preview_job.is_some() && std::time::Instant::now() < deadline {
+                app.poll_preview();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(app.preview_job.is_none(), "measurement did not complete");
+            assert!(app.last_error.is_none(), "{:?}", app.last_error);
             let (members, autogain_trim) = app.resolve_preview_mix(true);
             let preview = crate::player::collect_preview_mix_frames(
                 &members,
@@ -5394,6 +5559,106 @@ mod tests {
                     "[{tag}] clipping protection exceeded 1.0: preview={max_peak}"
                 );
             }
+            if matches!(
+                protection,
+                stagesync_core::mixer::ClippingProtection::AutoGain { .. }
+            ) {
+                app.mixer.master_gain = 20.0;
+                app.mixer.tracks[0].gain *= 2.0;
+                app.autogain_cache = None;
+                let (members, trim) = app.resolve_preview_mix(false);
+                assert!(
+                    members.is_empty() && trim == 0.0,
+                    "live edit bypassed protection"
+                );
+                assert!(
+                    !app.player.is_playing(),
+                    "audition must pause until new protection is known"
+                );
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while app.preview_job.is_some() && std::time::Instant::now() < deadline {
+                    app.poll_preview();
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                assert!(app.preview_job.is_none());
+                let (members, trim) = app.resolve_preview_mix(false);
+                assert!(!members.is_empty() && trim < autogain_trim);
+                let live = crate::player::collect_preview_mix_frames(
+                    &members,
+                    app.mixer.master_gain,
+                    protection,
+                    trim,
+                    0.0,
+                    rate,
+                    n,
+                )
+                .unwrap();
+                assert!(live.iter().flatten().all(|s| s.abs() <= 1.0));
+                let live_out = dir.path().join("live.wav");
+                stagesync_core::mixer::render_mix(
+                    &report,
+                    &app.mixer.settings(),
+                    &mix_opts,
+                    &live_out,
+                )
+                .unwrap();
+                let expected = stagesync_core::audio::WavReader::open(&live_out)
+                    .unwrap()
+                    .read_frames(0, n)
+                    .unwrap();
+                for i in 0..n {
+                    for c in 0..2 {
+                        assert!((live[i][c] - expected[c][i]).abs() < 1e-4);
+                    }
+                }
+                // A changed file must surface an error, never a unity result.
+                app.mixer.master_gain = 21.0;
+                app.autogain_cache = None;
+                std::fs::write(&report.sources[0].source.path, b"changed input").unwrap();
+                let (members, trim) = app.resolve_preview_mix(false);
+                assert!(members.is_empty() && trim == 0.0);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while app.preview_job.is_some() && std::time::Instant::now() < deadline {
+                    app.poll_preview();
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                assert!(app
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|e| e.contains("changed since analysis")));
+                assert!(!app.player.is_playing());
+            }
         }
+    }
+    #[test]
+    fn final_beta_preview_cancellation_and_session_isolation() {
+        let mut app = StageSyncApp::with_settings(AppSettings::default());
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let key = app.mix_cache_key();
+        app.preview_job = Some(PreviewJob {
+            session_gen: app.session_gen,
+            key,
+            cancel: Arc::clone(&cancel),
+            rx,
+        });
+        app.stop_playback();
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(tx.send(Ok((vec![], 0.01))).is_err());
+        assert!(app.autogain_cache.is_none());
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.preview_job = Some(PreviewJob {
+            session_gen: app.session_gen,
+            key,
+            cancel: Arc::clone(&cancel),
+            rx,
+        });
+        tx.send(Ok((vec![], 0.01))).unwrap();
+        app.invalidate_session();
+        app.poll_preview();
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(app.autogain_cache.is_none());
+        assert!(!app.player.is_playing());
     }
 }

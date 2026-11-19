@@ -533,9 +533,6 @@ for artefact in "${appimage}" "${deb}" "${tarball}"; do
     ( cd "${dist_dir}" && sha256sum "$(basename "${artefact}")" ) >> "${checksums}"
   fi
 done
-if [ -s "${checksums}" ]; then
-  mv "${checksums}" "${dist_dir}/SHA256SUMS.txt"
-fi
 
 # --- what was written ----------------------------------------------------------
 
