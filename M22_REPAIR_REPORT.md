@@ -17,7 +17,7 @@
 | Real concert CLI export | `.\target\release\stagesync.exe export` (`combined.wav` + `Voice 005` + `Voice 006` -> `out\real-concert-check`) | 0 | Finished in 59.8 s; Voice 005 (`+16.061 ppm`, `142/160` hold-out trusted, `p50 +2.126 ms`, `max 6.948 ms`); Voice 006 (`+16.386 ppm`, `104/134` hold-out trusted, `p50 +2.180 ms`, `max 8.680 ms`) |
 | Independent Python verifier (`Voice 005`) | `verify_exports.py --no-pitch` (`offset=317.3893364060632`, `scale=1.0000160608159037`) | 0 | `23/30` trusted (1 disputed, 6 untrusted), `|residual| p50 0.000 ms`, `p95 0.074 ms`, `max 1.901 ms` |
 | Independent Python verifier (`Voice 006`) | `verify_exports.py --no-pitch` (`offset=5753.314004933`, `scale=1.000016385581`) | 0 | `16/24` trusted (3 disputed, 5 untrusted), `|residual| p50 0.061 ms`, `p95 0.390 ms`, `max 1.183 ms` |
-| Original read-only media SHA-256 check | `Get-FileHash "C:\Users\grego\Documents\Codex Projects\SynkerClean\audio\*" -Algorithm SHA256` | 0 | Identical before & after: `combined.wav` (`048B29F3...`), `Voice 005` (`ED9A8E17...`), `Voice 006` (`DC57EAF5...`) |
+| Original read-only media SHA-256 check | `Get-FileHash "<repo>\audio\*" -Algorithm SHA256` | 0 | Identical before & after: `combined.wav` (`048B29F3...`), `Voice 005` (`ED9A8E17...`), `Voice 006` (`DC57EAF5...`) |
 | Windows packaging (`WindowsApps` first on `PATH`) | `.\packaging\windows\build.ps1 -Profile release -OutputDir out/win-pkg-test` + `check_nsi.py` | 0 | Portable ZIP `stagesync-0.1.0-windows-x64-portable.zip` built (`SHA-256: fa77c67e85ea4edc13fbe408c85e918c5f9054e67c37dc8aab698c3d113b7a3d`), 513 package notices generated; `check_nsi.py`: no problems found; NSIS skipped (`makensis` absent) |
 
 ### Exact Cold-Run Test Counts by Crate & Binary
