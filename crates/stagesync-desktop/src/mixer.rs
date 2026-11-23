@@ -7,7 +7,9 @@
 //!
 //! * **The reference is never a track.** It is the thing the other recordings were
 //!   aligned to; it can be *monitored*, but mixing it into the output would double
-//!   every recording.
+//!   every recording. It does get a pan, because a recording that can be listened to
+//!   can be placed in the field — but the pan changes what is heard and not what is
+//!   written.
 //! * **The level that is shown is a prediction, and says so.** The prediction is
 //!   built from the measured peak of each recording, so it is an upper bound: it
 //!   assumes every recording reaches its peak at the same instant. It is exactly
@@ -35,11 +37,28 @@ pub struct TrackInfo {
     pub channels: usize,
 }
 
+/// What the panel needs to know about the reference recording.
+#[derive(Debug, Clone)]
+pub struct ReferenceInfo {
+    /// The reference recording's file name, when there is one.
+    pub name: Option<String>,
+    /// How many channels the reference has.
+    pub channels: usize,
+}
+
 /// The state of the mixer.
 #[derive(Debug, Clone)]
 pub struct MixerState {
     /// One track per target recording, in the order of the target list.
     pub tracks: Vec<MixTrack>,
+    /// The pan position of the reference recording: `-1` is hard left and `+1`
+    /// is hard right.
+    ///
+    /// The reference is **monitored**, never mixed, so this control places the
+    /// reference in the field while it is being listened to. It never changes
+    /// the exported mix: the reference is not a track of the mix, and the
+    /// reference soundtrack is never altered.
+    pub reference_pan: f32,
     /// What is being listened to.
     pub mode: MonitorMode,
     /// The master fader, as a linear gain.
@@ -56,6 +75,7 @@ impl Default for MixerState {
     fn default() -> Self {
         Self {
             tracks: Vec::new(),
+            reference_pan: 0.0,
             mode: MonitorMode::Both,
             master_gain: 1.0,
             last_peak: None,
@@ -170,7 +190,17 @@ pub fn peak_of(cache: &PeakCache) -> f32 {
 /// The panel draws one row per recording: its name, its fader, its pan, its mute
 /// and solo buttons and its meter. Above the rows are the monitoring mode, the
 /// master fader and the predicted level of the whole mix.
-pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
+///
+/// The reference has a row of its own with a pan on it. It is **not** a track of
+/// the mix — there is no "in mix" checkbox and no fader for it — but it is
+/// monitored, and a recording that can be listened to can be placed in the
+/// field.
+pub fn panel(
+    ui: &mut egui::Ui,
+    state: &mut MixerState,
+    infos: &[TrackInfo],
+    reference: Option<&ReferenceInfo>,
+) {
     let palette = Palette::for_mode(ui.visuals().dark_mode);
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_label("Monitor")
@@ -251,6 +281,14 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
     }
 
     ui.separator();
+
+    // The reference is monitored on its own, so it gets a row with a pan on it.
+    // It is never a track of the mix, so it gets no "in mix" checkbox, no fader
+    // and no solo button: the level it is heard at is the level it was recorded
+    // at.
+    if let Some(reference) = reference {
+        reference_row(ui, state, reference, &palette);
+    }
 
     if state.tracks.is_empty() {
         ui.label("There are no recordings to mix.");
@@ -415,6 +453,81 @@ pub fn panel(ui: &mut egui::Ui, state: &mut MixerState, infos: &[TrackInfo]) {
     }
 }
 
+/// Draw the row of the reference recording.
+///
+/// The row carries a pan and nothing else. The reference is never a track of the
+/// mix, so there is no fader to move and nothing to mute — the level it is
+/// heard at is the level it was recorded at — but it *is* monitored, and a
+/// recording that can be heard can be placed in the field.
+fn reference_row(
+    ui: &mut egui::Ui,
+    state: &mut MixerState,
+    info: &ReferenceInfo,
+    palette: &Palette,
+) {
+    egui::Frame::new()
+        .fill(palette.bg_surface)
+        .stroke(Stroke::new(1.0, palette.border_subtle))
+        .corner_radius(3.0)
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong("Reference");
+                if let Some(name) = &info.name {
+                    ui.label(name.clone());
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.monospace(pan_label(state.reference_pan));
+                });
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                let mut pan = state.reference_pan;
+                let slider = ui
+                    .add(
+                        egui::Slider::new(&mut pan, -1.0..=1.0)
+                            .suffix(" pan")
+                            .text("Reference pan"),
+                    )
+                    .on_hover_text(
+                        "Move the reference in the stereo field. At the centre it is heard \
+                         exactly as it was recorded.",
+                    );
+                if slider.changed() {
+                    state.reference_pan = pan;
+                }
+            });
+
+            if info.channels > 2 {
+                ui.colored_label(
+                    palette.warn,
+                    format!(
+                        "This reference has {} channels, so it keeps all of them: the field \
+                         has two sides.",
+                        info.channels
+                    ),
+                );
+            } else {
+                ui.colored_label(
+                    palette.text_muted,
+                    "Monitored only: the reference is never part of the exported mix.",
+                );
+            }
+        });
+}
+
+/// How a pan position is shown.
+fn pan_label(pan: f32) -> String {
+    let pan = pan.clamp(-1.0, 1.0);
+    if pan.abs() < 0.005 {
+        "Centre".to_string()
+    } else if pan < 0.0 {
+        format!("Left {:.0}%", -pan * 100.0)
+    } else {
+        format!("Right {:.0}%", pan * 100.0)
+    }
+}
+
 /// Draw a level meter.
 fn meter(ui: &mut egui::Ui, peak: f32, palette: &Palette) {
     let height = 10.0;
@@ -534,6 +647,34 @@ mod tests {
         assert!(
             left > right,
             "the recording was not panned left: {left} and {right}"
+        );
+    }
+
+    #[test]
+    fn the_reference_can_be_panned_without_becoming_a_track_of_the_mix() {
+        let mut state = MixerState::new(2);
+        state.reference_pan = -1.0;
+
+        // The pan is the reference's own: it does not add a track to the mix, and
+        // the settings the exporter reads do not carry it.
+        let settings = state.settings();
+        assert_eq!(
+            settings.tracks.len(),
+            2,
+            "the reference became a track of the mix"
+        );
+        assert!(
+            settings.tracks.iter().all(|t| t.source_index < 2),
+            "a track outside the recordings was exported"
+        );
+        assert!(
+            state.monitored().iter().all(|t| t.source_index < 2),
+            "a track outside the recordings was monitored"
+        );
+        assert!(
+            (state.reference_pan + 1.0).abs() < 1e-9,
+            "the reference pan was not kept: {}",
+            state.reference_pan
         );
     }
 

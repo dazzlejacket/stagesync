@@ -1239,6 +1239,7 @@ impl StageSyncApp {
         self.mixer.mode = proj.mixer.mode;
         self.mixer.master_gain = proj.mixer.master_gain;
         self.mixer.tracks = proj.mixer.tracks;
+        self.mixer.reference_pan = proj.mixer.reference_pan;
         self.mixer.sync_to(self.targets.len());
 
         self.settings = proj.export.to_export_settings(&self.mixer);
@@ -2902,13 +2903,34 @@ impl StageSyncApp {
             })
             .collect();
 
-        let before_mix = serde_json::to_string(&self.mixer.settings()).ok();
-        crate::mixer::panel(ui, &mut self.mixer, &infos);
-        let after_mix = serde_json::to_string(&self.mixer.settings()).ok();
+        // The reference is monitored on its own, so the panel is told about it
+        // separately: it is never one of the tracks of the mix.
+        let reference_info = self
+            .reference
+            .as_ref()
+            .map(|entry| crate::mixer::ReferenceInfo {
+                name: Some(entry.name()),
+                channels: entry.meta.as_ref().map(|meta| meta.channels).unwrap_or(1),
+            });
+
+        // The reference pan is part of the mixer's state even though it is not
+        // part of the mix, so it is watched for changes on its own.
+        let before_mix = (
+            serde_json::to_string(&self.mixer.settings()).ok(),
+            self.mixer.reference_pan,
+        );
+        crate::mixer::panel(ui, &mut self.mixer, &infos, reference_info.as_ref());
+        let after_mix = (
+            serde_json::to_string(&self.mixer.settings()).ok(),
+            self.mixer.reference_pan,
+        );
         if before_mix != after_mix {
             self.autogain_cache = None;
             self.mark_dirty();
         }
+        // The reference's pan takes effect while the reference is being listened
+        // to, the way the pans of the recordings in the mix do.
+        self.player.set_reference_pan(self.mixer.reference_pan);
         if self.player.is_playing() && self.player.voice() == Some(crate::player::Voice::Mix) {
             let (live_members, autogain_trim) = self.resolve_preview_mix(false);
             self.player.update_live_mix(
@@ -3183,6 +3205,7 @@ impl StageSyncApp {
                         .as_ref()
                         .and_then(|entry| entry.meta.as_ref())
                         .map(|meta| meta.sha256.clone()),
+                    self.mixer.reference_pan,
                 )
             }
             Voice::Target => {
@@ -3232,6 +3255,7 @@ impl StageSyncApp {
                             .as_ref()
                             .and_then(|entry| entry.meta.as_ref())
                             .map(|meta| meta.sha256.clone()),
+                        self.mixer.reference_pan,
                     )
                 } else {
                     let (members, trim) = self.resolve_preview_mix(true);
@@ -4985,7 +5009,10 @@ mod tests {
     ///
     /// The environment variable that says where the settings live is
     /// process-wide, so only one test may point it somewhere else at a time.
-    static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// It is the same lock the platform's own tests take, so that a test that
+    /// reads the configuration directory does not read it while another test is
+    /// moving it.
+    use crate::platform::SETTINGS_LOCK;
 
     /// A guard that points the settings at a temporary folder.
     ///

@@ -15,6 +15,8 @@
 //!
 //! The reference is **never** altered. It is read, resampled to the output
 //! device's rate so that the two can be compared sample for sample, and played.
+//! The only thing the mixer does to it is place it in the stereo field while it
+//! is being monitored, which changes what is heard and not what is on disk.
 
 use std::collections::VecDeque;
 use std::num::NonZero;
@@ -27,7 +29,7 @@ use std::time::{Duration, Instant};
 use rodio::{DeviceSinkBuilder, Player as RodioPlayer, Source};
 use stagesync_core::audio::AudioDecoder;
 use stagesync_core::matching::LinearModel;
-use stagesync_core::mixer::{ClippingProtection, MixTrack, PanMatrix};
+use stagesync_core::mixer::{ClippingProtection, MixTrack, PanLaw, PanMatrix, StereoPan};
 use stagesync_core::resample::StreamingResampler;
 
 /// The resampling quality, the same filter the renderer uses.
@@ -371,6 +373,11 @@ pub struct Player {
     volume: f32,
     /// The loudest sample the mix has produced, shared with the playing source.
     mix_peak: Arc<AtomicU32>,
+    /// The pan the reference is played with, shared with the playing source.
+    ///
+    /// It is shared so that the control can be moved while the reference is
+    /// playing, the way the pans of the recordings in the mix can be.
+    reference_pan: Arc<AtomicU32>,
 }
 
 impl Default for Player {
@@ -430,6 +437,7 @@ impl Player {
             rate: rate.max(1),
             volume: 1.0,
             mix_peak: Arc::new(AtomicU32::new(0)),
+            reference_pan: Arc::new(AtomicU32::new(0f32.to_bits())),
         }
     }
 
@@ -522,6 +530,14 @@ impl Player {
         false
     }
 
+    /// Move the reference in the stereo field, without interrupting the playback.
+    ///
+    /// The reference is monitored on its own, so this is the way its pan takes
+    /// effect while it is being listened to.
+    pub fn set_reference_pan(&self, pan: f32) {
+        self.reference_pan.store(pan.to_bits(), Ordering::Relaxed);
+    }
+
     /// Push live master/track mix parameter updates without restarting the stream.
     pub fn update_live_mix(
         &self,
@@ -579,18 +595,28 @@ impl Player {
 
     /// Play the reference recording from a position on the reference timeline.
     pub fn play_reference(&mut self, path: &Path, from_secs: f64) -> Result<(), anyhow::Error> {
-        self.play_reference_checked(path, from_secs, None)
+        self.play_reference_checked(path, from_secs, None, 0.0)
     }
 
+    /// Play the reference recording, placed in the stereo field.
+    ///
+    /// `pan` is `-1` for hard left and `+1` for hard right. The reference is
+    /// monitored, never mixed: the pan places it in the field while it is being
+    /// listened to and changes nothing about the recording itself.
     pub(crate) fn play_reference_checked(
         &mut self,
         path: &Path,
         from_secs: f64,
         expected: Option<String>,
+        pan: f32,
     ) -> Result<(), anyhow::Error> {
         let rate = self.rate;
         let path = path.to_path_buf();
         let from_secs = from_secs.max(0.0);
+        // The pan is shared with the playing source, so the control can be moved
+        // while the reference is playing.
+        self.reference_pan.store(pan.to_bits(), Ordering::Relaxed);
+        let reference_pan = Arc::clone(&self.reference_pan);
         self.start(
             Voice::Reference,
             from_secs,
@@ -603,7 +629,17 @@ impl Player {
                         .is_none_or(|hash| *hash == source.decoder.meta().sha256),
                     "reference changed since analysis"
                 );
-                Ok(Box::new(source))
+                // The reference is played as it is, and the pan only places it in
+                // the field. A reference with more than two channels keeps all of
+                // them: the field has two sides, and dropping a channel would be
+                // losing material.
+                let channels = source.channels as usize;
+                let source: AudioSource = if channels <= 2 {
+                    Box::new(PannedSource::new(source, reference_pan))
+                } else {
+                    Box::new(source)
+                };
+                Ok(source)
             }),
             None,
         )
@@ -1133,6 +1169,114 @@ impl Source for ResampledSource {
     }
 }
 
+/// A recording, placed in the stereo field.
+///
+/// This is the reference's path through the mixer: the reference is monitored on
+/// its own, and the pan places it in the field while it is being listened to.
+///
+/// The matrix is the core's own **balance**, the one curve that leaves the
+/// centre untouched: at the centre a stereo reference keeps its two channels
+/// exactly as they were, and a mono reference is heard in both sides exactly as
+/// the output device would have heard it. The reference is played as it is
+/// unless the user moves the pan.
+struct PannedSource {
+    /// The recording itself.
+    source: ResampledSource,
+    /// The pan the recording is played with, shared with the interface.
+    pan: Arc<AtomicU32>,
+    /// The matrix the shared pan currently describes.
+    matrix: PanMatrix,
+    /// The pan the matrix was built from.
+    matrix_pan: f32,
+    /// The recording's current frame, in its own channels.
+    frame: Vec<f32>,
+    /// The interleaved stereo output, waiting to be played.
+    ready: VecDeque<f32>,
+}
+
+impl PannedSource {
+    /// Place a recording in the field.
+    fn new(source: ResampledSource, pan: Arc<AtomicU32>) -> Self {
+        let matrix_pan = f32::from_bits(pan.load(Ordering::Relaxed));
+        let matrix = Self::matrix_for(matrix_pan);
+        let channels = source.channels as usize;
+        Self {
+            source,
+            pan,
+            matrix,
+            matrix_pan,
+            frame: vec![0.0; channels.max(1)],
+            ready: VecDeque::new(),
+        }
+    }
+
+    /// The matrix that places the reference in the field.
+    ///
+    /// The balance curve is the one that leaves the centre untouched, which is
+    /// what the reference needs: it must be heard as it was recorded until the
+    /// user says otherwise.
+    fn matrix_for(pan: f32) -> PanMatrix {
+        PanMatrix::for_source(2, pan, PanLaw::EqualPower, StereoPan::Balance)
+    }
+
+    /// Produce the next pair of output samples.
+    fn fill(&mut self) -> bool {
+        // The pan is read for every frame, so the control can be moved while the
+        // recording is playing.
+        let pan = f32::from_bits(self.pan.load(Ordering::Relaxed));
+        if pan != self.matrix_pan {
+            self.matrix = Self::matrix_for(pan);
+            self.matrix_pan = pan;
+        }
+        if !self.source.next_frame(&mut self.frame) {
+            return false;
+        }
+        let left = self.frame.first().copied().unwrap_or(0.0);
+        // A mono recording is placed in the field as a pair, exactly as the
+        // output device would have done with it.
+        let right = self.frame.get(1).copied().unwrap_or(left);
+        let mut out = [0f32; 2];
+        self.matrix.apply(&[left, right], &mut out);
+        self.ready.push_back(out[0]);
+        self.ready.push_back(out[1]);
+        true
+    }
+}
+
+impl Iterator for PannedSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        loop {
+            if let Some(sample) = self.ready.pop_front() {
+                return Some(sample);
+            }
+            if !self.fill() {
+                return None;
+            }
+        }
+    }
+}
+
+impl Source for PannedSource {
+    fn current_span_len(&self) -> Option<usize> {
+        // The number of channels and the rate never change.
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        NonZero::new(2).unwrap_or(NonZero::new(1).expect("one is not zero"))
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.source.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.source.total_duration()
+    }
+}
+
 /// One recording of the mix, read at the output's rate.
 struct MixMemberSource {
     /// The recording itself.
@@ -1453,6 +1597,147 @@ mod tests {
             .write_planar(std::slice::from_ref(&samples))
             .expect("write");
         writer.finalize().expect("finalise");
+    }
+
+    /// A stereo tone whose two channels carry the same signal.
+    fn stereo_tone(path: &Path, rate: u32, secs: f64, freq: f64) {
+        let n = (secs * rate as f64).round() as usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                (2.0 * std::f64::consts::PI * freq * t as f64).sin() as f32 * 0.5
+            })
+            .collect();
+        let mut writer = WavWriter::create(path, rate, 2, WavFormat::Float32).expect("create");
+        writer
+            .write_planar(&[samples.clone(), samples])
+            .expect("write");
+        writer.finalize().expect("finalise");
+    }
+
+    /// The shared pan handle, as the player holds it.
+    fn pan_handle(pan: f32) -> Arc<AtomicU32> {
+        Arc::new(AtomicU32::new(pan.to_bits()))
+    }
+
+    #[test]
+    fn the_reference_is_heard_as_it_is_when_it_is_in_the_centre() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("tone.wav");
+        let rate = 8000u32;
+        stereo_tone(&path, rate, 0.5, 220.0);
+
+        // The reference on its own, and the same reference placed in the centre
+        // of the field: the two must be the same signal.
+        let raw = ResampledSource::open(&path, 0.0, rate, None).expect("open");
+        let raw_samples: Vec<f32> = raw.collect();
+        let source = ResampledSource::open(&path, 0.0, rate, None).expect("open");
+        let panned: Vec<f32> = PannedSource::new(source, pan_handle(0.0)).collect();
+
+        assert_eq!(
+            panned.len(),
+            raw_samples.len(),
+            "the reference in the centre is not the reference any more"
+        );
+        for frame in 0..raw_samples.len() / 2 {
+            assert!(
+                (panned[frame * 2] - raw_samples[frame * 2]).abs() < 1e-6
+                    && (panned[frame * 2 + 1] - raw_samples[frame * 2 + 1]).abs() < 1e-6,
+                "the reference was changed at the centre: {} against {}",
+                panned[frame * 2],
+                raw_samples[frame * 2]
+            );
+        }
+    }
+
+    #[test]
+    fn a_panned_reference_is_heard_on_one_side_only() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("tone.wav");
+        let rate = 8000u32;
+        stereo_tone(&path, rate, 0.5, 220.0);
+
+        for (pan, side) in [(-1.0f32, 0usize), (1.0f32, 1usize)] {
+            let source = ResampledSource::open(&path, 0.0, rate, None).expect("open");
+            let samples: Vec<f32> = PannedSource::new(source, pan_handle(pan)).collect();
+            let frames = samples.len() / 2;
+            assert!(frames > 100, "the reference produced nothing to place");
+            let mut loud_peak = 0.0f32;
+            for frame in 0..frames {
+                let quiet = samples[frame * 2 + (1 - side)].abs();
+                let loud = samples[frame * 2 + side].abs();
+                assert!(
+                    quiet < 1e-6,
+                    "the side that should be silent is not: {quiet}"
+                );
+                loud_peak = loud_peak.max(loud);
+            }
+            assert!(
+                loud_peak > 0.1,
+                "the side the reference was panned to is silent"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reference_pan_can_be_moved_while_the_reference_is_playing() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("tone.wav");
+        let rate = 8000u32;
+        stereo_tone(&path, rate, 0.5, 220.0);
+
+        let pan = pan_handle(0.0);
+        let source = ResampledSource::open(&path, 0.0, rate, None).expect("open");
+        let mut panned = PannedSource::new(source, Arc::clone(&pan));
+
+        // In the centre, the reference is heard in both sides.
+        let centred: Vec<f32> = panned.by_ref().take(400).collect();
+        assert!(
+            centred
+                .chunks(2)
+                .all(|frame| (frame[0] - frame[1]).abs() < 1e-6),
+            "the reference was not in the centre to begin with"
+        );
+
+        // The control is moved while the reference is playing.
+        pan.store((-1.0f32).to_bits(), Ordering::Relaxed);
+        let moved: Vec<f32> = panned.by_ref().take(400).collect();
+        let mut loud_peak = 0.0f32;
+        for frame in moved.chunks(2) {
+            assert!(
+                frame[1].abs() < 1e-6,
+                "the side the reference was panned away from is not silent: {}",
+                frame[1]
+            );
+            loud_peak = loud_peak.max(frame[0].abs());
+        }
+        assert!(
+            loud_peak > 0.1,
+            "the reference did not move to the side it was panned to"
+        );
+    }
+
+    #[test]
+    fn a_mono_reference_is_heard_in_both_sides_at_the_centre() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("tone.wav");
+        let rate = 8000u32;
+        tone(&path, rate, 0.5, 220.0);
+
+        let raw = ResampledSource::open(&path, 0.0, rate, None).expect("open");
+        let raw_samples: Vec<f32> = raw.collect();
+        let source = ResampledSource::open(&path, 0.0, rate, None).expect("open");
+        let panned: Vec<f32> = PannedSource::new(source, pan_handle(0.0)).collect();
+
+        assert_eq!(panned.len(), raw_samples.len() * 2);
+        for (index, sample) in raw_samples.iter().enumerate() {
+            assert!(
+                (panned[index * 2] - sample).abs() < 1e-6
+                    && (panned[index * 2 + 1] - sample).abs() < 1e-6,
+                "the mono reference was changed at the centre: {} against {sample}",
+                panned[index * 2]
+            );
+        }
     }
 
     #[test]
@@ -1815,9 +2100,14 @@ mod tests {
                 mut source: Box<dyn Source<Item = f32> + Send>,
                 _volume: f32,
             ) -> Result<(), String> {
-                // Consume exactly 2,000 mono frames (= 0.25 s at 8 kHz), then hold without draining.
+                // Consume exactly 2,000 frames (= 0.25 s at 8 kHz), then hold
+                // without draining. A frame is as many samples as the source has
+                // channels, so the count is the same whatever the source is.
+                let channels = source.channels().get().max(1) as usize;
                 for _ in 0..2_000 {
-                    let _ = source.next();
+                    for _ in 0..channels {
+                        let _ = source.next();
+                    }
                 }
                 *self.held.lock().unwrap() = Some(source);
                 Ok(())

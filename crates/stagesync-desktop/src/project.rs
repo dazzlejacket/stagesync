@@ -138,6 +138,12 @@ pub struct ProjectMixerState {
     pub mode: MonitorMode,
     pub master_gain: f32,
     pub tracks: Vec<MixTrack>,
+    /// The pan position of the reference recording.
+    ///
+    /// It is optional, so a project written before the reference could be panned
+    /// still opens: the reference is then heard in the centre, as it always was.
+    #[serde(default)]
+    pub reference_pan: f32,
 }
 
 impl Default for ProjectMixerState {
@@ -146,6 +152,7 @@ impl Default for ProjectMixerState {
             mode: MonitorMode::Both,
             master_gain: 1.0,
             tracks: Vec::new(),
+            reference_pan: 0.0,
         }
     }
 }
@@ -156,6 +163,7 @@ impl From<&MixerState> for ProjectMixerState {
             mode: mixer.mode,
             master_gain: mixer.master_gain,
             tracks: mixer.tracks.clone(),
+            reference_pan: mixer.reference_pan,
         }
     }
 }
@@ -859,6 +867,44 @@ mod tests {
         fs::remove_file(&tgt_path).unwrap();
         let missing = StageSyncProject::load_from(&proj_path).expect("reload");
         assert_eq!(missing.targets[0].status, MediaStatus::Missing);
+    }
+
+    #[test]
+    fn a_project_written_before_the_reference_could_be_panned_still_opens() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let proj_path = dir.path().join("show.stagesync");
+        let project = StageSyncProject {
+            version: PROJECT_FORMAT_VERSION,
+            saved_at_unix_secs: 1,
+            reference: None,
+            targets: Vec::new(),
+            analysis: ProjectAnalysisOptions::default(),
+            report: None,
+            mixer: ProjectMixerState::default(),
+            timeline: ProjectTimelineState::default(),
+            export: ProjectExportSettings::from(&ExportSettings::default()),
+        };
+        project.save_to(&proj_path).expect("save project");
+
+        // A project written before the reference could be panned has no pan in it.
+        let text = fs::read_to_string(&proj_path).expect("read project");
+        let mut value: serde_json::Value = serde_json::from_str(&text).expect("parse project");
+        value
+            .get_mut("mixer")
+            .and_then(|mixer| mixer.as_object_mut())
+            .expect("the project has a mixer")
+            .remove("reference_pan");
+        fs::write(
+            &proj_path,
+            serde_json::to_vec_pretty(&value).expect("serialise project"),
+        )
+        .expect("write project");
+
+        let loaded = StageSyncProject::load_from(&proj_path).expect("load project");
+        assert_eq!(
+            loaded.project.mixer.reference_pan, 0.0,
+            "the reference of an older project is not in the centre"
+        );
     }
 
     #[test]

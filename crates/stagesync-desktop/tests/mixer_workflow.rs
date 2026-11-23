@@ -15,7 +15,7 @@ use stagesync_core::mixer::MonitorMode;
 use stagesync_core::render::Layout;
 
 use stagesync_desktop::jobs::{export_report, JobFailure};
-use stagesync_desktop::mixer::{MixerState, TrackInfo};
+use stagesync_desktop::mixer::{MixerState, ReferenceInfo, TrackInfo};
 use stagesync_desktop::state::{ExportSettings, TaskProgress};
 
 /// The rate of the synthetic recordings.
@@ -69,13 +69,21 @@ fn infos(count: usize) -> Vec<TrackInfo> {
         .collect()
 }
 
+/// The reference the panel shows.
+fn reference() -> ReferenceInfo {
+    ReferenceInfo {
+        name: Some("reference.wav".to_string()),
+        channels: 1,
+    }
+}
+
 #[test]
 fn the_mixer_panel_shows_a_row_for_every_recording() {
     let state = std::cell::RefCell::new(MixerState::new(2));
     let tracks = infos(2);
     let mut harness = egui_kittest::Harness::new_ui(|ui| {
         let mut state = state.borrow_mut();
-        stagesync_desktop::mixer::panel(ui, &mut state, &tracks);
+        stagesync_desktop::mixer::panel(ui, &mut state, &tracks, Some(&reference()));
     });
     harness.run();
 
@@ -95,7 +103,7 @@ fn the_mute_button_mutes_the_recording() {
     let tracks = infos(1);
     let mut harness = egui_kittest::Harness::new_ui(|ui| {
         let mut state = state.borrow_mut();
-        stagesync_desktop::mixer::panel(ui, &mut state, &tracks);
+        stagesync_desktop::mixer::panel(ui, &mut state, &tracks, Some(&reference()));
     });
     harness.run();
 
@@ -122,7 +130,7 @@ fn the_solo_button_solos_the_recording() {
     let tracks = infos(2);
     let mut harness = egui_kittest::Harness::new_ui(|ui| {
         let mut state = state.borrow_mut();
-        stagesync_desktop::mixer::panel(ui, &mut state, &tracks);
+        stagesync_desktop::mixer::panel(ui, &mut state, &tracks, Some(&reference()));
     });
     harness.run();
 
@@ -151,7 +159,7 @@ fn the_monitoring_mode_can_be_chosen() {
     let tracks = infos(2);
     let mut harness = egui_kittest::Harness::new_ui(|ui| {
         let mut state = state.borrow_mut();
-        stagesync_desktop::mixer::panel(ui, &mut state, &tracks);
+        stagesync_desktop::mixer::panel(ui, &mut state, &tracks, Some(&reference()));
     });
     harness.run();
 
@@ -187,7 +195,7 @@ fn the_mixer_panel_shows_the_predicted_level() {
     let tracks = infos(1);
     let mut harness = egui_kittest::Harness::new_ui(|ui| {
         let mut state = state.borrow_mut();
-        stagesync_desktop::mixer::panel(ui, &mut state, &tracks);
+        stagesync_desktop::mixer::panel(ui, &mut state, &tracks, Some(&reference()));
     });
     harness.run();
 
@@ -197,6 +205,45 @@ fn the_mixer_panel_shows_the_predicted_level() {
             .query_by_label_contains("Predicted output")
             .is_some(),
         "the panel did not show the predicted output level"
+    );
+}
+
+#[test]
+fn the_reference_has_a_pan_of_its_own() {
+    let state = std::cell::RefCell::new(MixerState::new(1));
+    let tracks = infos(1);
+    let mut harness = egui_kittest::Harness::new_ui(|ui| {
+        let mut state = state.borrow_mut();
+        stagesync_desktop::mixer::panel(ui, &mut state, &tracks, Some(&reference()));
+    });
+    harness.run();
+
+    // The reference is on the panel, with a pan of its own. It is not a track of
+    // the mix, so it has no fader and no mute button.
+    assert!(
+        harness.query_by_label("Reference").is_some(),
+        "the reference is not on the panel"
+    );
+    assert!(
+        harness.query_by_label("reference.wav").is_some(),
+        "the reference recording is not named on the panel"
+    );
+    assert_eq!(
+        state.borrow().reference_pan,
+        0.0,
+        "the reference does not start in the centre"
+    );
+
+    // Moving the pan moves the reference. The slider is picked by its role as
+    // well as its label, because the number beside it carries the same label.
+    harness
+        .get_by_role_and_label(eframe::egui::Role::Slider, "Reference pan")
+        .set_value_accesskit(-0.75);
+    harness.run();
+    assert!(
+        (state.borrow().reference_pan + 0.75).abs() < 1e-6,
+        "the reference pan was moved to {}",
+        state.borrow().reference_pan
     );
 }
 

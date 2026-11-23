@@ -75,6 +75,13 @@ commit of the initial working version.
 
 ### Added
 
+- **The reference recording can be placed in the stereo field.** The mixer now gives the
+  reference a row of its own with a pan on it, so every recording that can be heard — the
+  reference and the recordings that were aligned to it — can be moved left or right. The
+  reference is still never a track of the mix and the exported mix is unchanged: the pan
+  places the reference while it is monitored, and in the centre it is heard exactly as it
+  was recorded. The pan is kept in the project file, and a project written before the
+  reference could be panned still opens.
 - **A real multi-track mixer (M21).** Several recordings are now played and written at
   once, each placed on the reference timeline with the drift correction the analysis
   measured. There is a fader, a trim, a mute, a solo and a pan for every recording, a

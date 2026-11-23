@@ -17,6 +17,16 @@ const APP_DIR: &str = "StageSync";
 /// so that a test never touches the settings of whoever is running it.
 pub const CONFIG_DIR_ENV: &str = "STAGESYNC_CONFIG_DIR";
 
+/// The lock that keeps the tests that read the configuration directory apart.
+///
+/// The environment variable that says where the settings live is process-wide,
+/// so a test that points it somewhere else and a test that reads the directory
+/// have to take turns. Without this, a directory read before another test
+/// changed the variable and a settings file read after it do not belong to the
+/// same place, and the test fails for a reason that has nothing to do with it.
+#[cfg(test)]
+pub(crate) static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The longest file name the application will produce.
 ///
 /// Windows' own limit is 255 characters for the whole path, so a shorter cap leaves
@@ -344,6 +354,12 @@ mod tests {
 
     #[test]
     fn the_configuration_directory_is_an_absolute_stage_sync_folder() {
+        // The directory is read from a process-wide environment variable, so the
+        // lock that guards it is held for the whole test: another test may be
+        // pointing it somewhere else.
+        let _lock = SETTINGS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = config_dir();
         assert!(dir.is_absolute(), "{} is not absolute", dir.display());
         assert_eq!(
