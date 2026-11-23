@@ -64,4 +64,4 @@ StageSync modifies no file of any `symphonia` crate. There is therefore no modif
 
 ## StageSync's own source
 
-StageSync is licensed under `MIT OR Apache-2.0`; its licence texts (`LICENSE-MIT`, `LICENSE-APACHE`) are in this bundle. The repository StageSync declares in its workspace manifest is <https://github.com/stagesync/stagesync>. StageSync's own source is not required to be published by any licence: the only source-availability obligation in this distribution is the MPL-2.0 one described above.
+StageSync is licensed under `MIT OR Apache-2.0`; its licence texts (`LICENSE-MIT`, `LICENSE-APACHE`) are in this bundle. The repository StageSync declares in its workspace manifest is <https://github.com/dazzlejacket/stagesync>. StageSync's own source is not required to be published by any licence: the only source-availability obligation in this distribution is the MPL-2.0 one described above.

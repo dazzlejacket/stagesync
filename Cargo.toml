@@ -16,7 +16,7 @@ edition = "2021"
 # with the real reason.
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/stagesync/stagesync"
+repository = "https://github.com/dazzlejacket/stagesync"
 authors = ["StageSync contributors"]
 
 [workspace.dependencies]

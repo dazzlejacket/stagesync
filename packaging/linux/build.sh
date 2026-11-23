@@ -462,7 +462,7 @@ cp -R "${notices_dir}" "${deb_root}/usr/share/doc/stagesync/notices"
 {
   echo "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
   echo "Upstream-Name: StageSync"
-  echo "Source: https://github.com/stagesync/stagesync"
+  echo "Source: https://github.com/dazzlejacket/stagesync"
   echo ""
   echo "Files: *"
   echo "Copyright: 2026 The StageSync contributors"

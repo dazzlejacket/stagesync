@@ -10,8 +10,8 @@ The inputs this file was generated from:
 
 | Input | SHA-256 |
 |---|---|
-| `Cargo.lock` | `d34a15a8df06f010b82c5ef450a49b0a9fe4fa9452d7a10aa6e7eb6ae83beabd` |
-| `packaging/notices/licenses.json` | `2449e24b76d23af129d8295845780ed8e50111162462c80c1f2fa86de7808710` |
+| `Cargo.lock` | `9d0fde41beffaab9d6b93350eb8fd2718066d241689be4d23194c7b79f50be79` |
+| `packaging/notices/licenses.json` | `965fda1ecc95ecb6209cb22e37d49cdc22e20d3bf93244f80b0fecdf67aa8e2f` |
 
 ## What this file is
 
@@ -578,4 +578,4 @@ StageSync does not modify any `symphonia` file, so there are no modified files t
 * A licence identifier says what a package *declares*. This file makes no claim that the upstream code complies with the licence it declares; auditing every upstream codebase is not something this project does, and licence scanners read the same manifests.
 * The fonts embedded through `epaint_default_fonts` are covered by their own licence terms (`OFL-1.1` and `Ubuntu-font-1.0`), which are listed in the table above. StageSync does not sell the fonts separately.
 
-The repository StageSync declares in its workspace manifest is <https://github.com/stagesync/stagesync>. StageSync's own licence texts (`LICENSE-MIT` and `LICENSE-APACHE`) are in this bundle. No third-party licence in the table above requires StageSync's own source to be published: the only source-availability obligation here is the MPL-2.0 one, and it is described in `SOURCE-AVAILABILITY.md`.
+The repository StageSync declares in its workspace manifest is <https://github.com/dazzlejacket/stagesync>. StageSync's own licence texts (`LICENSE-MIT` and `LICENSE-APACHE`) are in this bundle. No third-party licence in the table above requires StageSync's own source to be published: the only source-availability obligation here is the MPL-2.0 one, and it is described in `SOURCE-AVAILABILITY.md`.
